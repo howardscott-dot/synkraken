@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local data and logs
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local config
+config.local.json
+
+# Local runtime state
+*.pid
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,16 @@
+[Unit]
+Description=agent-fabric
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-fabric
+ExecStart=/usr/bin/python3 -m agent_fabric --config /etc/agent-fabric/config.json
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

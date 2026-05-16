@@ -1,0 +1,40 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9460
+  },
+  "storage": {
+    "sqlite_path": "./data/agent_fabric.db"
+  },
+  "routing": {
+    "max_hops": 4,
+    "default_timeout_seconds": 90,
+    "retry_limit": 1,
+    "retry_backoff_seconds": 1
+  },
+  "adapters": {
+    "goose": {
+      "type": "goose",
+      "enabled": true,
+      "command": ["goose"],
+      "timeout_seconds": 90,
+      "system": "You are replying through agent-fabric. Keep replies concise and structured."
+    },
+    "hermes": {
+      "type": "hermes",
+      "enabled": true,
+      "command": ["hermes"],
+      "timeout_seconds": 120,
+      "system_prefix": "You are replying through agent-fabric. Keep replies concise and structured."
+    },
+    "openclaw-main": {
+      "type": "openclaw",
+      "enabled": true,
+      "command": ["openclaw"],
+      "timeout_seconds": 120,
+      "agent_id": "main",
+      "experimental": true,
+      "message_prefix": "You are receiving this via agent-fabric. Reply directly and concisely."
+    }
+  }
+}

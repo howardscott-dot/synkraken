@@ -1,0 +1,38 @@
+{
+  "note": "Example showing explicit local command paths for machines that do not have goose, hermes, or openclaw in PATH.",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9460
+  },
+  "storage": {
+    "sqlite_path": "./data/agent_fabric.db"
+  },
+  "routing": {
+    "max_hops": 4,
+    "default_timeout_seconds": 90,
+    "retry_limit": 1,
+    "retry_backoff_seconds": 1
+  },
+  "adapters": {
+    "goose": {
+      "type": "goose",
+      "enabled": true,
+      "command": ["/absolute/path/to/goose"],
+      "timeout_seconds": 90
+    },
+    "hermes": {
+      "type": "hermes",
+      "enabled": true,
+      "command": ["/absolute/path/to/hermes"],
+      "timeout_seconds": 120
+    },
+    "openclaw-main": {
+      "type": "openclaw",
+      "enabled": true,
+      "command": ["/absolute/path/to/openclaw"],
+      "timeout_seconds": 120,
+      "agent_id": "main",
+      "experimental": true
+    }
+  }
+}

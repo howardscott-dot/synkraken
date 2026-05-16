@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-fabric"
+version = "0.1.0"
+description = "Local inter-agent fabric and operator console for heterogeneous AI runtimes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Howard Scott" }
+]
+dependencies = []
+
+[project.scripts]
+synkraken = "agent_fabric.cli_main:main"
+agent-fabric = "agent_fabric.__main__:main"
+agent-fabric-send = "agent_fabric.cli_send:main"
+agent-fabric-cli = "agent_fabric.cli_main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_fabric*"]
