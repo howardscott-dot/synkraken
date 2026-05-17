@@ -3,26 +3,63 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-fabric"
+name = "synkraken"
 version = "0.1.0"
-description = "Local inter-agent fabric and operator console for heterogeneous AI runtimes"
+description = "A local bridge daemon and TUI that lets heterogeneous AI runtimes (Claude Code, Goose, Hermes, OpenClaw…) talk to each other in directed messages, broadcasts, and persistent multi-agent chat rooms."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Howard Scott" }
 ]
+keywords = [
+  "ai",
+  "agents",
+  "multi-agent",
+  "tui",
+  "claude",
+  "goose",
+  "hermes",
+  "openclaw",
+  "bridge",
+  "orchestration",
+  "inter-agent-communication",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console :: Curses",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Chat",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: System :: Distributed Computing",
+]
 dependencies = []
 
+[project.urls]
+Homepage      = "https://github.com/howardscott-dot/synkraken"
+Repository    = "https://github.com/howardscott-dot/synkraken"
+Issues        = "https://github.com/howardscott-dot/synkraken/issues"
+Changelog     = "https://github.com/howardscott-dot/synkraken/blob/main/CHANGELOG.md"
+
 [project.scripts]
-synkraken = "agent_fabric.cli_main:main"
-agent-fabric = "agent_fabric.__main__:main"
-agent-fabric-send = "agent_fabric.cli_send:main"
-agent-fabric-cli = "agent_fabric.cli_main:main"
+synkraken         = "synkraken.cli_main:main"
+synkraken-daemon  = "synkraken.__main__:main"
+synkraken-send    = "synkraken.cli_send:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["agent_fabric*"]
+where   = ["."]
+include = ["synkraken*"]
+
+[tool.setuptools.package-data]
+synkraken = ["py.typed"]

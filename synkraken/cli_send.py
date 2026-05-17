@@ -11,14 +11,14 @@ DEFAULT_BASE = "http://127.0.0.1:9460"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Send messages through agent-fabric")
+    parser = argparse.ArgumentParser(description="Send messages through synkraken")
     parser.add_argument("target", help="Target adapter id or 'broadcast'")
     parser.add_argument("message", nargs="?", help="Message body. If omitted, stdin is used.")
     parser.add_argument("--source", default="operator", help="Logical source label")
     parser.add_argument("--subject", default=None, help="Optional subject")
     parser.add_argument("--priority", default="normal", help="Priority label")
     parser.add_argument("--conversation-id", default=None, help="Optional conversation id")
-    parser.add_argument("--url", default=os.environ.get("AGENT_FABRIC_URL", DEFAULT_BASE), help="Base URL for agent-fabric")
+    parser.add_argument("--url", default=os.environ.get("SYNKRAKEN_URL", DEFAULT_BASE), help="Base URL for synkraken")
     parser.add_argument("--raw", action="store_true", help="Print raw JSON response")
     parser.add_argument("--health", action="store_true", help="Check bridge health and exit")
     parser.add_argument("--agents", action="store_true", help="List bridge adapters and exit")

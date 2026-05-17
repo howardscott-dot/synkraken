@@ -49,9 +49,25 @@ CREATE TABLE IF NOT EXISTS dead_letters (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rooms (
+    name TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS room_members (
+    room_name TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    joined_at TEXT NOT NULL,
+    PRIMARY KEY (room_name, adapter_id),
+    FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target);
 CREATE INDEX IF NOT EXISTS idx_deliveries_message_id ON deliveries(message_id);
 CREATE INDEX IF NOT EXISTS idx_dead_letters_message_id ON dead_letters(message_id);
+CREATE INDEX IF NOT EXISTS idx_room_members_room_name ON room_members(room_name);
 """
 
 
@@ -198,3 +214,103 @@ class Storage:
                 (limit,),
             ).fetchall()
         return {"dead_letters": [dict(row) for row in rows]}
+
+    # ── rooms ──────────────────────────────────────────────────────────────
+
+    def create_room(self, name: str, description: str, created_at: str,
+                    members: list[str] | None = None) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO rooms (name, description, created_at) VALUES (?, ?, ?)",
+                (name, description or '', created_at),
+            )
+            for adapter_id in (members or []):
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO room_members (room_name, adapter_id, joined_at) VALUES (?, ?, ?)",
+                    (name, adapter_id, created_at),
+                )
+
+    def delete_room(self, name: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM room_members WHERE room_name = ?", (name,))
+            self._conn.execute("DELETE FROM rooms WHERE name = ?", (name,))
+
+    def room_exists(self, name: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM rooms WHERE name = ?", (name,)
+            ).fetchone()
+        return row is not None
+
+    def add_room_member(self, name: str, adapter_id: str, joined_at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO room_members (room_name, adapter_id, joined_at) VALUES (?, ?, ?)",
+                (name, adapter_id, joined_at),
+            )
+
+    def remove_room_member(self, name: str, adapter_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM room_members WHERE room_name = ? AND adapter_id = ?",
+                (name, adapter_id),
+            )
+
+    def get_room_members(self, name: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT adapter_id FROM room_members WHERE room_name = ? ORDER BY joined_at ASC",
+                (name,),
+            ).fetchall()
+        return [row["adapter_id"] for row in rows]
+
+    def get_room(self, name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT name, description, created_at FROM rooms WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if not row:
+                return None
+            members = self._conn.execute(
+                "SELECT adapter_id, joined_at FROM room_members WHERE room_name = ? ORDER BY joined_at ASC",
+                (name,),
+            ).fetchall()
+        return {
+            "name": row["name"],
+            "description": row["description"],
+            "created_at": row["created_at"],
+            "members": [dict(m) for m in members],
+        }
+
+    def list_rooms(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT r.name, r.description, r.created_at,
+                       (SELECT COUNT(*) FROM room_members rm WHERE rm.room_name = r.name) AS member_count,
+                       (SELECT MAX(timestamp) FROM messages WHERE target = 'room:' || r.name) AS last_activity
+                FROM rooms r
+                ORDER BY COALESCE(
+                    (SELECT MAX(timestamp) FROM messages WHERE target = 'room:' || r.name),
+                    r.created_at
+                ) DESC
+                """,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_room_messages(self, name: str, limit: int = 50) -> list[dict]:
+        target = f"room:{name}"
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT message_id, conversation_id, source, target, timestamp,
+                       message_type, subject, priority, reply_to, hop_count, body
+                FROM messages
+                WHERE target = ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                (target, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]

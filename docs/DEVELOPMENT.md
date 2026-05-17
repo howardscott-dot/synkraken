@@ -4,12 +4,12 @@
 
 ### Run the daemon
 ```bash
-python3 -m agent_fabric --config ./config.local.json
+python3 -m synkraken --config ./config.local.json
 ```
 
 Or use the installed wrapper:
 ```bash
-agent-fabric --config ./config.local.json
+synkraken-daemon --config ./config.local.json
 ```
 
 ### Operator CLI

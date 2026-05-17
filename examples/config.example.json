@@ -4,7 +4,7 @@
     "port": 9460
   },
   "storage": {
-    "sqlite_path": "./data/agent_fabric.db"
+    "sqlite_path": "./data/synkraken.db"
   },
   "routing": {
     "max_hops": 4,
@@ -18,14 +18,14 @@
       "enabled": true,
       "command": ["goose"],
       "timeout_seconds": 90,
-      "system": "You are replying through agent-fabric. Keep replies concise and structured."
+      "system": "You are replying through synkraken. Keep replies concise and structured."
     },
     "hermes": {
       "type": "hermes",
       "enabled": true,
       "command": ["hermes"],
       "timeout_seconds": 120,
-      "system_prefix": "You are replying through agent-fabric. Keep replies concise and structured."
+      "system_prefix": "You are replying through synkraken. Keep replies concise and structured."
     },
     "openclaw-main": {
       "type": "openclaw",
@@ -34,7 +34,18 @@
       "timeout_seconds": 120,
       "agent_id": "main",
       "experimental": true,
-      "message_prefix": "You are receiving this via agent-fabric. Reply directly and concisely."
+      "message_prefix": "You are receiving this via synkraken. Reply directly and concisely."
+    },
+    "claude": {
+      "type": "claude",
+      "enabled": true,
+      "command": ["claude"],
+      "timeout_seconds": 120,
+      "_comment_bare": "Set bare:true only if ANTHROPIC_API_KEY is set in the daemon env. Bare mode disables OAuth and keychain reads.",
+      "bare": false,
+      "permission_mode": "bypassPermissions",
+      "output_format": "text",
+      "message_prefix": "Keep replies focused and structured."
     }
   }
 }

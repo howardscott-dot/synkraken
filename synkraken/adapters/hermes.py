@@ -13,7 +13,7 @@ class HermesAdapter(BaseAdapter):
         explicit = self.config.get("runtime_name")
         if explicit:
             return explicit
-        soul_path = self.config.get("identity_file") or "/home/howard/.hermes/SOUL.md"
+        soul_path = self.config.get("identity_file") or str(Path.home() / ".hermes" / "SOUL.md")
         try:
             text = Path(soul_path).read_text(encoding="utf-8")
             match = re.search(r"Your name is\s+([A-Za-z0-9_-]+)", text)

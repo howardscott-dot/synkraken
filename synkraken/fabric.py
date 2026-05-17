@@ -90,7 +90,8 @@ class AgentFabric:
             'target': message.target,
             'priority': message.priority,
         })
-        targets = resolve_targets(message.source, message.target, self.adapters.keys())
+        targets = resolve_targets(message.source, message.target, self.adapters.keys(), self.storage)
+        is_room_target = message.target.startswith("room:")
         deliveries: list[dict[str, Any]] = []
         dead_letters: list[dict[str, Any]] = []
         for target_id in targets:
@@ -128,6 +129,25 @@ class AgentFabric:
                 }
                 deliveries.append(delivery_payload)
                 self.event_bus.publish('delivery.recorded', delivery_payload)
+                # If this was a room delivery and the reply is good, post the
+                # reply back into the room transcript so /open <room> shows it.
+                if reply.ok and is_room_target and (reply.body or '').strip():
+                    transcript_msg = FabricMessage(
+                        source=target_id,
+                        target=message.target,
+                        body=reply.body or '',
+                        conversation_id=message.conversation_id,
+                        reply_to=message.message_id,
+                        hop_count=message.hop_count + 1,
+                    ).normalized()
+                    self.storage.save_message(transcript_msg)
+                    self.event_bus.publish('message.accepted', {
+                        'message_id': transcript_msg.message_id,
+                        'conversation_id': transcript_msg.conversation_id,
+                        'source': transcript_msg.source,
+                        'target': transcript_msg.target,
+                        'priority': transcript_msg.priority,
+                    })
                 if reply.ok:
                     break
                 if attempt <= self.retry_limit:

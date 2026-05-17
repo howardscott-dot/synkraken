@@ -39,7 +39,7 @@ def _validate_server(raw: dict) -> None:
 
 def _validate_storage(raw: dict) -> None:
     storage = raw.setdefault("storage", {})
-    sqlite_path = storage.setdefault("sqlite_path", "./data/agent_fabric.db")
+    sqlite_path = storage.setdefault("sqlite_path", "./data/synkraken.db")
     if not isinstance(sqlite_path, str) or not sqlite_path:
         raise ValueError("storage.sqlite_path must be a non-empty string")
 

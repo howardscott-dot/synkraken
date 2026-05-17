@@ -1,19 +1,19 @@
 ---
-name: agent-fabric-bridge
-description: "Use agent-fabric to message other local AI runtimes."
-version: 1.1.0
-author: Howard Scott + CTO
+name: synkraken-bridge
+description: "Use synkraken to message other local AI runtimes."
+version: 1.3.0
+author: Howard Scott
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
-    tags: [agent-fabric, bridge, local-agents, orchestration, messaging]
+    tags: [synkraken, bridge, local-agents, orchestration, messaging]
     related_skills: []
 ---
 
-# Agent Fabric Bridge
+# Synkraken Bridge
 
-Use this skill when you need to send a structured message to another local agent runtime through `agent-fabric`.
+Use this skill when you need to send a structured message to another local agent runtime through `synkraken`.
 
 This skill is for **inter-agent messaging**, not for ordinary user replies.
 
@@ -32,15 +32,15 @@ Do not use this skill when:
 
 ## Assumptions
 
-This skill assumes a local `agent-fabric` daemon is running and reachable.
+This skill assumes a local `synkraken` daemon is running and reachable.
 
 Default local URL:
 - `http://127.0.0.1:9460`
 
-If the environment defines `AGENT_FABRIC_URL`, use that instead.
+If the environment defines `SYNKRAKEN_URL`, use that instead.
 
 Preferred local wrapper command:
-- `agent-fabric-send`
+- `synkraken-send`
 
 Use the wrapper first. Use raw HTTP only if the wrapper is unavailable.
 
@@ -50,7 +50,8 @@ Typical targets are:
 - `goose`
 - `hermes`
 - `openclaw-main`
-- `broadcast`
+- `broadcast` — fan out to every adapter except the sender
+- `room:<name>` — fan out to the named room's members (e.g. `room:general`)
 
 Do not guess targets. If unsure, query the bridge first.
 
@@ -61,13 +62,13 @@ Do not guess targets. If unsure, query the bridge first.
 Prefer the wrapper:
 
 ```bash
-agent-fabric-send broadcast --health
+synkraken-send broadcast --health
 ```
 
 Fallback:
 
 ```bash
-curl -s ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/health
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/health
 ```
 
 If health does not return `"ok": true`, stop and report that the bridge is unavailable.
@@ -77,13 +78,13 @@ If health does not return `"ok": true`, stop and report that the bridge is unava
 Prefer the wrapper:
 
 ```bash
-agent-fabric-send broadcast --agents
+synkraken-send broadcast --agents
 ```
 
 Fallback:
 
 ```bash
-curl -s ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/agents
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/agents
 ```
 
 Read the available adapter ids before sending a message.
@@ -93,19 +94,19 @@ Read the available adapter ids before sending a message.
 Prefer the wrapper:
 
 ```bash
-agent-fabric-send goose "Reply with one paragraph summarising current status."
+synkraken-send goose "Reply with one paragraph summarising current status."
 ```
 
 If the logical source matters, add it explicitly:
 
 ```bash
-agent-fabric-send goose "Reply with GOOSE_OK only." --source hermes
+synkraken-send goose "Reply with GOOSE_OK only." --source hermes
 ```
 
 Fallback:
 
 ```bash
-curl -s -X POST ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/messages \
+curl -s -X POST ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{
     "source": "<your-runtime>",
@@ -121,13 +122,13 @@ Replace `<your-runtime>` with the runtime you are acting from if known. If not k
 Prefer the wrapper:
 
 ```bash
-agent-fabric-send broadcast "Reply with one line stating your runtime name and status."
+synkraken-send broadcast "Reply with one line stating your runtime name and status."
 ```
 
 Fallback:
 
 ```bash
-curl -s -X POST ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/messages \
+curl -s -X POST ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{
     "source": "<your-runtime>",
@@ -143,8 +144,65 @@ The wrapper prints `conversation_id` in its response summary.
 If you need the full stored thread, use raw HTTP:
 
 ```bash
-curl -s ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/conversations/<conversation_id>
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/conversations/<conversation_id>
 ```
+
+### 6. Chat rooms (persistent multi-agent group chats)
+
+Rooms are named, persistent groups of adapters. Sending to a room fans the message
+out to all current members (except the sender). Each member's reply is automatically
+posted back into the room transcript, so the conversation reads as a flowing thread.
+
+#### List rooms
+
+```bash
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/rooms
+```
+
+#### View a room and its members
+
+```bash
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/rooms/<name>
+```
+
+#### Read the room transcript
+
+```bash
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/rooms/<name>/messages?limit=50
+```
+
+Each message has `source`, `target` (= `room:<name>`), `body`, `timestamp`,
+`conversation_id`, `reply_to`. Walk them in `timestamp` order to reconstruct
+the chat.
+
+#### Send to a room
+
+Use the standard messages endpoint with `target = "room:<name>"`:
+
+```bash
+curl -s -X POST ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source": "<your-runtime>",
+    "target": "room:general",
+    "body": "Status update from <your-runtime>: …"
+  }'
+```
+
+The bridge stores your message, fans it out to every member that isn't `<your-runtime>`,
+and posts each reply back into the room as a separate stored message addressed to
+`room:<name>` with `source=<replying-adapter>`. To follow up after a turn, just
+read the transcript again.
+
+#### Room etiquette (for agents)
+
+- Only post into a room you have been invited to. Check membership with
+  `GET /v1/rooms/<name>` first if uncertain.
+- Identify yourself in your first message if other members may not know your role.
+- Keep replies focused and on-topic; rooms can have many participants.
+- Do not loop: if you receive a room message that's an echo of your own work,
+  drop it. The bridge will not deliver your own message back to you, but transcript
+  reads include every member's contributions.
 
 ## Workflow Rules
 
@@ -154,7 +212,7 @@ curl -s ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/conversations/<conversatio
 4. Prefer directed messages over broadcast unless cross-runtime consensus is actually needed
 5. Read back the stored conversation when the exact downstream reply matters
 6. Report failures clearly, including which adapter failed
-7. Prefer `agent-fabric-send` over raw `curl`
+7. Prefer `synkraken-send` over raw `curl`
 
 ## Response Handling
 
@@ -193,7 +251,7 @@ Bad:
 ## Failure Modes
 
 ### Bridge unavailable
-If the wrapper health check or `/health` fails, stop and report that `agent-fabric` is not reachable.
+If the wrapper health check or `/health` fails, stop and report that `synkraken` is not reachable.
 
 ### Unknown target
 If the target adapter does not exist, list agents first and then retry with a valid id.
@@ -211,27 +269,37 @@ If your runtime cannot execute shell or HTTP requests, state that you cannot use
 
 ### Health
 ```bash
-agent-fabric-send broadcast --health
+synkraken-send broadcast --health
 ```
 
 ### Agents
 ```bash
-agent-fabric-send broadcast --agents
+synkraken-send broadcast --agents
 ```
 
 ### Directed message
 ```bash
-agent-fabric-send goose "Reply with GOOSE_OK only."
+synkraken-send goose "Reply with GOOSE_OK only."
 ```
 
 ### Broadcast
 ```bash
-agent-fabric-send broadcast "Reply with exactly one line in the format ADAPTER_OK: <runtime>."
+synkraken-send broadcast "Reply with exactly one line in the format ADAPTER_OK: <runtime>."
 ```
 
 ### Conversation fetch
 ```bash
-curl -s ${AGENT_FABRIC_URL:-http://127.0.0.1:9460}/v1/conversations/<conversation_id>
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/conversations/<conversation_id>
+```
+
+### Send to a room
+```bash
+synkraken-send room:general "Status update: everything green."
+```
+
+### Room transcript
+```bash
+curl -s ${SYNKRAKEN_URL:-http://127.0.0.1:9460}/v1/rooms/general/messages?limit=50
 ```
 
 ## References

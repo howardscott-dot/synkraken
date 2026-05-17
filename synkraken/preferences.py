@@ -9,6 +9,7 @@ DEFAULT_PREFS = {
     'event_filter': 'all',
     'refresh_seconds': 3,
     'last_target': 'hermes',
+    'current_room': None,
 }
 
 

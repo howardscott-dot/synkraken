@@ -22,7 +22,7 @@ class OpenClawAdapter(BaseAdapter):
         if explicit:
             return explicit
         agent_id = str(self.config.get("agent_id", "main"))
-        config_path = self.config.get("config_path") or "/home/howard/.openclaw/openclaw.json"
+        config_path = self.config.get("config_path") or str(Path.home() / ".openclaw" / "openclaw.json")
         try:
             raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
             agents = raw.get("agents", {}).get("list", [])
@@ -100,7 +100,7 @@ class OpenClawAdapter(BaseAdapter):
         agent_id = str(self.config.get("agent_id", "main"))
         prefix = self.config.get("message_prefix")
         runtime_name = self.runtime_name()
-        dynamic_prefix = f"You are {runtime_name}. You are receiving this via agent-fabric. Reply as {runtime_name}, not as the sender, and keep replies direct and concise."
+        dynamic_prefix = f"You are {runtime_name}. You are receiving this via synkraken. Reply as {runtime_name}, not as the sender, and keep replies direct and concise."
         if prefix:
             dynamic_prefix = f"{dynamic_prefix} {prefix}"
         body = f"{dynamic_prefix}\n\n{message.body}"

@@ -1,9 +1,11 @@
 from .base import BaseAdapter
+from .claude import ClaudeAdapter
 from .goose import GooseAdapter
 from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 
 ADAPTER_TYPES = {
+    "claude": ClaudeAdapter,
     "goose": GooseAdapter,
     "hermes": HermesAdapter,
     "openclaw": OpenClawAdapter,

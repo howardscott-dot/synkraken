@@ -7,11 +7,11 @@ import sys
 import urllib.error
 import urllib.request
 
-from .branding import LOGO, NAME, TAGLINE
-from .setup_mode import run_setup
+from .branding import NAME, TAGLINE, print_logo
+from .setup_mode import run_setup, run_uninstall
 from .tui import run_tui
 
-DEFAULT_BASE = os.environ.get("AGENT_FABRIC_URL", "http://127.0.0.1:9460")
+DEFAULT_BASE = os.environ.get("SYNKRAKEN_URL", "http://127.0.0.1:9460")
 
 
 def get_json(url: str) -> dict:
@@ -142,14 +142,14 @@ def print_result(data: dict, raw: bool) -> None:
 
 
 def add_base_url_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--url", default=DEFAULT_BASE, help="Base URL for agent-fabric")
+    parser.add_argument("--url", default=DEFAULT_BASE, help="Base URL for synkraken")
     parser.add_argument("--json", action="store_true", help="Print raw JSON output")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="synkraken",
-        description="SYNKRAKEN is a local operator console for the agent-fabric bridge.",
+        description="SYNKRAKEN is a local operator console for the synkraken bridge.",
         epilog=(
             "Examples:\n"
             "  synkraken tui\n"
@@ -196,20 +196,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_tui = sub.add_parser("tui", help="Launch the interactive TUI")
     p_tui.add_argument('--banner-only', action='store_true', help='Print banner and exit')
 
-    sub.add_parser("config", help="Run interactive setup mode")
+    sub.add_parser("config",    help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
+    sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
     return parser
 
 
 def _print_no_command() -> None:
     print("SYNKRAKEN needs a command.\n")
-    print("Start here:")
-    print("  synkraken tui")
-    print("  synkraken health")
-    print("  synkraken agents")
-    print("  synkraken send hermes \"Reply with exactly: HELLO\"")
-    print("  synkraken config\n")
-    print("For full help:")
+    print("First-time setup:")
+    print("  synkraken config            # walks you through it\n")
+    print("Day-to-day:")
+    print("  synkraken tui               # open the TUI dashboard")
+    print("  synkraken health            # is the daemon ok?")
+    print("  synkraken agents            # which adapters are configured?")
+    print("  synkraken send hermes 'hi'  # message a single agent\n")
+    print("Tear-down:")
+    print("  synkraken uninstall         # remove bridge skills + clean up\n")
+    print("Full help:")
     print("  synkraken --help")
 
 
@@ -222,18 +226,15 @@ def main() -> None:
     if not getattr(args, 'command', None):
         _print_no_command()
         raise SystemExit(1)
-    if args.command in ("tui", "config"):
-        if args.command == 'config':
-            print(LOGO)
-            print(NAME)
-            print(TAGLINE)
-            print()
-            run_setup()
-            return
+    if args.command == 'config':
+        run_setup()
+        return
+    if args.command == 'uninstall':
+        run_uninstall()
+        return
+    if args.command == 'tui':
         if args.banner_only:
-            print(LOGO)
-            print(NAME)
-            print(TAGLINE)
+            print_logo()
             print()
             return
         run_tui()

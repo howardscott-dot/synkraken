@@ -5,7 +5,7 @@
     "port": 9460
   },
   "storage": {
-    "sqlite_path": "./data/agent_fabric.db"
+    "sqlite_path": "./data/synkraken.db"
   },
   "routing": {
     "max_hops": 4,

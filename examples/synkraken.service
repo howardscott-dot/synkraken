@@ -1,12 +1,12 @@
 [Unit]
-Description=agent-fabric
+Description=synkraken
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/agent-fabric
-ExecStart=/usr/bin/python3 -m agent_fabric --config /etc/agent-fabric/config.json
+WorkingDirectory=/opt/synkraken
+ExecStart=/usr/bin/python3 -m synkraken --config /etc/synkraken/config.json
 Restart=always
 RestartSec=5
 StandardOutput=journal
