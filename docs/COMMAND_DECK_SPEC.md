@@ -1,0 +1,240 @@
+# Command Deck Spec
+
+## Purpose
+
+The Command Deck is the Web GUI surface for SynKraken. It complements the TUI;
+it does not replace it.
+
+## v0.1 goals
+
+Provide a browser-based local operator surface that:
+
+- runs on `127.0.0.1:9461`
+- reuses the existing daemon APIs
+- shows rooms
+- shows agent presence
+- shows live room messages
+- shows active per-agent delivery activity inline with messages
+- supports sending to a room
+- supports broadcasting to all agents
+- supports bounded Discussion Mode commands in the composer
+- exposes editable Room Memory for the selected room
+- supports explicit Team Task Mode for the selected room
+- shows recent Team Runs with owner, reviewer, status, and approval controls
+
+## v0.2 goals
+
+Extend the initial command deck without changing the backend ownership model:
+
+- create rooms with selected agent members
+- send direct messages to individual agents
+- surface live typing state from daemon events
+- make current target selection explicit
+- add Tasks v0.1 as the first durable work object beyond chat
+
+## User model
+
+The human operator is in control. The default interaction is:
+
+1. choose a room
+2. inspect recent transcript and live updates
+3. send a message to that room or broadcast to all agents
+
+## Information architecture
+
+### Left rail: rooms
+
+- list known rooms
+- show member counts
+- select a room to load its transcript
+- create a room with selected members
+- show and edit selected-room memory: purpose, objective, focus, rules,
+  constraints, and notes
+
+### Main panel: live messages
+
+- current room heading
+- room transcript
+- live refresh after message-related events
+- clear author and timestamp
+- transient pending reply rows for active deliveries, one row per recipient
+  agent for broadcasts and room sends
+- neutral activity wording: `thinking…`, `working…`, `waiting…`, `failed`,
+  or `timeout`; no chain-of-thought text
+- successful pending rows collapse into the actual replies as transcript data
+  arrives; failed and timed-out rows remain visible inline
+- discussion progress appears as transcript messages, for example
+  `goose turn 1`, `hermes turn 2`, and `hermes final recommendation`
+- team task progress appears as transcript messages for clarify, nominate,
+  owner selection, execute, review, and final report phases
+
+### Right rail: agents
+
+- list registered agents bootstrapped from config
+- show display name and adapter id
+- show durable operational status from the daemon
+- show last seen, current room, and current task
+- select an agent as a direct-message target
+- show live typing state when available
+- do not show chain-of-thought, hidden memory, plans, or scheduling state
+
+### Tasks panel
+
+- show recent Team Runs
+- show owner, reviewers, status, and approval state
+- approve or reject runs waiting for review
+- list durable tasks
+- create a task
+- optionally assign it to an agent
+- optionally associate it with the current room
+- change status and priority
+- clearly distinguish open, in-progress, blocked, and done work
+- create a task from a visible room message
+- expand a lightweight detail section for ownership metadata and recent events
+
+### Composer
+
+- text area
+- send-to-room action
+- direct-message action when an agent is selected
+- broadcast action
+- explicit current target label
+- `/discuss <agent1> <agent2> "topic"` command text, with optional
+  `--turns N` and `--room name`
+- `/team "question or task"` and `/team --turns N "question or task"`
+- Ask team action for the selected room
+
+## Backend contract
+
+The command deck must use the existing daemon model:
+
+| Need | Existing endpoint |
+|---|---|
+| agents / presence | `GET /health`, `GET /v1/agents`, `GET /v1/agents/{id}`, `GET /v1/agents/{id}/events` |
+| rooms | `GET /v1/rooms` |
+| room memory | `GET /v1/rooms/{name}/memory`, `PUT /v1/rooms/{name}/memory`, `GET /v1/rooms/{name}/memory/events` |
+| transcript | `GET /v1/rooms/{name}/messages` |
+| send | `POST /v1/messages` |
+| discussions | `POST /v1/discussions` |
+| team tasks | `POST /v1/team-tasks` |
+| team governance | `GET /v1/team-runs`, `GET /v1/team-runs/{id}`, `GET /v1/team-runs/{id}/events`, `POST /v1/team-runs/{id}/approve`, `POST /v1/team-runs/{id}/reject` |
+| live updates | `GET /v1/events/stream` |
+| tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
+| task comments | `POST /v1/tasks/{id}/comment` |
+| task history | `GET /v1/tasks/{id}/events` |
+
+The web process may proxy these endpoints for same-origin browser access, but
+it should not invent alternate semantics.
+
+## v0.1 interaction rules
+
+- no room selected: disable room send, allow global broadcast
+- room send uses target `room:<name>`
+- room transcript is canonical: successful replies to `room:<name>` messages must be persisted back into the same room history
+- with a room selected, `@everyone …` and the Broadcast action use target `room:<name>`
+- without a room selected, `@everyone …` uses target `broadcast`
+- `@everyone --global …` is the explicit global form from any context
+- inside a selected room, direct `@agent …` sends keep directed delivery but are persisted into the current room transcript
+- `@agent --global …` is the explicit direct/global form from inside a room
+- event stream should trigger transcript refreshes after relevant message or
+  delivery events
+- event stream delivery lifecycle events are used for ephemeral activity state:
+  `delivery.queued`, `delivery.sent`, `typing.started`, `delivery.recorded`,
+  and `dead-letter.recorded`
+- active delivery rows must distinguish `queued`, `sent`, `thinking`,
+  `replied`, `failed`, and `timeout`
+- Discussion Mode is daemon-orchestrated through `POST /v1/discussions`; the
+  web UI must not create client-only discussion loops
+- a selected room scopes `/discuss ...` into that room unless `--room` names a
+  different room
+- discussions without a room create a normal conversation
+- every discussion topic, turn marker, agent reply, final recommendation, and
+  failure is persisted in the visible room transcript or conversation
+- room-scoped sends and discussions receive concise Room Memory context from
+  the daemon; the web UI edits the memory but does not perform prompt assembly
+- max turns are bounded; the default operator command uses four total agent
+  messages, and the final turn requests a recommendation
+- Team Task Mode is daemon-orchestrated through `POST /v1/team-tasks`
+- Team Task Mode requires a selected room; without one, clients must surface:
+  `Team mode needs a room. Create or select a room first.`
+- Team Task Mode writes prompt, clarifications, nominations, owner selection,
+  owner output, reviews, and final report into the visible room transcript
+- Team Task Mode creates a durable task, assigns the selected owner, and records
+  lifecycle events where available
+- Team Task Mode must continue when one non-owner agent fails and must record a
+  visible failure if no owner can produce output
+- Team Task Mode must not collapse timeouts into dead letters only. Critical
+  timeout failures must keep completed transcript messages visible, mark the
+  durable task and `team_run` blocked, and record `timeout`, `failed_phase`, and
+  `run_blocked` events with run id, phase, agent, elapsed time, and partial
+  transcript context.
+- Team Governance records every run in `team_runs` and its audit trail in
+  `team_events`
+- `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
+  including failure summary and partial transcript. `/continue-team-run <id>` is
+  future work.
+- `AUTO` mode completes after the final report
+- `REVIEW_REQUIRED` mode stops at `awaiting_approval`, shows approve/reject
+  controls, and waits for explicit operator action before marking the linked
+  task done or blocked
+- the UI should remain usable if the event stream disconnects; periodic or
+  manual reload behavior may recover state
+
+## v0.2 interaction rules
+
+- room creation should use existing room APIs, not client-only state
+- selecting a room and selecting a direct agent are mutually exclusive compose
+  targets
+- live typing state is ephemeral UI state derived from SSE, not persisted data
+- agent presence in this release means durable operational state: configured,
+  online, idle, working, blocked, offline, or disabled, plus last-seen, current
+  room, and current task
+- presence is not memory, decisions, autonomous workflow state, scheduling, or
+  cloud sync
+- task details should expose auditability lightly, not become a full workflow UI
+- Room Memory is persistent room context, not agent memory, hidden
+  chain-of-thought, RAG, embeddings, semantic search, autonomous planning,
+  decisions, or cloud sync
+- Team Mode is human-commanded orchestration, not autonomous background work,
+  scheduling, hidden agent work, or cloud sync
+- richer agent lifecycle states belong to Agent Presence work after the agent
+  model doctrine is established
+
+## Visual direction
+
+- dark local-console aesthetic
+- reuse SynKraken's ocean palette and agent color language where practical
+- prioritize legibility over decoration
+
+## Out of scope for v0.1
+
+- room creation or membership editing
+- direct one-to-one messages
+- conversation search
+- tasks or decisions UI
+- authentication
+- remote hosting
+- Studio:Blueprint integration
+
+## Still out of scope for v0.2
+
+- room deletion and membership editing
+- search
+- task automation, recurring tasks, decision workflows, RAG, embeddings, or
+  autonomous memory workflows
+- authentication and remote deployment
+
+## Success criteria
+
+Command Deck v0.1 is successful when an operator can:
+
+1. start the existing daemon
+2. run `synkraken web`
+3. open the local web UI
+4. see rooms and configured agents
+5. open a room transcript
+6. send into that room
+7. broadcast to all agents
+8. watch updates appear without leaving the page
+9. see one pending activity row per recipient while agents are working
+10. start a bounded two-agent discussion and watch persisted turn progress

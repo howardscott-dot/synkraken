@@ -47,7 +47,8 @@ def print_agents(data: dict) -> None:
         adapter_id = agent.get("adapter_id", "unknown")
         adapter_type = agent.get("type", "unknown")
         enabled = agent.get("enabled", False)
-        print(f"{adapter_id}\t{adapter_type}\tenabled={enabled}")
+        status = agent.get("status") or ("online" if enabled else "disabled")
+        print(f"{adapter_id}\t{adapter_type}\tstatus={status}\tenabled={enabled}")
 
 
 def print_result(data: dict, raw: bool) -> None:

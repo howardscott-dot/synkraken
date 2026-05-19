@@ -5,6 +5,83 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Friendly daemon lifecycle commands: `synkraken start|stop|restart|status`
+  with optional `daemon` target, user-service detection, install guidance, and
+  combined service/health reporting in `synkraken status`.
+- Product and architecture foundation docs for the v0.2 command deck direction.
+- `synkraken web`, a local Web Command Deck served on `127.0.0.1:9461`
+  with rooms, live room transcripts, agent presence, room send, and broadcast.
+- Web Command Deck follow-up: room creation, direct agent messaging, and live
+  typing presence from daemon events.
+- Tasks v0.1: durable SQLite-backed tasks with optional room, agent, and source
+  message links; task comments; task APIs; and a visible Tasks panel in the Web
+  Command Deck.
+- Tasks Hardening v0.15: SQLite foreign-key enforcement, task ownership
+  metadata, append-only task events, task history API, and lightweight audit
+  details in the Web Command Deck.
+- Agent Model Doctrine v0.1 documenting durable agent identity, lifecycle,
+  authority, roles, capabilities, and the sequence toward presence, memory,
+  decisions, handoffs, workspace packs, and Studio:Blueprint agent teams.
+- Agent Presence v0.1: durable agent status, last-seen metadata, current
+  room/task fields, append-only agent events, richer agent APIs, TUI
+  `/presence` and `/agent` inspection, Web Command Deck status cards, and smoke
+  coverage for message, broadcast, discussion, timeout, and startup
+  transitions. Presence is operational state only, not chain-of-thought,
+  memory, decisions, scheduling, or cloud sync.
+- Room Memory v0.1: durable per-room purpose, objective, rules, constraints,
+  current focus, and notes with append-only memory events; daemon APIs; TUI
+  `/memory` commands; a Web Command Deck Room Memory form; concise prompt
+  injection for room messages, room broadcasts, and room discussions; and smoke
+  coverage. Room Memory is persistent room context only, not agent memory, RAG,
+  embeddings, autonomous planning, decisions, or cloud sync.
+- Team Task Mode v0.1: human-commanded room orchestration through
+  `POST /v1/team-tasks`, TUI `/team`, and a Web Command Deck Ask team action.
+  SynKraken runs bounded clarify, nominate, owner selection, execute, review,
+  and final-report phases; stores every phase visibly in the room transcript;
+  creates and completes a durable task; and continues when one non-owner agent
+  fails. Team Mode is not autonomous background work, scheduling, cloud sync, or
+  hidden work outside the room transcript.
+- Team Governance v0.1: durable `team_runs` and `team_events`, `AUTO` and
+  `REVIEW_REQUIRED` approval modes, `/team-runs`, `/team-run`, `/approve`, and
+  `/reject` TUI commands, Web Command Deck recent team run cards, and smoke
+  coverage for approval, rejection, failed runs, and audit trails.
+- Team Mode timeout resilience: critical phase timeouts now preserve partial
+  room transcripts, mark the durable task and team run `blocked`, record
+  `timeout`, `failed_phase`, and `run_blocked` events, and expose the failure
+  summary through `/team-run` and the Web Command Deck instead of relying on
+  dead letters as the primary UX.
+- Basic local TUI slash commands: `/help`, `/status`, `/health`, `/agents`,
+  `/rooms`, `/tasks`, and `/clear`; unknown slash commands now stay local
+  instead of creating dead letters.
+- Room-scoped `@everyone` routing in the TUI and Web Command Deck, with
+  `@everyone --global …` as the explicit fleet-wide escape hatch from a room.
+- Explicit room reply-context preservation during fan-out, plus regression
+  coverage proving successful member replies persist into canonical room history.
+- `/room enter <name>` now opens the live room transcript instead of only setting
+  routing context, so in-room sends remain visible as a conversation while you chat.
+- TUI mention parsing now treats only leading `@mentions` as routing targets, so
+  quoted mentions inside a message body such as `"@goose"` are preserved as text.
+- Intentional multi-target TUI sends now run in the background like single-target
+  sends instead of blocking the interface while each target replies.
+- Direct sends issued while viewing a room no longer replace the visible room
+  transcript.
+- Direct `@agent` sends from inside a room now preserve directed delivery while
+  also persisting the outbound message and reply into that room transcript;
+  `@agent --global …` keeps the old separate-conversation behavior.
+- In-chat per-agent activity indicators now appear for active deliveries in
+  the TUI and Web Command Deck, including broadcast fan-out rows, queued/sent/
+  thinking/replied/failed/timeout states, and inline failed delivery visibility.
+- Discussion Mode v0.1: `POST /v1/discussions`, TUI `/discuss`, and Web
+  Command Deck `/discuss ...` composer support for bounded agent discussions
+  with visible turn markers, final recommendation turns, room/conversation
+  persistence, and clean failure recording.
+- Added `scripts/live_integration_test.py`, a stdlib-only live daemon test that
+  writes timestamped audit reports, exercises CLI health/status, direct sends,
+  broadcasts, room persistence, optional discussion mode, task lifecycle, daemon
+  restart, and clean fake-agent failure handling.
+
 ## [0.1.0] — 2026-05-17
 
 ### Added — initial public release

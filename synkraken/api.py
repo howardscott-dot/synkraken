@@ -9,9 +9,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 import json
 
 from .fabric import AgentFabric
+from .models import new_id
 
 
 _ROOM_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
+_TASK_STATUSES = {"open", "in_progress", "blocked", "done"}
+_TASK_PRIORITIES = {"low", "normal", "high"}
 
 
 def _utc_now_iso() -> str:
@@ -46,6 +49,26 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/agents":
             self._send(HTTPStatus.OK, {"agents": self.fabric.list_agents()})
             return
+        m = re.fullmatch(r"/v1/agents/([^/]+)/events", path)
+        if m:
+            agent_id = unquote(m.group(1))
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            events = self.fabric.storage.list_agent_events(agent_id, limit=limit)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"agent not found: {agent_id}"})
+                return
+            self._send(HTTPStatus.OK, {"agent_id": agent_id, "events": events})
+            return
+        m = re.fullmatch(r"/v1/agents/([^/]+)", path)
+        if m:
+            agent_id = unquote(m.group(1))
+            agent = self.fabric.storage.get_agent(agent_id)
+            if not agent:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"agent not found: {agent_id}"})
+                return
+            self._send(HTTPStatus.OK, agent)
+            return
         if path == "/v1/conversations":
             qs = parse_qs(parsed.query)
             limit = int(qs.get("limit", [10])[0])
@@ -61,6 +84,68 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             limit = int(qs.get("limit", [10])[0])
             self._send(HTTPStatus.OK, self.fabric.storage.list_dead_letters(limit=limit))
             return
+        if path == "/v1/tasks":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", [None])[0]
+            self._send(HTTPStatus.OK, {"tasks": self.fabric.storage.list_tasks(room_name=room)})
+            return
+        if path == "/v1/team-runs":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", [None])[0]
+            limit = int(qs.get("limit", [25])[0])
+            self._send(HTTPStatus.OK, {"team_runs": self.fabric.storage.list_team_runs(room_name=room, limit=limit)})
+            return
+        m = re.fullmatch(r"/v1/team-runs/([^/]+)/events", path)
+        if m:
+            team_run_id = unquote(m.group(1))
+            events = self.fabric.storage.list_team_events(team_run_id)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"team run not found: {team_run_id}"})
+                return
+            self._send(HTTPStatus.OK, {"team_run_id": team_run_id, "events": events})
+            return
+        m = re.fullmatch(r"/v1/team-runs/([^/]+)", path)
+        if m:
+            team_run_id = unquote(m.group(1))
+            run = self.fabric.storage.get_team_run(team_run_id)
+            if not run:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"team run not found: {team_run_id}"})
+                return
+            events = self.fabric.storage.list_team_events(team_run_id) or []
+            run["events"] = events
+            messages = self.fabric.storage.get_room_messages(run["room_name"], limit=200)
+            run["messages"] = [
+                message for message in messages
+                if message.get("metadata", {}).get("team_run_id") == team_run_id
+                or message.get("metadata", {}).get("team_task")
+            ]
+            timeout_event = next((event for event in reversed(events) if event.get("event_type") == "timeout"), None)
+            blocked_event = next((event for event in reversed(events) if event.get("event_type") == "run_blocked"), None)
+            if timeout_event:
+                try:
+                    timeout_detail = json.loads(timeout_event.get("detail") or "{}")
+                except Exception:
+                    timeout_detail = {"detail": timeout_event.get("detail")}
+                run["failure_summary"] = {
+                    "status": run.get("status"),
+                    "team_run_id": team_run_id,
+                    "phase": timeout_detail.get("phase"),
+                    "agent": timeout_detail.get("agent"),
+                    "elapsed_ms": timeout_detail.get("elapsed_ms"),
+                    "reason": blocked_event.get("detail") if blocked_event else timeout_event.get("detail"),
+                    "partial_transcript": timeout_detail.get("partial_transcript") or run["messages"],
+                }
+            self._send(HTTPStatus.OK, run)
+            return
+        m = re.fullmatch(r"/v1/tasks/([^/]+)/events", path)
+        if m:
+            task_id = unquote(m.group(1))
+            events = self.fabric.storage.list_task_events(task_id)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"task not found: {task_id}"})
+                return
+            self._send(HTTPStatus.OK, {"task_id": task_id, "events": events})
+            return
         if path == "/v1/events/stream":
             self._stream_events()
             return
@@ -72,6 +157,26 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         # ── rooms ────────────────────────────────────────────────────────
         if path == "/v1/rooms":
             self._send(HTTPStatus.OK, {"rooms": self.fabric.storage.list_rooms()})
+            return
+        m = re.fullmatch(r"/v1/rooms/([^/]+)/memory/events", path)
+        if m:
+            room = unquote(m.group(1))
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            events = self.fabric.storage.list_room_memory_events(room, limit=limit)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
+            self._send(HTTPStatus.OK, {"room": room, "events": events})
+            return
+        m = re.fullmatch(r"/v1/rooms/([^/]+)/memory", path)
+        if m:
+            room = unquote(m.group(1))
+            memory = self.fabric.storage.get_room_memory(room)
+            if memory is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
+            self._send(HTTPStatus.OK, memory)
             return
         m = re.fullmatch(r"/v1/rooms/([^/]+)/messages", path)
         if m:
@@ -139,6 +244,120 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, result)
             return
 
+        if path == "/v1/discussions":
+            try:
+                payload = self._read_json()
+                result = self.fabric.discuss(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path == "/v1/team-tasks":
+            try:
+                payload = self._read_json()
+                result = self.fabric.team_task(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        m = re.fullmatch(r"/v1/team-runs/([^/]+)/(approve|reject)", path)
+        if m:
+            team_run_id = unquote(m.group(1))
+            action = m.group(2)
+            try:
+                payload = self._read_json()
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                result = (
+                    self.fabric.approve_team_run(team_run_id, actor)
+                    if action == "approve"
+                    else self.fabric.reject_team_run(team_run_id, actor)
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path == "/v1/tasks":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                description = str(payload.get("description", "")).strip()
+                status = str(payload.get("status", "open"))
+                priority = str(payload.get("priority", "normal"))
+                room_name = payload.get("room_name")
+                assigned_agent_id = payload.get("assigned_agent_id")
+                source_message_id = payload.get("source_message_id")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if status not in _TASK_STATUSES:
+                    raise ValueError("invalid task status")
+                if priority not in _TASK_PRIORITIES:
+                    raise ValueError("invalid task priority")
+                if room_name is not None:
+                    room_name = str(room_name).strip() or None
+                    if room_name and not self.fabric.storage.room_exists(room_name):
+                        raise ValueError(f"room not found: {room_name}")
+                if assigned_agent_id is not None:
+                    assigned_agent_id = str(assigned_agent_id).strip() or None
+                    if assigned_agent_id and assigned_agent_id not in self.fabric.adapters:
+                        raise ValueError(f"unknown agent: {assigned_agent_id}")
+                if source_message_id is not None:
+                    source_message_id = str(source_message_id).strip() or None
+                    if source_message_id and not self.fabric.storage.message_exists(source_message_id):
+                        raise ValueError(f"source message not found: {source_message_id}")
+                task = self.fabric.storage.create_task(
+                    task_id=new_id(),
+                    title=title,
+                    description=description,
+                    status=status,
+                    priority=priority,
+                    room_name=room_name,
+                    assigned_agent_id=assigned_agent_id,
+                    source_message_id=source_message_id,
+                    actor=actor,
+                    created_at=_utc_now_iso(),
+                )
+                self.fabric.event_bus.publish("task.created", {"task_id": task["task_id"]})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, task)
+            return
+
+        m = re.fullmatch(r"/v1/tasks/([^/]+)/comment", path)
+        if m:
+            task_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                author = str(payload.get("author", "operator")).strip() or "operator"
+                actor = str(payload.get("actor", author)).strip() or author
+                body = str(payload.get("body", "")).strip()
+                if not body:
+                    raise ValueError("body required")
+                task = self.fabric.storage.add_task_comment(
+                    comment_id=new_id(),
+                    task_id=task_id,
+                    author=author,
+                    body=body,
+                    actor=actor,
+                    created_at=_utc_now_iso(),
+                )
+                if task is None:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"task not found: {task_id}"})
+                    return
+                self.fabric.event_bus.publish("task.commented", {"task_id": task_id})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, task)
+            return
+
         # ── rooms ────────────────────────────────────────────────────────
         if path == "/v1/rooms":
             try:
@@ -179,6 +398,100 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             return
 
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+        m = re.fullmatch(r"/v1/tasks/([^/]+)", path)
+        if not m:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        task_id = unquote(m.group(1))
+        try:
+            payload = self._read_json()
+            allowed = {
+                "title", "description", "status", "priority", "room_name",
+                "assigned_agent_id", "source_message_id", "actor",
+            }
+            extra = set(payload) - allowed
+            if extra:
+                raise ValueError(f"unknown task fields: {', '.join(sorted(extra))}")
+            fields: dict = {}
+            actor = str(payload.get("actor", "operator")).strip() or "operator"
+            if "title" in payload:
+                title = str(payload["title"]).strip()
+                if not title:
+                    raise ValueError("title cannot be empty")
+                fields["title"] = title
+            if "description" in payload:
+                fields["description"] = str(payload["description"]).strip()
+            if "status" in payload:
+                status = str(payload["status"])
+                if status not in _TASK_STATUSES:
+                    raise ValueError("invalid task status")
+                fields["status"] = status
+            if "priority" in payload:
+                priority = str(payload["priority"])
+                if priority not in _TASK_PRIORITIES:
+                    raise ValueError("invalid task priority")
+                fields["priority"] = priority
+            if "room_name" in payload:
+                room_name = str(payload["room_name"]).strip() if payload["room_name"] is not None else ""
+                room_name = room_name or None
+                if room_name and not self.fabric.storage.room_exists(room_name):
+                    raise ValueError(f"room not found: {room_name}")
+                fields["room_name"] = room_name
+            if "assigned_agent_id" in payload:
+                agent = str(payload["assigned_agent_id"]).strip() if payload["assigned_agent_id"] is not None else ""
+                agent = agent or None
+                if agent and agent not in self.fabric.adapters:
+                    raise ValueError(f"unknown agent: {agent}")
+                fields["assigned_agent_id"] = agent
+            if "source_message_id" in payload:
+                message_id = str(payload["source_message_id"]).strip() if payload["source_message_id"] is not None else ""
+                message_id = message_id or None
+                if message_id and not self.fabric.storage.message_exists(message_id):
+                    raise ValueError(f"source message not found: {message_id}")
+                fields["source_message_id"] = message_id
+            task = self.fabric.storage.update_task(task_id, fields, actor, _utc_now_iso())
+            if task is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"task not found: {task_id}"})
+                return
+            self.fabric.event_bus.publish("task.updated", {"task_id": task_id})
+        except Exception as exc:  # noqa: BLE001
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send(HTTPStatus.OK, task)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+        m = re.fullmatch(r"/v1/rooms/([^/]+)/memory", path)
+        if not m:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        room = unquote(m.group(1))
+        try:
+            payload = self._read_json()
+            allowed = {"purpose", "objective", "rules", "constraints", "current_focus", "notes", "actor", "updated_by"}
+            extra = set(payload) - allowed
+            if extra:
+                raise ValueError(f"unknown memory fields: {', '.join(sorted(extra))}")
+            actor = str(payload.get("actor") or payload.get("updated_by") or "operator").strip() or "operator"
+            fields = {
+                key: payload[key]
+                for key in ("purpose", "objective", "rules", "constraints", "current_focus", "notes")
+                if key in payload
+            }
+            memory = self.fabric.storage.upsert_room_memory(room, fields, actor, _utc_now_iso())
+            if memory is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
+            self.fabric.event_bus.publish("room.memory.updated", {"room": room, "updated_by": actor})
+        except Exception as exc:  # noqa: BLE001
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send(HTTPStatus.OK, memory)
 
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

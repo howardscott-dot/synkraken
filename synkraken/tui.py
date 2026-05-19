@@ -3,6 +3,7 @@ from __future__ import annotations
 import curses
 import json
 import re
+import shlex
 import signal
 import threading
 import time
@@ -65,13 +66,16 @@ BOX = dict(tl='╭', tr='╮', bl='╰', br='╯', h='─', v='│')
 # ── commands & filters ─────────────────────────────────────────────────────
 COMMANDS = [
     '/dashboard', '/events', '/conversations', '/deadletters', '/adapters',
-    '/rooms', '/room', '/compose', '/send', '/broadcast', '/history', '/open',
-    '/filter', '/help', '/refresh', '/quit',
+    '/rooms', '/room', '/tasks', '/compose', '/send', '/broadcast', '/history',
+    '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject',
+    '/filter', '/help', '/status', '/health', '/agents',
+    '/presence', '/agent', '/memory', '/clear', '/refresh', '/quit',
 ]
 ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'list']
 EVENT_FILTERS = {
     'all', 'message.accepted', 'delivery.recorded', 'dead-letter.recorded',
-    'typing.started', 'typing.stopped', 'stream-error',
+    'delivery.queued', 'delivery.sent', 'typing.started', 'typing.stopped',
+    'stream-error',
 }
 
 # ── SIGINT (double-tap to quit) ────────────────────────────────────────────
@@ -126,6 +130,25 @@ def _post_json(url: str, payload: dict) -> dict:
         raise RuntimeError(f'HTTP {exc.code}: {detail}') from None
 
 
+def _put_json(url: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='PUT',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        try:
+            detail = json.loads(body).get('error', body)
+        except Exception:
+            detail = body or str(exc)
+        raise RuntimeError(f'HTTP {exc.code}: {detail}') from None
+
+
 def _delete(url: str) -> dict:
     req = urllib.request.Request(url, method='DELETE')
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -141,6 +164,7 @@ class EventStreamWorker:
         self.thread: threading.Thread | None = None
         self.typing: dict[str, float] = {}
         self.typing_names: dict[str, str] = {}
+        self.delivery_activity: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -159,6 +183,13 @@ class EventStreamWorker:
             self.typing.pop(k, None)
             self.typing_names.pop(k, None)
 
+    def _prune_delivery_activity(self):
+        now = time.time()
+        for k, row in list(self.delivery_activity.items()):
+            expires_at = row.get('expires_at')
+            if expires_at is not None and now > float(expires_at):
+                self.delivery_activity.pop(k, None)
+
     def get_typing_names(self) -> list[str]:
         with self._lock:
             self._prune_typing()
@@ -169,12 +200,97 @@ class EventStreamWorker:
             self._prune_typing()
             return set(self.typing.keys())
 
+    def get_delivery_activity(self, target: str | None = None,
+                              conversation_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            self._prune_delivery_activity()
+            rows = list(self.delivery_activity.values())
+        if not target and not conversation_id:
+            return rows
+        filtered = []
+        for row in rows:
+            if conversation_id and row.get('conversation_id') == conversation_id:
+                filtered.append(row)
+                continue
+            if target and (
+                row.get('reply_context') == target
+                or row.get('original_target') == target
+                or row.get('delivery_target') == target
+                or row.get('adapter_id') == target
+            ):
+                filtered.append(row)
+        return filtered
+
     def _note_event(self, obj: dict[str, Any]) -> None:
         event = obj.get('event')
         data = obj.get('data', {}) or {}
         adapter_id = data.get('adapter_id')
         runtime_name = data.get('runtime_name') or adapter_id
         with self._lock:
+            delivery_target = data.get('delivery_target') or adapter_id
+            message_id = data.get('message_id')
+            if event == 'discussion.turn':
+                discussion_id = data.get('discussion_id') or data.get('conversation_id')
+                turn = data.get('turn')
+                key = f'discussion:{discussion_id}:{turn}'
+                target = f"room:{data.get('room_name')}" if data.get('room_name') else 'discussion'
+                self.delivery_activity[key] = {
+                    'key': key,
+                    'adapter_id': str(adapter_id or data.get('adapter_id') or ''),
+                    'runtime_name': str(runtime_name or data.get('adapter_id') or ''),
+                    'delivery_target': str(data.get('adapter_id') or ''),
+                    'message_id': key,
+                    'conversation_id': data.get('conversation_id'),
+                    'original_target': target,
+                    'reply_context': target,
+                    'status': 'thinking',
+                    'label': data.get('label'),
+                    'updated_at': time.time(),
+                    'expires_at': None,
+                }
+            elif event == 'discussion.completed':
+                conversation_id = data.get('conversation_id')
+                for row in self.delivery_activity.values():
+                    if row.get('conversation_id') == conversation_id:
+                        row['expires_at'] = time.time() + 2
+            if message_id and delivery_target:
+                key = f'{message_id}:{delivery_target}'
+                if event in ('delivery.queued', 'delivery.sent', 'typing.started',
+                             'delivery.recorded', 'dead-letter.recorded'):
+                    status = str(data.get('status') or '')
+                    if event == 'delivery.queued':
+                        status = 'queued'
+                    elif event == 'delivery.sent':
+                        status = 'sent'
+                    elif event == 'typing.started':
+                        status = 'thinking'
+                    elif event == 'dead-letter.recorded':
+                        status = str(data.get('status') or 'failed')
+                    elif event == 'delivery.recorded':
+                        status = str(data.get('status') or ('replied' if data.get('ok') else 'failed'))
+                    row = self.delivery_activity.get(key, {})
+                    row.update({
+                        'key': key,
+                        'adapter_id': str(adapter_id or delivery_target),
+                        'runtime_name': str(runtime_name or delivery_target),
+                        'delivery_target': str(delivery_target),
+                        'message_id': str(message_id),
+                        'conversation_id': data.get('conversation_id') or row.get('conversation_id'),
+                        'original_target': data.get('original_target') or row.get('original_target'),
+                        'reply_context': data.get('reply_context') or row.get('reply_context'),
+                        'status': status,
+                        'attempts': data.get('attempts') or row.get('attempts'),
+                        'error': data.get('error') or data.get('reason') or row.get('error'),
+                        'body_preview': data.get('body_preview') or row.get('body_preview'),
+                        'updated_at': time.time(),
+                    })
+                    if status == 'replied':
+                        row['expires_at'] = time.time() + 1.5
+                    elif status in ('failed', 'timeout'):
+                        row['expires_at'] = time.time() + 300
+                    else:
+                        row['expires_at'] = None
+                    self.delivery_activity[key] = row
             if event == 'typing.started' and adapter_id:
                 self.typing[adapter_id] = time.time()
                 self.typing_names[adapter_id] = str(runtime_name)
@@ -218,6 +334,10 @@ def _fetch_dashboard(base: str) -> dict:
         out['rooms'] = _get_json(f'{base}/v1/rooms')
     except Exception:
         out['rooms'] = {'rooms': []}
+    try:
+        out['tasks'] = _get_json(f'{base}/v1/tasks')
+    except Exception:
+        out['tasks'] = {'tasks': []}
     return out
 
 
@@ -247,6 +367,24 @@ def _agent_color(adapter_id: str) -> tuple[int, int]:
 
 def _runtime_label(agent: dict) -> str:
     return agent.get('runtime_name', agent.get('adapter_id', 'unknown'))
+
+
+def _presence_marker(status: str) -> str:
+    return {
+        'working': '◐',
+        'idle': '○',
+        'online': '●',
+        'blocked': '✗',
+        'offline': '○',
+        'disabled': '○',
+        'configured': '○',
+    }.get(status or 'configured', '○')
+
+
+def _agent_presence_line(agent: dict) -> str:
+    status = str(agent.get('status') or ('online' if agent.get('enabled') else 'disabled'))
+    last_seen = _time_ago(agent.get('last_seen_at')) if agent.get('last_seen_at') else 'never'
+    return f"{agent.get('adapter_id', ''):<14} {_presence_marker(status)} {status:<10} {last_seen:>5}"
 
 
 def _agent_ids(data: dict) -> list[str]:
@@ -452,13 +590,13 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
     lines.append(('agents', C_MUTED, curses.A_BOLD))
     for a in data.get('agents', {}).get('agents', []):
         aid = a.get('adapter_id', '')
-        rn = _runtime_label(a)
-        en = bool(a.get('enabled'))
+        status = str(a.get('status') or ('online' if a.get('enabled') else 'disabled'))
         d, _ = _agent_color(aid)
         typing_now = aid in typing_ids
-        marker = '●' if en else '○'
+        marker = '◐' if typing_now else _presence_marker(status)
         suffix = '  typing…' if typing_now else ''
-        line = f"  {marker} {rn:<10}  [{aid}]{suffix}"
+        ago = _time_ago(a.get('last_seen_at')) if a.get('last_seen_at') else 'never'
+        line = f"  {aid:<12} {marker} {status:<9} {ago:>5}{suffix}"
         attr = curses.A_BOLD if typing_now else 0
         lines.append((line, d, attr))
     _panel_lines(stdscr, top, 0, left_w, top_h, lines)
@@ -642,19 +780,45 @@ def _chat_bubble(speaker: str, body: str, ts: str,
     return out
 
 
+def _activity_row(row: dict[str, Any], *, max_w: int) -> tuple:
+    aid = row.get('runtime_name') or row.get('adapter_id') or row.get('delivery_target') or 'agent'
+    status = str(row.get('status') or 'thinking')
+    phrases = {
+        'queued': 'thinking…',
+        'sent': 'thinking…',
+        'thinking': 'thinking…',
+        'replied': 'replied',
+        'failed': 'failed',
+        'timeout': 'timeout',
+    }
+    phrase = phrases.get(status, 'working…')
+    extra = ''
+    if status in ('failed', 'timeout') and row.get('error'):
+        extra = f"  {str(row.get('error'))[:80]}"
+    line = f"  {row.get('label') or f'{aid} {phrase}'}"
+    line += f"  [{status}]"
+    line += extra
+    color = C_RED if status in ('failed', 'timeout') else C_TYPING
+    return (line[:max_w], color, curses.A_DIM if status not in ('failed', 'timeout') else curses.A_BOLD)
+
+
 def _view_chat(stdscr, result, top, h, w, *, label: str = 'CONVERSATION'):
     """Render messages as chat bubbles. Source = left, replies = right."""
     avail_h = h - top - 4
     _draw_panel(stdscr, top, 0, w, avail_h, title=f'CHAT  •  {label}')
     msgs = result.get('messages', [])
     deliveries = result.get('deliveries', [])
+    activity_rows = result.get('activity', [])
     dels_by_mid: dict[str, list[dict]] = {}
     for d in deliveries:
         dels_by_mid.setdefault(d.get('message_id'), []).append(d)
+    activity_by_mid: dict[str, list[dict]] = {}
+    for row in activity_rows:
+        activity_by_mid.setdefault(row.get('message_id'), []).append(row)
 
     inner_w = w - 6
     lines: list[tuple] = []
-    if not msgs:
+    if not msgs and not activity_rows:
         lines.append(('(no messages yet)', C_MUTED, curses.A_DIM))
     else:
         for m in msgs:
@@ -679,7 +843,13 @@ def _view_chat(stdscr, result, top, h, w, *, label: str = 'CONVERSATION'):
                 lines.extend(_chat_bubble(aid, rep, rts, d_c, l_c,
                                            align='right' if align == 'left' else 'left',
                                            max_w=inner_w))
+            for row in activity_by_mid.pop(m.get('message_id'), []):
+                lines.append(_activity_row(row, max_w=inner_w))
             lines.append(('', None, 0))
+
+        for rows in activity_by_mid.values():
+            for row in rows:
+                lines.append(_activity_row(row, max_w=inner_w))
 
     # Show only the tail when overflowing.
     if len(lines) > avail_h - 2:
@@ -712,12 +882,13 @@ def _view_adapters(stdscr, data, top, h, w):
     for a in data.get('agents', {}).get('agents', []):
         aid = a.get('adapter_id', '')
         rn = _runtime_label(a)
+        status = str(a.get('status') or ('online' if a.get('enabled') else 'disabled'))
         atype = a.get('type', '')
-        en = bool(a.get('enabled', False))
         d, _ = _agent_color(aid)
-        marker = '●' if en else '○'
-        lines.append((f"  {marker} {rn:<14}  [{aid}]   type={atype:<10}  enabled={str(en).lower()}",
-                      d, curses.A_BOLD if en else 0))
+        marker = _presence_marker(status)
+        ago = _time_ago(a.get('last_seen_at')) if a.get('last_seen_at') else 'never'
+        lines.append((f"  {rn:<14}  {marker} {status:<10} {ago:>5}  [{aid}] type={atype:<10}",
+                      d, curses.A_BOLD if status in ('online', 'idle', 'working') else 0))
     if not lines:
         lines = [('(no adapters configured)', C_MUTED, curses.A_DIM)]
     _panel_lines(stdscr, top, 0, w, avail_h, lines)
@@ -771,9 +942,18 @@ def _view_help(stdscr, top, h, w):
         ('CHAT', C_TEAL, curses.A_BOLD),
         ('  @goose hello                    direct message goose', None, 0),
         ('  @hermes @stanley please confer  send to multiple agents', None, 0),
-        ('  @everyone status?               broadcast to all configured agents', None, 0),
+        ('  @everyone status?               current room if entered; otherwise global', None, 0),
+        ('  @everyone --global status?      explicit global broadcast', None, 0),
         ('  #room hi all                    send to a specific room', None, 0),
         ('  (in a room) plain text          messages go to the current room', None, 0),
+        ('  /discuss goose hermes "topic"   bounded agent discussion', None, 0),
+        ('  /discuss --turns 4 --room ops goose hermes "topic"', None, 0),
+        ('  /team "task"                    room team task mode', None, 0),
+        ('  /team --turns 4 "task"          bounded room team task mode', None, 0),
+        ('  /team-runs                      recent team runs', None, 0),
+        ('  /team-run <id>                  inspect one team run', None, 0),
+        ('  /approve <id>                   approve a pending team run', None, 0),
+        ('  /reject <id>                    reject a pending team run', None, 0),
         ('', None, 0),
         ('ROOMS', C_TEAL, curses.A_BOLD),
         ('  /rooms                          list rooms', None, 0),
@@ -783,8 +963,18 @@ def _view_help(stdscr, top, h, w):
         ('  /room leave                     exit the current room', None, 0),
         ('  /room add <name> <adapter>      add a member', None, 0),
         ('  /room remove <name> <adapter>   remove a member', None, 0),
+        ('  /memory                         show current room memory', None, 0),
+        ('  /memory set purpose "..."       update room purpose', None, 0),
+        ('  /memory set objective "..."     update current objective', None, 0),
+        ('  /memory set focus "..."         update active focus', None, 0),
         ('', None, 0),
         ('VIEWS', C_TEAL, curses.A_BOLD),
+        ('  /status                         daemon URL, health, agents, view/filter', None, 0),
+        ('  /health                         raw daemon health summary', None, 0),
+        ('  /agents                         configured / registered agents', None, 0),
+        ('  /presence                       agent operational presence', None, 0),
+        ('  /agent <id>                     agent status and recent events', None, 0),
+        ('  /tasks                          recent / open tasks', None, 0),
         ('  /dashboard                      overview (default)', None, 0),
         ('  /events                         live event stream', None, 0),
         ('  /conversations                  recent conversation list', None, 0),
@@ -798,12 +988,220 @@ def _view_help(stdscr, top, h, w):
         ('  /filter <type>                  filter events: ' + ', '.join(sorted(EVENT_FILTERS)), None, 0),
         ('', None, 0),
         ('CONTROLS', C_TEAL, curses.A_BOLD),
+        ('  /clear                          clear local command output', None, 0),
         ('  TAB                             autocomplete commands & mentions', None, 0),
         ('  Enter                           submit', None, 0),
         ('  Ctrl-C  ×2                      quit (within 2 seconds)', None, 0),
         ('  /quit                           leave the TUI', None, 0),
     ]
     _panel_lines(stdscr, top, 0, w, avail_h, HELP)
+
+
+def _view_local_output(stdscr, label: str, lines: list[str], top, h, w):
+    avail_h = h - top - 4
+    _draw_panel(stdscr, top, 0, w, avail_h, title=label.upper())
+    rendered: list[tuple] = []
+    for line in lines:
+        rendered.extend((chunk, None, 0) for chunk in (_wrap(line, max(10, w - 6)) or ['']))
+    _panel_lines(stdscr, top, 0, w, avail_h, rendered or [('(no output)', C_MUTED, curses.A_DIM)])
+
+
+def _format_memory_lines(memory: dict) -> list[str]:
+    fields = [
+        ("room", memory.get("room") or memory.get("room_name")),
+        ("purpose", memory.get("purpose")),
+        ("objective", memory.get("objective")),
+        ("focus", memory.get("current_focus")),
+        ("rules", memory.get("rules")),
+        ("constraints", memory.get("constraints")),
+        ("notes", memory.get("notes")),
+        ("updated", memory.get("updated_at")),
+        ("updated by", memory.get("updated_by")),
+    ]
+    return [f"{label:<11} {value or '(empty)'}" for label, value in fields]
+
+
+def _memory_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]]:
+    room = state.get('current_room')
+    if not room:
+        return ('memory', ['not in a room'])
+    path = f"{base}/v1/rooms/{room}/memory"
+    if cmd == '/memory':
+        return (f'#{room} memory', _format_memory_lines(_get_json(path)))
+    if cmd == '/memory edit':
+        memory = _get_json(path)
+        lines = _format_memory_lines(memory)
+        lines.extend([
+            '',
+            'set with:',
+            '  /memory set purpose "..."',
+            '  /memory set objective "..."',
+            '  /memory set focus "..."',
+            '  /memory set rules "..."',
+            '  /memory set constraints "..."',
+            '  /memory set notes "..."',
+        ])
+        return (f'#{room} memory', lines)
+    if cmd.startswith('/memory set '):
+        try:
+            parts = shlex.split(cmd[len('/memory set '):])
+        except ValueError as exc:
+            return ('memory', [f'parse error: {exc}'])
+        if len(parts) < 2:
+            return ('memory', ['usage: /memory set <purpose|objective|focus|rules|constraints|notes> "value"'])
+        aliases = {'focus': 'current_focus'}
+        field = aliases.get(parts[0], parts[0])
+        if field not in {'purpose', 'objective', 'current_focus', 'rules', 'constraints', 'notes'}:
+            return ('memory', [f'unknown memory field: {parts[0]}'])
+        value = ' '.join(parts[1:])
+        memory = _put_json(path, {field: value, 'actor': 'synkraken-tui'})
+        return (f'#{room} memory', _format_memory_lines(memory))
+    return ('memory', ['usage: /memory [edit|set <field> "value"]'])
+
+
+def _format_team_run_lines(run: dict) -> list[str]:
+    lines = [
+        f"team run      {run.get('team_run_id')}",
+        f"room          {run.get('room_name')}",
+        f"status        {run.get('status')}",
+        f"owner         {run.get('owner_agent') or '(none)'}",
+        f"reviewers     {', '.join(run.get('reviewers') or []) or '(none)'}",
+        f"participants  {', '.join(run.get('participants') or []) or '(none)'}",
+        f"approval      {'required' if run.get('approval_required') else 'auto'}",
+        f"approved by   {run.get('approved_by') or '(none)'}",
+        f"started       {run.get('started_at')}",
+        f"completed     {run.get('completed_at') or '(pending)'}",
+        f"prompt        {run.get('source_prompt') or ''}",
+    ]
+    if run.get('final_report'):
+        lines.extend(['', 'final report'])
+        lines.extend(str(run.get('final_report')).splitlines())
+    failure = run.get('failure_summary') or {}
+    if failure:
+        lines.extend([
+            '',
+            'failure summary',
+            f"  phase    {failure.get('phase') or '(unknown)'}",
+            f"  agent    {failure.get('agent') or '(unknown)'}",
+            f"  elapsed  {failure.get('elapsed_ms') if failure.get('elapsed_ms') is not None else '(unknown)'}ms",
+            f"  reason   {failure.get('reason') or '(none)'}",
+        ])
+    events = run.get('events') or []
+    if events:
+        lines.extend(['', 'events'])
+        for event in events[-12:]:
+            detail = f"  {event.get('detail')}" if event.get('detail') else ''
+            lines.append(f"  {event.get('created_at')}  {event.get('event_type')}  {event.get('actor') or ''}{detail}")
+    messages = run.get('messages') or (failure.get('partial_transcript') if failure else []) or []
+    if messages:
+        lines.extend(['', 'partial transcript'])
+        for message in messages[-12:]:
+            body = str(message.get('body') or '').replace('\n', ' / ')
+            lines.append(f"  {message.get('source')}: {body[:160]}")
+    return lines
+
+
+def _team_governance_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]] | None:
+    if cmd == '/team-runs':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        runs = _get_json(f'{base}/v1/team-runs{suffix}').get('team_runs', [])
+        if not runs:
+            return ('team runs', ['(no team runs)'])
+        return ('team runs', [
+            f"{run.get('team_run_id')}  {run.get('status')}  "
+            f"owner={run.get('owner_agent') or '(none)'}  room=#{run.get('room_name')}  "
+            f"approval={'required' if run.get('approval_required') else 'auto'}"
+            for run in runs
+        ])
+    if cmd.startswith('/team-run '):
+        team_run_id = cmd.split(' ', 1)[1].strip()
+        if not team_run_id:
+            return ('team run', ['usage: /team-run <id>'])
+        return ('team run', _format_team_run_lines(_get_json(f'{base}/v1/team-runs/{team_run_id}')))
+    if cmd == '/team-run':
+        return ('team run', ['usage: /team-run <id>'])
+    return None
+
+
+def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
+    """Return local-only slash command output without touching the router."""
+    health = data.get('health', {})
+    agents = data.get('agents', {}).get('agents', [])
+    if cmd == '/status':
+        return ('status', [
+            f'daemon URL      {base}',
+            f"daemon health   {'healthy' if health.get('ok') else 'unhealthy'}",
+            f'agent count     {len(agents)}',
+            f"current view    {state.get('view', 'dashboard')}",
+            f"current filter  {state.get('event_filter', 'all')}",
+        ])
+    if cmd == '/health':
+        return ('health', json.dumps(health, indent=2, ensure_ascii=False).splitlines())
+    if cmd == '/agents':
+        if not agents:
+            return ('agents', ['(no agents configured)'])
+        lines = []
+        for agent in agents:
+            marker = 'enabled' if agent.get('enabled', False) else 'disabled'
+            lines.append(
+                f"{_runtime_label(agent)} [{agent.get('adapter_id', '')}] "
+                f"type={agent.get('type', '')} {marker}"
+            )
+        return ('agents', lines)
+    if cmd == '/presence':
+        if not agents:
+            return ('presence', ['(no agents configured)'])
+        return ('presence', [_agent_presence_line(agent) for agent in agents])
+    if cmd.startswith('/agent '):
+        agent_id = cmd.split(' ', 1)[1].strip()
+        agent = next((item for item in agents if item.get('adapter_id') == agent_id), None)
+        if not agent:
+            return ('agent', [f'unknown agent: {agent_id}'])
+        lines = [
+            f"agent          {agent.get('adapter_id')}",
+            f"status         {agent.get('status')}",
+            f"last seen      {agent.get('last_seen_at') or '(never)'}",
+            f"task           {agent.get('current_task_id') or '(none)'}",
+            f"room           {agent.get('current_room') or '(none)'}",
+            f"last message   {agent.get('last_message_at') or '(none)'}",
+        ]
+        try:
+            events = _get_json(f"{base}/v1/agents/{agent_id}/events?limit=5").get('events', [])
+        except Exception as exc:  # noqa: BLE001
+            events = []
+            lines.append(f"events         unavailable: {exc}")
+        if events:
+            lines.append('recent events')
+            for event in events:
+                lines.append(
+                    f"  {event.get('created_at')}  {event.get('event_type')}  "
+                    f"{event.get('old_value') or ''} -> {event.get('new_value') or ''}"
+                )
+        return ('agent', lines)
+    if cmd == '/agent':
+        return ('agent', ['usage: /agent <adapter_id>'])
+    if cmd == '/rooms':
+        rooms = data.get('rooms', {}).get('rooms', [])
+        if not rooms:
+            return ('rooms', ['(no rooms yet)'])
+        return ('rooms', [
+            f"#{room.get('name', '')}  members={room.get('member_count', 0)}"
+            for room in rooms
+        ])
+    if cmd == '/tasks':
+        tasks = data.get('tasks', {}).get('tasks', [])
+        visible = [task for task in tasks if task.get('status') != 'done'] or tasks[:10]
+        if not visible:
+            return ('tasks', ['(no tasks)'])
+        return ('tasks', [
+            f"{task.get('status', 'unknown'):<11} {task.get('task_id', '')}  {task.get('title', '')}"
+            for task in visible[:10]
+        ])
+    return None
+
+
+def _is_unknown_slash_command(cmd: str) -> bool:
+    return cmd.startswith('/') and cmd.split(' ', 1)[0] not in COMMANDS
 
 
 # ── command-result view ───────────────────────────────────────────────────
@@ -905,8 +1303,45 @@ def _handle_send(base: str, target: str, body: str) -> dict:
     return _post_json(f'{base}/v1/messages', {'source': 'synkraken-tui', 'target': target, 'body': body})
 
 
+def _mention_route(target: str, body: str, current_room: str | None) -> tuple[str, str]:
+    """Resolve mention routing while preserving an explicit global escape hatch."""
+    stripped = body.strip()
+    if stripped.startswith('--global '):
+        return target, stripped[len('--global '):].strip()
+    if target == 'broadcast' and current_room:
+        return f'room:{current_room}', stripped
+    return target, stripped
+
+
+def _parse_leading_mentions(cmd: str, aliases: dict[str, str]) -> tuple[list[str], str]:
+    """Parse only leading @mentions as routing targets.
+
+    Mentions later in the sentence, especially quoted ones like ``"@goose"``,
+    are message content rather than delivery targets.
+    """
+    remaining = cmd.strip()
+    targets: list[str] = []
+    while remaining.startswith('@'):
+        match = re.match(r'@([A-Za-z0-9._-]+)(?:\s+|$)', remaining)
+        if not match:
+            break
+        name = match.group(1)
+        target = aliases.get(name.lower())
+        if target is None:
+            break
+        if target == 'broadcast':
+            targets = ['broadcast']
+            remaining = remaining[match.end():].lstrip()
+            break
+        if target not in targets:
+            targets.append(target)
+        remaining = remaining[match.end():].lstrip()
+    return targets, remaining
+
+
 def _start_async_send(state: dict, base: str, target: str, body: str,
-                      label: str, *, return_view: str | None = None) -> None:
+                      label: str, *, return_view: str | None = None,
+                      metadata: dict | None = None) -> None:
     """Kick off a POST /v1/messages in the background.
 
     The main loop reaps `state['pending']` each frame and surfaces the result.
@@ -917,17 +1352,92 @@ def _start_async_send(state: dict, base: str, target: str, body: str,
     """
     pending = {
         'label': label, 'target': target, 'body': body,
+        'metadata': metadata or {},
         'started_at': time.time(), 'done': False,
         'result': None, 'error': None, 'return_view': return_view,
     }
     state['pending'] = pending
+    temp_message = {
+        'message_id': f"pending:{time.time()}",
+        'conversation_id': '',
+        'source': 'synkraken-tui',
+        'target': target,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'body': body,
+    }
+    base_result = {}
+    if state.get('view') == 'chat' and state.get('command_result'):
+        base_result = dict(state['command_result'][1])
+    messages = list(base_result.get('messages', []))
+    messages.append(temp_message)
+    state['command_result'] = (label, {
+        'conversation_id': '',
+        'messages': messages,
+        'deliveries': list(base_result.get('deliveries', [])),
+        'dead_letters': list(base_result.get('dead_letters', [])),
+    })
+    state['chat_target'] = target
+    state['view'] = 'chat'
 
     def run():
         try:
             pending['result'] = _post_json(
                 f'{base}/v1/messages',
-                {'source': 'synkraken-tui', 'target': target, 'body': body},
+                {'source': 'synkraken-tui', 'target': target, 'body': body,
+                 'metadata': metadata or {}},
             )
+        except Exception as exc:  # noqa: BLE001
+            pending['error'] = str(exc)
+        finally:
+            pending['done'] = True
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _start_async_multi_send(state: dict, base: str, targets: list[str], body: str,
+                            label: str = '@mentions') -> None:
+    """Kick off multiple directed sends in one background worker."""
+    pending = {
+        'label': label, 'target': ','.join(targets), 'body': body,
+        'started_at': time.time(), 'done': False,
+        'result': None, 'error': None, 'return_view': 'command-result',
+    }
+    state['pending'] = pending
+    temp_message = {
+        'message_id': f"pending:{time.time()}",
+        'conversation_id': '',
+        'source': 'synkraken-tui',
+        'target': ','.join(targets),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'body': body,
+    }
+    base_result = {}
+    if state.get('view') == 'chat' and state.get('command_result'):
+        base_result = dict(state['command_result'][1])
+    messages = list(base_result.get('messages', []))
+    messages.append(temp_message)
+    state['command_result'] = (label, {
+        'conversation_id': '',
+        'messages': messages,
+        'deliveries': list(base_result.get('deliveries', [])),
+        'dead_letters': list(base_result.get('dead_letters', [])),
+    })
+    state['chat_target'] = ','.join(targets)
+    state['view'] = 'chat'
+
+    def run():
+        combined = {'message': {'source': 'synkraken-tui'},
+                    'deliveries': [], 'dead_letters': []}
+        try:
+            for target in targets:
+                try:
+                    result = _handle_send(base, target, body)
+                    combined['message'] = result.get('message') or combined['message']
+                    combined['deliveries'].extend(result.get('deliveries', []))
+                    combined['dead_letters'].extend(result.get('dead_letters', []))
+                except Exception as exc:  # noqa: BLE001
+                    combined['dead_letters'].append({'adapter_id': target, 'reason': str(exc)})
+            pending['result'] = combined
         except Exception as exc:  # noqa: BLE001
             pending['error'] = str(exc)
         finally:
@@ -948,6 +1458,176 @@ def _handle_room_transcript(base: str, name: str) -> dict:
         'deliveries': [],
         'dead_letters': [],
     }
+
+
+def _parse_discuss_args(rest: str, current_room: str | None) -> dict[str, Any]:
+    try:
+        parts = shlex.split(rest)
+    except ValueError as exc:
+        raise ValueError(f'invalid /discuss syntax: {exc}') from None
+    max_turns = 4
+    room_name = current_room
+    values: list[str] = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == '--turns':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /discuss [--turns N] [--room name] <agent1> <agent2> "topic"')
+            max_turns = int(parts[i])
+        elif part == '--room':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /discuss [--turns N] [--room name] <agent1> <agent2> "topic"')
+            room_name = parts[i].lstrip('#')
+        else:
+            values.append(part)
+        i += 1
+    if len(values) < 3:
+        raise ValueError('usage: /discuss [--turns N] [--room name] <agent1> <agent2> "topic"')
+    return {
+        'agents': values[:-1],
+        'topic': values[-1],
+        'max_turns': max_turns,
+        'room_name': room_name,
+    }
+
+
+def _handle_discussion(base: str, params: dict[str, Any]) -> dict:
+    payload = {
+        'source': 'synkraken-tui',
+        'agents': params['agents'],
+        'topic': params['topic'],
+        'max_turns': params['max_turns'],
+    }
+    if params.get('room_name'):
+        payload['room_name'] = params['room_name']
+    return _post_json(f'{base}/v1/discussions', payload)
+
+
+def _parse_team_args(rest: str, current_room: str | None) -> dict[str, Any]:
+    if not current_room:
+        raise ValueError('Team mode needs a room. Create or select a room first.')
+    try:
+        parts = shlex.split(rest)
+    except ValueError as exc:
+        raise ValueError(f'invalid /team syntax: {exc}') from None
+    turns = 4
+    values: list[str] = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == '--turns':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /team [--turns N] "question or task"')
+            turns = int(parts[i])
+        else:
+            values.append(part)
+        i += 1
+    question = ' '.join(values).strip()
+    if not question:
+        raise ValueError('usage: /team [--turns N] "question or task"')
+    return {'room_name': current_room, 'question': question, 'turns': turns}
+
+
+def _handle_team_task(base: str, params: dict[str, Any]) -> dict:
+    return _post_json(f'{base}/v1/team-tasks', {
+        'source': 'synkraken-tui',
+        'room_name': params['room_name'],
+        'question': params['question'],
+        'turns': params['turns'],
+    })
+
+
+def _start_async_discussion(state: dict, base: str, params: dict[str, Any]) -> None:
+    agents = params['agents']
+    topic = params['topic']
+    room_name = params.get('room_name')
+    label = f"discussion #{room_name}" if room_name else 'discussion'
+    pending = {
+        'label': label,
+        'target': f"room:{room_name}" if room_name else 'discussion',
+        'body': topic,
+        'started_at': time.time(),
+        'done': False,
+        'result': None,
+        'error': None,
+        'return_view': 'chat',
+        'discussion': True,
+        'room_name': room_name,
+    }
+    state['pending'] = pending
+    state['command_result'] = (label, {
+        'conversation_id': '',
+        'messages': [{
+            'message_id': f"pending-discussion:{time.time()}",
+            'conversation_id': '',
+            'source': 'synkraken-tui',
+            'target': pending['target'],
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'body': f"Discussion topic: {topic}",
+        }],
+        'deliveries': [],
+        'dead_letters': [],
+    })
+    state['chat_target'] = pending['target']
+    state['view'] = 'chat'
+
+    def run():
+        try:
+            pending['result'] = _handle_discussion(base, params)
+        except Exception as exc:  # noqa: BLE001
+            pending['error'] = str(exc)
+        finally:
+            pending['done'] = True
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _start_async_team_task(state: dict, base: str, params: dict[str, Any]) -> None:
+    room_name = params['room_name']
+    question = params['question']
+    label = f"team #{room_name}"
+    pending = {
+        'label': label,
+        'target': f"room:{room_name}",
+        'body': question,
+        'started_at': time.time(),
+        'done': False,
+        'result': None,
+        'error': None,
+        'return_view': 'chat',
+        'team_task': True,
+        'room_name': room_name,
+    }
+    state['pending'] = pending
+    state['command_result'] = (f'#{room_name}', {
+        'conversation_id': '',
+        'messages': [{
+            'message_id': f"pending-team:{time.time()}",
+            'conversation_id': '',
+            'source': 'synkraken-tui',
+            'target': pending['target'],
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'body': f"Team task: {question}",
+        }],
+        'deliveries': [],
+        'dead_letters': [],
+    })
+    state['chat_target'] = pending['target']
+    state['view'] = 'chat'
+
+    def run():
+        try:
+            pending['result'] = _handle_team_task(base, params)
+        except Exception as exc:  # noqa: BLE001
+            pending['error'] = str(exc)
+        finally:
+            pending['done'] = True
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _normalize_command(cmd: str) -> str:
@@ -1132,9 +1812,10 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
         if not args:
             return ('rooms', None, 'usage: /room enter <name>')
         name = args[0].lstrip('#').lower()
+        result = _handle_room_transcript(base, name)
         state['current_room'] = name
         save_preferences(state)
-        return (f'enter #{name}', None, f'entered #{name}  — plain text will broadcast to the room')
+        return (f'#{name}', result, f'in #{name}  ·  type to chat  ·  /room leave to exit')
     if sub == 'leave':
         if not state.get('current_room'):
             return ('rooms', None, 'not in a room')
@@ -1156,7 +1837,7 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
             save_preferences(state)
             mc = len(members)
             plural = '' if mc == 1 else 's'
-            return ('rooms', None,
+            return (f'#{name}', _handle_room_transcript(base, name),
                     f'created and entered #{name}  ·  {mc} member{plural}  ·  type to chat')
         except Exception as exc:  # noqa: BLE001
             return ('create error',
@@ -1216,6 +1897,7 @@ def _main(stdscr):
         'last_target': prefs.get('last_target', 'hermes'),
         'current_room': prefs.get('current_room'),
         'command_result': None,
+        'local_output': None,
         'pending': None,        # in-flight send (set by _start_async_send)
         'chat_target': None,    # target captured when /open <n> or /open #x is run
     }
@@ -1234,7 +1916,7 @@ def _main(stdscr):
         data = {'health': {'ok': False, 'timestamp': '', 'error': str(exc)},
                 'agents': {'agents': []}, 'recent': {'conversations': []},
                 'deliveries': {'deliveries': []}, 'dead_letters': {'dead_letters': []},
-                'rooms': {'rooms': []}}
+                'rooms': {'rooms': []}, 'tasks': {'tasks': []}}
     stream = EventStreamWorker(base)
     stream.start()
     last_refresh = 0.0
@@ -1249,8 +1931,15 @@ def _main(stdscr):
                     data = {'health': {'ok': False, 'timestamp': '', 'error': str(exc)},
                             'agents': {'agents': []}, 'recent': {'conversations': []},
                             'deliveries': {'deliveries': []}, 'dead_letters': {'dead_letters': []},
-                            'rooms': {'rooms': []}}
+                            'rooms': {'rooms': []}, 'tasks': {'tasks': []}}
                 last_refresh = now
+                if state.get('view') == 'chat' and state.get('current_room'):
+                    room_name = state['current_room']
+                    try:
+                        state['command_result'] = (f'#{room_name}', _handle_room_transcript(base, room_name))
+                        state['chat_target'] = f'room:{room_name}'
+                    except Exception:
+                        pass
 
             # Reap completed async send (runs every frame). When done we
             # surface the result and force a data refresh so the dashboard's
@@ -1258,12 +1947,72 @@ def _main(stdscr):
             if state.get('pending') and state['pending'].get('done'):
                 p = state.pop('pending')
                 if p.get('error'):
-                    state['command_result'] = (f"{p['label']}  ✗",
-                        {'message': {}, 'deliveries': [],
-                         'dead_letters': [{'adapter_id': p['target'], 'reason': p['error']}]})
-                    state['view'] = 'command-result'
+                    if p.get('team_task') and p.get('room_name'):
+                        room_name = p['room_name']
+                        try:
+                            transcript = _handle_room_transcript(base, room_name)
+                            runs = _get_json(f'{base}/v1/team-runs?room={room_name}&limit=1').get('team_runs', [])
+                            summary = {
+                                'message_id': f"team-timeout:{time.time()}",
+                                'conversation_id': '',
+                                'source': 'synkraken-team',
+                                'target': f"room:{room_name}",
+                                'timestamp': datetime.now(timezone.utc).isoformat(),
+                                'body': (
+                                    "Team run request timed out in the TUI.\n"
+                                    f"Room transcript is still visible for #{room_name}.\n"
+                                    f"Latest run: {runs[0].get('team_run_id') if runs else '(pending)'}\n"
+                                    f"Inspect: /team-run {runs[0].get('team_run_id') if runs else '<id>'}\n"
+                                    f"Client error: {p['error']}"
+                                ),
+                            }
+                            transcript.setdefault('messages', []).append(summary)
+                            state['command_result'] = (f'#{room_name}', transcript)
+                            state['chat_target'] = f'room:{room_name}'
+                            state['view'] = 'chat'
+                        except Exception:
+                            state['command_result'] = (f"{p['label']}  ✗",
+                                {'message': {'body': f"Team run request timed out: {p['error']}"},
+                                 'deliveries': [], 'dead_letters': []})
+                            state['view'] = 'command-result'
+                    else:
+                        state['command_result'] = (f"{p['label']}  ✗",
+                            {'message': {}, 'deliveries': [],
+                             'dead_letters': [{'adapter_id': p['target'], 'reason': p['error']}]})
+                        state['view'] = 'command-result'
                 else:
-                    state['command_result'] = (p['label'], p['result'])
+                    if (p.get('discussion') or p.get('team_task')) and p.get('room_name'):
+                        room_name = p['room_name']
+                        state['command_result'] = (
+                            f'#{room_name}',
+                            _handle_room_transcript(base, room_name),
+                        )
+                        state['chat_target'] = f'room:{room_name}'
+                    elif p.get('discussion'):
+                        result = p['result'] or {}
+                        cid = result.get('conversation_id') or result.get('discussion_id')
+                        state['command_result'] = (
+                            p['label'],
+                            _handle_history(base, cid) if cid else result,
+                        )
+                        state['chat_target'] = 'discussion'
+                    elif state.get('view') == 'chat' and state.get('current_room'):
+                        room_name = state['current_room']
+                        state['command_result'] = (
+                            f'#{room_name}',
+                            _handle_room_transcript(base, room_name),
+                        )
+                        state['chat_target'] = f'room:{room_name}'
+                    elif (state.get('view') == 'chat'
+                            and str(p.get('target', '')).startswith('room:')):
+                        room_name = str(p['target']).split(':', 1)[1]
+                        state['command_result'] = (
+                            f'#{room_name}',
+                            _handle_room_transcript(base, room_name),
+                        )
+                        state['chat_target'] = p['target']
+                    else:
+                        state['command_result'] = (p['label'], p['result'])
                     # If user is browsing dashboard/chat/rooms, stay there
                     # — the new reply will appear in the relevant panel.
                     if state.get('view') not in ('dashboard', 'chat', 'rooms', 'events'):
@@ -1295,8 +2044,15 @@ def _main(stdscr):
                 _view_rooms(stdscr, data, state, top, h, w)
             elif view == 'help':
                 _view_help(stdscr, top, h, w)
+            elif view == 'local-output' and state.get('local_output'):
+                label, lines = state['local_output']
+                _view_local_output(stdscr, label, lines, top, h, w)
             elif view == 'chat' and state.get('command_result'):
                 label, result = state['command_result']
+                target = state.get('chat_target')
+                conversation_id = result.get('conversation_id') or None
+                result = dict(result)
+                result['activity'] = stream.get_delivery_activity(target, conversation_id)
                 _view_chat(stdscr, result, top, h, w, label=label)
             elif view == 'command-result' and state.get('command_result'):
                 label, result = state['command_result']
@@ -1350,6 +2106,7 @@ def _main(stdscr):
                 if cmd in ('/dashboard', '/refresh', ''):
                     state['view'] = 'dashboard'
                     state['command_result'] = None
+                    state['local_output'] = None
                     last_refresh = 0
                     hint = ''
                     continue
@@ -1361,10 +2118,38 @@ def _main(stdscr):
                     state['view'] = 'deadletters'; hint = ''; continue
                 if cmd == '/adapters':
                     state['view'] = 'adapters'; hint = ''; continue
-                if cmd == '/rooms':
-                    state['view'] = 'rooms'; hint = ''; continue
                 if cmd == '/help':
                     state['view'] = 'help'; hint = ''; continue
+                if cmd == '/clear':
+                    state['view'] = 'dashboard'
+                    state['command_result'] = None
+                    state['local_output'] = None
+                    hint = ''
+                    continue
+
+                if cmd == '/memory' or cmd.startswith('/memory '):
+                    state['local_output'] = _memory_command_lines(cmd, base, state)
+                    state['view'] = 'local-output'
+                    if cmd == '/memory edit':
+                        command = '/memory set '
+                        hint = 'choose purpose, objective, focus, rules, constraints, or notes'
+                    else:
+                        hint = ''
+                    continue
+
+                team_output = _team_governance_command_lines(cmd, base, state)
+                if team_output is not None:
+                    state['local_output'] = team_output
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                local_output = _local_command_lines(cmd, base, data, state)
+                if local_output is not None:
+                    state['local_output'] = local_output
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
 
                 # Match /room exactly or /room <subcommand> — NOT /roomfoo.
                 if cmd == '/room' or cmd.startswith('/room '):
@@ -1373,7 +2158,11 @@ def _main(stdscr):
                     hint = h2
                     if result is not None:
                         state['command_result'] = (label, result)
-                        state['view'] = 'command-result'
+                        if label.startswith('#'):
+                            state['view'] = 'chat'
+                            state['chat_target'] = f'room:{label[1:]}'
+                        else:
+                            state['view'] = 'command-result'
                     else:
                         state['view'] = 'rooms'
                     last_refresh = 0
@@ -1484,6 +2273,14 @@ def _main(stdscr):
                     command = raw  # preserve the text so they can resubmit
                     continue
 
+                if _is_unknown_slash_command(cmd):
+                    state['local_output'] = ('unknown command', [
+                        f'Unknown command: {cmd.split(" ", 1)[0]}. Type /help.'
+                    ])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
                 if cmd.startswith('/send '):
                     parts = cmd.split(' ', 2)
                     if len(parts) >= 3:
@@ -1503,6 +2300,45 @@ def _main(stdscr):
                         hint = 'usage: /broadcast <message>'
                     continue
 
+                if cmd.startswith('/approve ') or cmd.startswith('/reject '):
+                    action, team_run_id = cmd.split(' ', 1)
+                    team_run_id = team_run_id.strip()
+                    if not team_run_id:
+                        hint = f'usage: {action} <team_run_id>'
+                        continue
+                    try:
+                        result = _post_json(
+                            f"{base}/v1/team-runs/{team_run_id}/{action.lstrip('/')}",
+                            {'actor': 'synkraken-tui'},
+                        )
+                        run = result.get('team_run') or {}
+                        state['local_output'] = (action.lstrip('/'), _format_team_run_lines(run))
+                        state['view'] = 'local-output'
+                        hint = f"{'approved' if action == '/approve' else 'rejected'} {team_run_id}"
+                    except Exception as exc:  # noqa: BLE001
+                        state['local_output'] = (action.lstrip('/'), [str(exc)])
+                        state['view'] = 'local-output'
+                        hint = ''
+                    continue
+
+                if cmd.startswith('/discuss '):
+                    try:
+                        params = _parse_discuss_args(cmd.split(' ', 1)[1], state.get('current_room'))
+                        _start_async_discussion(state, base, params)
+                    except Exception as exc:  # noqa: BLE001
+                        hint = str(exc)
+                    continue
+
+                if cmd == '/team' or cmd.startswith('/team '):
+                    try:
+                        params = _parse_team_args(cmd[len('/team'):].strip(), state.get('current_room'))
+                        _start_async_team_task(state, base, params)
+                    except Exception as exc:  # noqa: BLE001
+                        state['local_output'] = ('team', [str(exc)])
+                        state['view'] = 'local-output'
+                        hint = ''
+                    continue
+
                 # ── #room shorthand ───────────────────────────────────
                 if cmd.startswith('#') and ' ' in cmd:
                     name, body = cmd[1:].split(' ', 1)
@@ -1513,42 +2349,25 @@ def _main(stdscr):
                     continue
 
                 # ── @mentions ─────────────────────────────────────────
-                if '@' in cmd:
-                    targets_list: list[str] = []
-                    body = cmd
-                    matches = re.findall(r'@([A-Za-z0-9._-]+)', cmd)
+                if cmd.startswith('@'):
                     aliases = _mention_alias_map(data)
-                    for name in matches:
-                        key = name.lower()
-                        if key in aliases:
-                            t = aliases[key]
-                            if t == 'broadcast':
-                                targets_list = ['broadcast']
-                                break
-                            if t not in targets_list:
-                                targets_list.append(t)
-                        body = re.sub(r'@' + re.escape(name), '', body).strip()
+                    targets_list, body = _parse_leading_mentions(cmd, aliases)
                     if targets_list and body:
                         if len(targets_list) == 1:
                             t = targets_list[0]
-                            label = 'broadcast' if t == 'broadcast' else f'@{t}'
-                            _start_async_send(state, base, t, body, label)
+                            metadata = None
+                            if t == 'broadcast':
+                                t, body = _mention_route(t, body, state.get('current_room'))
+                            elif body.startswith('--global '):
+                                body = body[len('--global '):].strip()
+                            elif state.get('current_room'):
+                                metadata = {'room_context': f"room:{state['current_room']}"}
+                            label = ('broadcast' if t == 'broadcast'
+                                     else f'#{t.split(":", 1)[1]}' if t.startswith('room:')
+                                     else f'@{t}')
+                            _start_async_send(state, base, t, body, label, metadata=metadata)
                         else:
-                            # Multi-target @mentions: fall back to sequential
-                            # sync sends so we can aggregate results. Rare.
-                            combined = {'message': {'source': 'synkraken-tui'},
-                                        'deliveries': [], 'dead_letters': []}
-                            for t in targets_list:
-                                try:
-                                    result = _handle_send(base, t, body)
-                                    combined['message'] = result.get('message') or combined['message']
-                                    combined['deliveries'].extend(result.get('deliveries', []))
-                                    combined['dead_letters'].extend(result.get('dead_letters', []))
-                                except Exception as exc:  # noqa: BLE001
-                                    combined['dead_letters'].append({'adapter_id': t, 'reason': str(exc)})
-                            state['command_result'] = ('@mentions', combined)
-                            state['view'] = 'command-result'
-                            last_refresh = 0
+                            _start_async_multi_send(state, base, targets_list, body)
                     continue
 
                 # ── in-room plain text → broadcast to room ────────────

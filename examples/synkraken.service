@@ -1,16 +1,15 @@
 [Unit]
-Description=synkraken
+Description=SynKraken local bridge daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/synkraken
-ExecStart=/usr/bin/python3 -m synkraken --config /etc/synkraken/config.json
+# Example only: replace both paths if you install this unit manually.
+WorkingDirectory=/absolute/path/to/synkraken
+ExecStart=/absolute/path/to/synkraken-daemon --config /absolute/path/to/synkraken/config.local.json
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=default.target

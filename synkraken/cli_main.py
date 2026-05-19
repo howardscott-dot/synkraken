@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -10,6 +11,7 @@ import urllib.request
 from .branding import NAME, TAGLINE, print_logo
 from .setup_mode import run_setup, run_uninstall
 from .tui import run_tui
+from .web import serve as serve_web
 
 DEFAULT_BASE = os.environ.get("SYNKRAKEN_URL", "http://127.0.0.1:9460")
 
@@ -44,7 +46,9 @@ def print_agents(data: dict) -> None:
         adapter_type = agent.get("type", "unknown")
         runtime_name = agent.get("runtime_name", adapter_id)
         enabled = bool(agent.get("enabled", False))
-        print(f"{marker(enabled)} {runtime_name:<10} [{adapter_id}]  type={adapter_type}  enabled={str(enabled).lower()}")
+        status = agent.get("status") or ("online" if enabled else "disabled")
+        last_seen = agent.get("last_seen_at") or "never"
+        print(f"{marker(enabled)} {runtime_name:<10} [{adapter_id}]  type={adapter_type}  status={status}  last_seen={last_seen}")
 
 
 def print_health(data: dict) -> None:
@@ -141,6 +145,74 @@ def print_result(data: dict, raw: bool) -> None:
             print(f"○ {item.get('adapter_id')}: {item.get('reason')}")
 
 
+def _systemd_service_installed() -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "cat", "synkraken.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+def _print_service_install_help() -> None:
+    print("SynKraken user service is not installed.")
+    print()
+    print("Install and start it with:")
+    print("  ./scripts/install-user-service.sh")
+    print("  systemctl --user enable --now synkraken")
+
+
+def _run_systemctl(action: str) -> int:
+    command = ["systemctl", "--user", action, "synkraken"]
+    if action == "status":
+        command.append("--no-pager")
+    try:
+        return subprocess.run(command, check=False).returncode
+    except FileNotFoundError:
+        print("systemctl was not found on PATH.", file=sys.stderr)
+        return 1
+
+
+def _print_daemon_health(base: str) -> None:
+    print()
+    print(f"Daemon URL: {base}")
+    try:
+        data = get_json(f"{base}/health")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Daemon health: unavailable ({exc})")
+        return
+    print(f"Daemon health: {'OK' if bool(data.get('ok', False)) else 'NOT OK'}")
+
+
+def handle_lifecycle_command(action: str, base: str) -> int:
+    if not _systemd_service_installed():
+        _print_service_install_help()
+        if action == "status":
+            _print_daemon_health(base)
+        return 1
+
+    returncode = _run_systemctl(action)
+    if action == "status":
+        _print_daemon_health(base)
+    return returncode
+
+
+def add_lifecycle_parser(sub: argparse._SubParsersAction, action: str) -> None:
+    help_text = {
+        "start": "Start the daemon via the user service",
+        "stop": "Stop the daemon via the user service",
+        "restart": "Restart the daemon via the user service",
+        "status": "Show user-service state and daemon health",
+    }[action]
+    parser = sub.add_parser(action, help=help_text)
+    parser.add_argument("target", nargs="?", choices=["daemon"], help="Optional explicit target")
+    add_base_url_arg(parser)
+
+
 def add_base_url_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--url", default=DEFAULT_BASE, help="Base URL for synkraken")
     parser.add_argument("--json", action="store_true", help="Print raw JSON output")
@@ -153,6 +225,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  synkraken tui\n"
+            "  synkraken start daemon\n"
+            "  synkraken status\n"
             "  synkraken health\n"
             "  synkraken agents\n"
             "  synkraken send hermes \"Reply with exactly: HELLO\"\n"
@@ -161,6 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
+
+    for action in ("start", "stop", "restart", "status"):
+        add_lifecycle_parser(sub, action)
 
     p_health = sub.add_parser("health", help="Check bridge health")
     add_base_url_arg(p_health)
@@ -196,6 +273,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_tui = sub.add_parser("tui", help="Launch the interactive TUI")
     p_tui.add_argument('--banner-only', action='store_true', help='Print banner and exit')
 
+    p_web = sub.add_parser("web", help="Launch the local web command deck")
+    p_web.add_argument("--host", default="127.0.0.1", help="Host for the local web UI")
+    p_web.add_argument("--port", type=int, default=9461, help="Port for the local web UI")
+    p_web.add_argument("--daemon-url", default=DEFAULT_BASE, help="Existing synkraken daemon base URL")
+
     sub.add_parser("config",    help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
     sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
@@ -207,7 +289,10 @@ def _print_no_command() -> None:
     print("First-time setup:")
     print("  synkraken config            # walks you through it\n")
     print("Day-to-day:")
+    print("  synkraken start daemon      # start the user service")
+    print("  synkraken status            # service state + daemon health")
     print("  synkraken tui               # open the TUI dashboard")
+    print("  synkraken web               # open the local web command deck")
     print("  synkraken health            # is the daemon ok?")
     print("  synkraken agents            # which adapters are configured?")
     print("  synkraken send hermes 'hi'  # message a single agent\n")
@@ -239,7 +324,12 @@ def main() -> None:
             return
         run_tui()
         return
+    if args.command == 'web':
+        serve_web(host=args.host, port=args.port, daemon_url=args.daemon_url)
+        return
     base = args.url.rstrip("/")
+    if args.command in {"start", "stop", "restart", "status"}:
+        raise SystemExit(handle_lifecycle_command(args.command, base))
     try:
         if args.command == "health":
             data = get_json(f"{base}/health")
