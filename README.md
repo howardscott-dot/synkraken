@@ -236,12 +236,23 @@ Useful local TUI commands:
 /team-run  inspect one team run, including failure summary and partial transcript
 /approve   approve a pending team run
 /reject    reject a pending team run
+/tail      jump the current transcript back to live
+/transcript show transcript mode: team runs, room history, and filters
+/save-transcript export the current room/chat transcript under exports/
 /clear     clear local command output
 ```
 
 Slash commands are handled by the TUI itself; unknown commands stay local and
 show `Unknown command: /whatever. Type /help.` instead of being routed to an
 agent or creating a dead letter.
+
+Chat and room transcripts keep navigable scrollback in the TUI. Use Up/Down,
+PgUp/PgDn, Home, and End to inspect earlier messages; when you are viewing
+history, new messages do not yank the viewport back to live. Press End or run
+`/tail` to resume auto-follow. Search the current transcript with `/term`, then
+use `n` and `N` for next and previous matches. `/save-transcript` writes the
+visible room or conversation history to a dated text file such as
+`exports/room-test1-20260519.txt`.
 
 ## Persistent multi-agent rooms
 

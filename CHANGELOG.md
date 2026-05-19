@@ -52,6 +52,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `timeout`, `failed_phase`, and `run_blocked` events, and expose the failure
   summary through `/team-run` and the Web Command Deck instead of relying on
   dead letters as the primary UX.
+- TUI transcript navigation: chat and room history now support Up/Down,
+  PgUp/PgDn, Home/End scrollback, history-position indicators, preserved
+  review position while new messages arrive, `/tail`, transcript search with
+  `/term`, `n`, and `N`, `/transcript`, and `/save-transcript` exports under
+  `exports/`.
 - Basic local TUI slash commands: `/help`, `/status`, `/health`, `/agents`,
   `/rooms`, `/tasks`, and `/clear`; unknown slash commands now stay local
   instead of creating dead letters.

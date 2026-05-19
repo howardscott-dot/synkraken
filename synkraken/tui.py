@@ -10,6 +10,7 @@ import time
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .branding import (
@@ -68,7 +69,8 @@ COMMANDS = [
     '/dashboard', '/events', '/conversations', '/deadletters', '/adapters',
     '/rooms', '/room', '/tasks', '/compose', '/send', '/broadcast', '/history',
     '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject',
-    '/filter', '/help', '/status', '/health', '/agents',
+    '/filter', '/help', '/status', '/health', '/agents', '/tail', '/transcript',
+    '/save-transcript',
     '/presence', '/agent', '/memory', '/clear', '/refresh', '/quit',
 ]
 ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'list']
@@ -802,10 +804,8 @@ def _activity_row(row: dict[str, Any], *, max_w: int) -> tuple:
     return (line[:max_w], color, curses.A_DIM if status not in ('failed', 'timeout') else curses.A_BOLD)
 
 
-def _view_chat(stdscr, result, top, h, w, *, label: str = 'CONVERSATION'):
-    """Render messages as chat bubbles. Source = left, replies = right."""
-    avail_h = h - top - 4
-    _draw_panel(stdscr, top, 0, w, avail_h, title=f'CHAT  •  {label}')
+def _chat_lines(result: dict, w: int) -> list[tuple]:
+    """Build the full rendered chat transcript. Source = left, replies = right."""
     msgs = result.get('messages', [])
     deliveries = result.get('deliveries', [])
     activity_rows = result.get('activity', [])
@@ -850,11 +850,192 @@ def _view_chat(stdscr, result, top, h, w, *, label: str = 'CONVERSATION'):
         for rows in activity_by_mid.values():
             for row in rows:
                 lines.append(_activity_row(row, max_w=inner_w))
+    return lines
 
-    # Show only the tail when overflowing.
-    if len(lines) > avail_h - 2:
-        lines = lines[-(avail_h - 2):]
-    _panel_lines(stdscr, top, 0, w, avail_h, lines)
+
+def _line_text(item: tuple | str) -> str:
+    if isinstance(item, tuple):
+        return str(item[0])
+    return str(item)
+
+
+def _visible_transcript_slice(lines: list[tuple], viewport_h: int, scroll_offset: int) -> tuple[list[tuple], int, int]:
+    visible_h = max(1, viewport_h)
+    max_offset = max(0, len(lines) - visible_h)
+    offset = min(max(0, scroll_offset), max_offset)
+    start = max(0, len(lines) - visible_h - offset)
+    end = min(len(lines), start + visible_h)
+    return lines[start:end], start, offset
+
+
+def _transcript_key(state: dict) -> str:
+    if state.get('chat_target'):
+        return str(state['chat_target'])
+    if state.get('current_room'):
+        return f"room:{state['current_room']}"
+    result = state.get('command_result')
+    if result:
+        data = result[1] if isinstance(result, tuple) and len(result) > 1 else {}
+        cid = data.get('conversation_id') if isinstance(data, dict) else None
+        if cid:
+            return str(cid)
+    return 'chat'
+
+
+def _transcript_state(state: dict) -> dict:
+    transcripts = state.setdefault('transcripts', {})
+    key = _transcript_key(state)
+    return transcripts.setdefault(key, {'scroll_offset': 0, 'search': None, 'line_count': 0})
+
+
+def _reset_transcript_view(state: dict) -> None:
+    _transcript_state(state)['scroll_offset'] = 0
+
+
+def _scroll_transcript(state: dict, amount: int, total_lines: int, viewport_h: int) -> None:
+    ts = _transcript_state(state)
+    max_offset = max(0, total_lines - max(1, viewport_h))
+    ts['scroll_offset'] = min(max(0, int(ts.get('scroll_offset') or 0) + amount), max_offset)
+
+
+def _jump_transcript(state: dict, live: bool, total_lines: int, viewport_h: int) -> None:
+    ts = _transcript_state(state)
+    ts['scroll_offset'] = 0 if live else max(0, total_lines - max(1, viewport_h))
+
+
+def _sync_transcript_line_count(ts: dict, line_count: int) -> None:
+    previous_count = int(ts.get('line_count') or 0)
+    current_offset = int(ts.get('scroll_offset') or 0)
+    if current_offset and line_count > previous_count:
+        ts['scroll_offset'] = current_offset + (line_count - previous_count)
+    ts['line_count'] = line_count
+
+
+def _search_transcript(state: dict, lines: list[tuple], term: str, *, backwards: bool = False) -> bool:
+    needle = term.strip().lower()
+    if not needle:
+        return False
+    haystack = [_line_text(line).lower() for line in lines]
+    matches = [idx for idx, line in enumerate(haystack) if needle in line]
+    if not matches:
+        _transcript_state(state)['search'] = {'term': term, 'matches': [], 'index': -1}
+        return False
+    search = _transcript_state(state).get('search') or {}
+    current_index = int(search.get('index', -1)) if search.get('term') == term else -1
+    if backwards:
+        next_index = current_index - 1 if current_index > 0 else len(matches) - 1
+    else:
+        next_index = current_index + 1 if current_index + 1 < len(matches) else 0
+    _transcript_state(state)['search'] = {'term': term, 'matches': matches, 'index': next_index}
+    viewport_h = max(1, int(state.get('last_chat_viewport_h') or 1))
+    target = matches[next_index]
+    bottom_start = max(0, len(lines) - viewport_h)
+    start = min(target, bottom_start)
+    _transcript_state(state)['scroll_offset'] = max(0, bottom_start - start)
+    return True
+
+
+def _repeat_search_transcript(state: dict, lines: list[tuple], *, backwards: bool = False) -> bool:
+    search = _transcript_state(state).get('search') or {}
+    term = search.get('term')
+    if not term:
+        return False
+    return _search_transcript(state, lines, str(term), backwards=backwards)
+
+
+def _format_transcript_messages(label: str, result: dict) -> str:
+    lines = [f"Transcript: {label}", ""]
+    for msg in result.get('messages', []):
+        ts = msg.get('timestamp') or ''
+        source = msg.get('source') or 'unknown'
+        target = msg.get('target') or ''
+        body = str(msg.get('body') or '').rstrip()
+        header = f"[{ts}] {source} -> {target}".rstrip()
+        lines.append(header)
+        lines.append(body)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _safe_export_name(label: str) -> str:
+    value = label.strip().lower().lstrip('#') or 'transcript'
+    value = re.sub(r'[^a-z0-9._-]+', '-', value).strip('-')
+    if not value.startswith('room-') and not value.startswith('run-') and value != 'transcript':
+        value = f'room-{value}'
+    return value or 'transcript'
+
+
+def _save_current_transcript(state: dict) -> Path:
+    if state.get('view') != 'chat' or not state.get('command_result'):
+        raise RuntimeError('open a room or conversation transcript first')
+    label, result = state['command_result']
+    export_dir = Path('exports')
+    export_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d')
+    path = export_dir / f"{_safe_export_name(str(label))}-{stamp}.txt"
+    path.write_text(_format_transcript_messages(str(label), result), encoding='utf-8')
+    return path
+
+
+def _transcript_mode_lines(state: dict, base: str) -> list[str]:
+    lines = [
+        'transcript mode',
+        '',
+        'navigation',
+        '  Up/Down, PgUp/PgDn, Home/End',
+        '  /tail                 jump live',
+        '  /search-term          search current transcript',
+        '  n / N                 next / previous match',
+        '',
+        'current transcript',
+    ]
+    if state.get('current_room'):
+        lines.append(f"  room history          /open #{state['current_room']}")
+    if state.get('chat_target'):
+        lines.append(f"  target                {state['chat_target']}")
+    if state.get('last_team_run_id'):
+        run_id = state['last_team_run_id']
+        lines.extend([
+            '',
+            'last team run',
+            f"  view                  /team-run {run_id}",
+            f"  export                /save-transcript",
+            f"  review                /team-run {run_id}",
+        ])
+    try:
+        suffix = f"?room={state['current_room']}&limit=5" if state.get('current_room') else "?limit=5"
+        runs = _get_json(f'{base}/v1/team-runs{suffix}').get('team_runs', [])
+    except Exception:
+        runs = []
+    if runs:
+        lines.extend(['', 'team runs'])
+        for run in runs:
+            lines.append(
+                f"  {run.get('team_run_id')}  {run.get('status')}  "
+                f"owner={run.get('owner_agent') or '(none)'}  room=#{run.get('room_name')}"
+            )
+    lines.extend(['', 'filters', f"  event filter          {state.get('event_filter', 'all')}"])
+    return lines
+
+
+def _view_chat(stdscr, result, state, top, h, w, *, label: str = 'CONVERSATION'):
+    avail_h = h - top - 4
+    _draw_panel(stdscr, top, 0, w, avail_h, title=f'CHAT  •  {label}')
+    lines = _chat_lines(result, w)
+    viewport_h = max(1, avail_h - 2)
+    state['last_chat_total_lines'] = len(lines)
+    state['last_chat_viewport_h'] = viewport_h
+    ts = _transcript_state(state)
+    _sync_transcript_line_count(ts, len(lines))
+    visible, start, offset = _visible_transcript_slice(lines, viewport_h, int(ts.get('scroll_offset') or 0))
+
+    if offset:
+        indicator = [
+            (f"[Viewing history: {start} lines above]", C_WARN, curses.A_BOLD),
+            ("Press End to return live", C_MUTED, curses.A_DIM),
+        ]
+        visible = indicator + visible[:max(0, viewport_h - len(indicator))]
+    _panel_lines(stdscr, top, 0, w, avail_h, visible)
 
 
 # ── deadletters view ──────────────────────────────────────────────────────
@@ -954,6 +1135,9 @@ def _view_help(stdscr, top, h, w):
         ('  /team-run <id>                  inspect one team run', None, 0),
         ('  /approve <id>                   approve a pending team run', None, 0),
         ('  /reject <id>                    reject a pending team run', None, 0),
+        ('  /save-transcript                export current room/chat transcript', None, 0),
+        ('  /tail                           jump current transcript back to live', None, 0),
+        ('  /transcript                     transcript mode: runs, history, filters', None, 0),
         ('', None, 0),
         ('ROOMS', C_TEAL, curses.A_BOLD),
         ('  /rooms                          list rooms', None, 0),
@@ -990,6 +1174,8 @@ def _view_help(stdscr, top, h, w):
         ('CONTROLS', C_TEAL, curses.A_BOLD),
         ('  /clear                          clear local command output', None, 0),
         ('  TAB                             autocomplete commands & mentions', None, 0),
+        ('  Up/Down PgUp/PgDn Home/End      scroll chat history / jump live', None, 0),
+        ('  /term, n, N                     search chat transcript', None, 0),
         ('  Enter                           submit', None, 0),
         ('  Ctrl-C  ×2                      quit (within 2 seconds)', None, 0),
         ('  /quit                           leave the TUI', None, 0),
@@ -1134,6 +1320,8 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
             f'agent count     {len(agents)}',
             f"current view    {state.get('view', 'dashboard')}",
             f"current filter  {state.get('event_filter', 'all')}",
+            f"transcript      {_transcript_key(state)}",
+            f"scroll offset   {int(_transcript_state(state).get('scroll_offset') or 0)} lines",
         ])
     if cmd == '/health':
         return ('health', json.dumps(health, indent=2, ensure_ascii=False).splitlines())
@@ -1197,6 +1385,8 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
             f"{task.get('status', 'unknown'):<11} {task.get('task_id', '')}  {task.get('title', '')}"
             for task in visible[:10]
         ])
+    if cmd == '/transcript':
+        return ('transcript', _transcript_mode_lines(state, base))
     return None
 
 
@@ -1900,6 +2090,10 @@ def _main(stdscr):
         'local_output': None,
         'pending': None,        # in-flight send (set by _start_async_send)
         'chat_target': None,    # target captured when /open <n> or /open #x is run
+        'transcripts': {},
+        'last_chat_total_lines': 0,
+        'last_chat_viewport_h': 1,
+        'last_team_run_id': None,
     }
     _init_colors()
     curses.curs_set(1)
@@ -1981,6 +2175,12 @@ def _main(stdscr):
                              'dead_letters': [{'adapter_id': p['target'], 'reason': p['error']}]})
                         state['view'] = 'command-result'
                 else:
+                    if p.get('team_task'):
+                        result = p.get('result') or {}
+                        run = result.get('team_run') or {}
+                        run_id = run.get('team_run_id') or result.get('team_run_id')
+                        if run_id:
+                            state['last_team_run_id'] = run_id
                     if (p.get('discussion') or p.get('team_task')) and p.get('room_name'):
                         room_name = p['room_name']
                         state['command_result'] = (
@@ -2018,6 +2218,9 @@ def _main(stdscr):
                     if state.get('view') not in ('dashboard', 'chat', 'rooms', 'events'):
                         state['view'] = 'command-result'
                 hint = f"{p['label']}  done ({time.time() - p['started_at']:.1f}s)"
+                if p.get('team_task') and state.get('last_team_run_id'):
+                    run_id = state['last_team_run_id']
+                    hint = f"team done  ·  view/review: /team-run {run_id}  ·  export: /save-transcript"
                 last_refresh = 0  # immediate refetch of the dashboard data
 
             events = list(stream.events)
@@ -2053,7 +2256,7 @@ def _main(stdscr):
                 conversation_id = result.get('conversation_id') or None
                 result = dict(result)
                 result['activity'] = stream.get_delivery_activity(target, conversation_id)
-                _view_chat(stdscr, result, top, h, w, label=label)
+                _view_chat(stdscr, result, state, top, h, w, label=label)
             elif view == 'command-result' and state.get('command_result'):
                 label, result = state['command_result']
                 _view_command_result(stdscr, label, result, top, h, w)
@@ -2125,6 +2328,21 @@ def _main(stdscr):
                     state['command_result'] = None
                     state['local_output'] = None
                     hint = ''
+                    continue
+                if cmd == '/tail':
+                    _reset_transcript_view(state)
+                    hint = 'live transcript'
+                    continue
+                if cmd == '/save-transcript':
+                    try:
+                        path = _save_current_transcript(state)
+                        state['local_output'] = ('save transcript', [f'exported {path}'])
+                        state['view'] = 'local-output'
+                        hint = ''
+                    except Exception as exc:  # noqa: BLE001
+                        state['local_output'] = ('save transcript', [str(exc)])
+                        state['view'] = 'local-output'
+                        hint = ''
                     continue
 
                 if cmd == '/memory' or cmd.startswith('/memory '):
@@ -2273,6 +2491,18 @@ def _main(stdscr):
                     command = raw  # preserve the text so they can resubmit
                     continue
 
+                if (cmd.startswith('/') and state.get('view') == 'chat'
+                        and state.get('command_result')
+                        and cmd.split(' ', 1)[0] not in COMMANDS):
+                    label, result = state['command_result']
+                    lines = _chat_lines(dict(result), w)
+                    term = cmd[1:].strip()
+                    if _search_transcript(state, lines, term):
+                        hint = f'search: {term}'
+                    else:
+                        hint = f'no match: {term}'
+                    continue
+
                 if _is_unknown_slash_command(cmd):
                     state['local_output'] = ('unknown command', [
                         f'Unknown command: {cmd.split(" ", 1)[0]}. Type /help.'
@@ -2393,6 +2623,43 @@ def _main(stdscr):
                          'dead_letters': [{'adapter_id': 'unknown', 'reason': f'Unknown: {cmd}'}]})
                     state['view'] = 'command-result'
                 continue
+
+            if state.get('view') == 'chat' and command == '':
+                total = int(state.get('last_chat_total_lines') or 0)
+                viewport = int(state.get('last_chat_viewport_h') or 1)
+                page = max(1, viewport - 2)
+                if ch == curses.KEY_UP:
+                    _scroll_transcript(state, 1, total, viewport)
+                    hint = ''
+                    continue
+                if ch == curses.KEY_DOWN:
+                    _scroll_transcript(state, -1, total, viewport)
+                    hint = ''
+                    continue
+                if ch == curses.KEY_PPAGE:
+                    _scroll_transcript(state, page, total, viewport)
+                    hint = ''
+                    continue
+                if ch == curses.KEY_NPAGE:
+                    _scroll_transcript(state, -page, total, viewport)
+                    hint = ''
+                    continue
+                if ch == curses.KEY_HOME:
+                    _jump_transcript(state, False, total, viewport)
+                    hint = 'top of transcript'
+                    continue
+                if ch == curses.KEY_END:
+                    _jump_transcript(state, True, total, viewport)
+                    hint = 'live transcript'
+                    continue
+                if ch in ('n', 'N') and state.get('command_result'):
+                    label, result = state['command_result']
+                    lines = _chat_lines(dict(result), w)
+                    if _repeat_search_transcript(state, lines, backwards=(ch == 'N')):
+                        hint = f"search: {_transcript_state(state).get('search', {}).get('term')}"
+                    else:
+                        hint = 'no active search'
+                    continue
 
             if ch == '\t':
                 command, hint = _autocomplete(command, data)

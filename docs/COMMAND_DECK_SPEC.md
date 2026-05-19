@@ -67,6 +67,11 @@ The human operator is in control. The default interaction is:
   `goose turn 1`, `hermes turn 2`, and `hermes final recommendation`
 - team task progress appears as transcript messages for clarify, nominate,
   owner selection, execute, review, and final report phases
+- terminal transcript views must keep scrollback navigable with Up/Down,
+  PgUp/PgDn, Home/End, preserve the operator's history position while new
+  messages arrive, show when the operator is viewing history, support jumping
+  live with End or `/tail`, support current-transcript search, and export the
+  current transcript through `/save-transcript`
 
 ### Right rail: agents
 
@@ -173,6 +178,9 @@ it should not invent alternate semantics.
 - `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
   including failure summary and partial transcript. `/continue-team-run <id>` is
   future work.
+- TUI `/transcript` opens a transcript-oriented command surface with the
+  current room history, recent team runs, active filters, and actions to view,
+  export, or review the most recent team run.
 - `AUTO` mode completes after the final report
 - `REVIEW_REQUIRED` mode stops at `awaiting_approval`, shows approve/reject
   controls, and waits for explicit operator action before marking the linked
