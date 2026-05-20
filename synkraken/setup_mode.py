@@ -3,9 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import shutil
+import sys
+import termios
+import tty
 
-from .branding import NAME, TAGLINE, print_logo
-from .discovery import discover_local_runtimes
+from .branding import NAME, print_logo
+from .discovery import (
+    discover_local_runtimes,
+    merge_discovered_config,
+    parse_runtime_selection,
+)
 
 
 # The bridge skill ships inside this Python package; locate it relative to
@@ -86,90 +93,183 @@ def _uninstall_skill_from(runtime: dict) -> tuple[bool, str]:
         return False, f'failed: {exc}'
 
 
-def _selected_runtimes(runtimes: list[dict], raw: str) -> list[dict]:
-    if not raw or raw.lower() == 'none':
-        return []
-    if raw.lower() == 'all':
-        return runtimes
-    selected_indexes = {
-        int(x.strip()) for x in raw.split(',') if x.strip().isdigit()
-    }
-    return [rt for idx, rt in enumerate(runtimes, start=1) if idx in selected_indexes]
+def _selected_runtimes(runtimes: list[dict], raw: str, *, supported_only: bool = False) -> list[dict]:
+    return parse_runtime_selection(runtimes, raw, supported_only=supported_only)
+
+
+def _read_config(path: Path) -> dict:
+    if path.exists():
+        return json.loads(path.read_text(encoding='utf-8'))
+    if EXAMPLE_CONFIG_PATH.exists():
+        cfg = json.loads(EXAMPLE_CONFIG_PATH.read_text(encoding='utf-8'))
+        cfg['adapters'] = {}
+        cfg['runtime_registry'] = {}
+        return cfg
+    return {"adapters": {}, "runtime_registry": {}}
+
+
+def _write_config(path: Path, config: dict) -> None:
+    path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+
+def _merge_choice(default: str = 'merge') -> str:
+    raw = _ask('     Config update (merge, replace, skip)', default=default).lower()
+    return raw if raw in {'merge', 'replace', 'skip'} else default
+
+
+def _print_runtime(runtime: dict, idx: int) -> None:
+    support = 'adapter' if runtime.get('adapter_supported') else 'registry only'
+    version = f"  {runtime['version']}" if runtime.get('version') else ''
+    print(f"     {idx}. ✓ {runtime['label']}  ({runtime['runtime_type']}, {support}){version}")
+
+
+def _config_label(runtime: dict) -> str:
+    if runtime.get('runtime_id') == 'google-antigravity':
+        return 'Antigravity'
+    return str(runtime.get('label') or runtime.get('runtime_id') or runtime.get('id'))
+
+
+def _print_discovered_checklist(runtimes: list[dict], selected_indexes: set[int] | None = None, cursor: int | None = None) -> None:
+    selected_indexes = selected_indexes or set()
+    print('Discovered AI workers:')
+    print()
+    for idx, runtime in enumerate(runtimes):
+        marker = '[x]' if idx in selected_indexes else '[ ]'
+        prefix = '> ' if cursor == idx else ''
+        print(f'{prefix}{marker} {_config_label(runtime)}')
+    print()
+
+
+def _render_checklist(runtimes: list[dict], selected_indexes: set[int], cursor: int) -> None:
+    print('\033[H\033[J', end='')
+    _print_discovered_checklist(runtimes, selected_indexes, cursor)
+    print('Select:')
+    print('(space=toggle enter=confirm)')
+
+
+def _interactive_selection(runtimes: list[dict]) -> list[dict] | None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    selected_indexes: set[int] = set()
+    cursor = 0
+    original = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin)
+        while True:
+            _render_checklist(runtimes, selected_indexes, cursor)
+            key = sys.stdin.read(1)
+            if key in {'\r', '\n'}:
+                break
+            if key == ' ':
+                if cursor in selected_indexes:
+                    selected_indexes.remove(cursor)
+                else:
+                    selected_indexes.add(cursor)
+                continue
+            if key in {'j', 'J'}:
+                cursor = min(len(runtimes) - 1, cursor + 1)
+                continue
+            if key in {'k', 'K'}:
+                cursor = max(0, cursor - 1)
+                continue
+            if key == '\x1b':
+                suffix = sys.stdin.read(2)
+                if suffix == '[A':
+                    cursor = max(0, cursor - 1)
+                elif suffix == '[B':
+                    cursor = min(len(runtimes) - 1, cursor + 1)
+        _render_checklist(runtimes, selected_indexes, cursor)
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original)
+    print()
+    return [runtime for idx, runtime in enumerate(runtimes) if idx in selected_indexes]
+
+
+def _select_runtimes_for_config(runtimes: list[dict]) -> list[dict]:
+    selected = _interactive_selection(runtimes)
+    if selected is not None:
+        return selected
+    _print_discovered_checklist(runtimes)
+    print('Select:')
+    print('(space=toggle enter=confirm)')
+    print()
+    raw = _ask('Enter numbers')
+    return _selected_runtimes(runtimes, raw)
+
+
+def _update_config_from_selection(runtimes: list[dict], selected: list[dict], *, default_behaviour: str = 'merge', prompt_behaviour: bool = True) -> dict:
+    print()
+    print('Local daemon configuration')
+    if not selected:
+        print('     skipped — no runtimes selected for config.')
+        return {"behaviour": "skip", "adapters_added": [], "adapters_replaced": [], "registry_added": []}
+    behaviour = _merge_choice(default=default_behaviour) if prompt_behaviour else default_behaviour
+    if behaviour == 'skip':
+        print('     skipped — config not changed.')
+        return {"behaviour": "skip", "adapters_added": [], "adapters_replaced": [], "registry_added": []}
+    try:
+        cfg = _read_config(DEFAULT_CONFIG_PATH)
+        merged, summary = merge_discovered_config(cfg, selected, behaviour=behaviour)
+        _write_config(DEFAULT_CONFIG_PATH, merged)
+        print(f'     ✓ wrote {DEFAULT_CONFIG_PATH.name}')
+        adapters = summary.get('adapters_added') or []
+        replaced = summary.get('adapters_replaced') or []
+        registry = summary.get('registry_added') or []
+        if adapters:
+            print(f'     added adapters: {", ".join(adapters)}')
+        if replaced:
+            print(f'     replaced adapters: {", ".join(replaced)}')
+        if registry:
+            print(f'     registry entries: {", ".join(registry)}')
+        unsupported = [rt['runtime_id'] for rt in selected if not rt.get('adapter_supported')]
+        if unsupported:
+            print(f'     registry-only runtimes: {", ".join(unsupported)}')
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        print(f'     ✗ could not update config: {exc}')
+        return {"behaviour": "failed", "adapters_added": [], "adapters_replaced": [], "registry_added": []}
 
 
 # ── install / setup walkthrough ───────────────────────────────────────────
-def run_setup() -> None:
-    print_logo()
-    print()
-    print(f'{NAME} setup walkthrough')
-    print(TAGLINE)
-    print()
-    print('─' * 78)
-
+def run_setup(*, rediscover: bool = False) -> None:
     if not SKILL_SOURCE.exists():
         print(f'Bridge skill source not found at {SKILL_SOURCE}.')
         print('This is unusual — did the package install correctly?')
         return
 
-    # ── 1. detect runtimes ────────────────────────────────────────────
-    print()
-    print('[1/3] Detecting installed AI runtimes…')
     runtimes = discover_local_runtimes()
     if not runtimes:
-        print('     no supported runtimes found on this machine.')
-        print('     install one of: goose, hermes, openclaw, claude (Claude Code),')
-        print('     then re-run `synkraken config`.')
+        print('Discovered AI workers:')
+        print()
+        print('Total found: 0')
         return
-    for idx, runtime in enumerate(runtimes, start=1):
-        print(f"     {idx}. ✓ {runtime['label']}  ({runtime['type']})")
 
-    # ── 2. install bridge skill ───────────────────────────────────────
+    selected = _select_runtimes_for_config(runtimes)
+    supported_selected = [runtime for runtime in selected if runtime.get('adapter_supported')]
+
     print()
-    print('[2/3] Install the synkraken-bridge skill into selected runtimes')
-    print('     Enter numbers separated by commas (e.g. 1,2), "all", or "none".')
-    raw = _ask('     Selection', default='all')
-    selected = _selected_runtimes(runtimes, raw)
-    if not selected:
+    print('Bridge skill')
+    if not supported_selected:
         print('     skipped — no skills installed.')
     else:
-        for runtime in selected:
+        for runtime in supported_selected:
             ok, msg = _install_skill_into(runtime)
             marker = '✓' if ok else '✗'
             print(f"     {marker} {runtime['label']}: {msg}")
 
-    # ── 3. local config ───────────────────────────────────────────────
-    print()
-    print('[3/3] Local daemon configuration')
-    if DEFAULT_CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(DEFAULT_CONFIG_PATH.read_text())
-            adapters = list(cfg.get('adapters', {}).keys())
-            print(f'     ✓ {DEFAULT_CONFIG_PATH.name} exists')
-            print(f'     configured adapters: {", ".join(adapters) if adapters else "(none)"}')
-        except Exception as exc:  # noqa: BLE001
-            print(f'     ! {DEFAULT_CONFIG_PATH.name} exists but is unreadable ({exc})')
-    else:
-        print(f'     ✗ {DEFAULT_CONFIG_PATH.name} does not exist')
-        if EXAMPLE_CONFIG_PATH.exists() and _confirm(
-                f'     create it from {EXAMPLE_CONFIG_PATH.name}?'):
-            try:
-                DEFAULT_CONFIG_PATH.write_text(EXAMPLE_CONFIG_PATH.read_text())
-                print(f'     ✓ created {DEFAULT_CONFIG_PATH}')
-                print(f'       edit it to match your local adapter binaries:')
-                print(f'         $EDITOR {DEFAULT_CONFIG_PATH.name}')
-            except Exception as exc:  # noqa: BLE001
-                print(f'     ✗ could not create config: {exc}')
-        else:
-            print(f'     to create it manually:')
-            print(f'       cp {EXAMPLE_CONFIG_PATH} {DEFAULT_CONFIG_PATH.name}')
+    _update_config_from_selection(
+        runtimes,
+        selected,
+        default_behaviour='merge',
+        prompt_behaviour=rediscover,
+    )
 
     print()
-    print('─' * 78)
     print('Setup complete.')
     print()
     print('Next steps:')
-    print(f'  1. (Optional) Edit {DEFAULT_CONFIG_PATH.name} to set adapter commands or')
-    print('     add more agents — see README.md for adapter config reference.')
+    print(f'  1. Review {DEFAULT_CONFIG_PATH.name} if you want custom commands or')
+    print('     additional agent instances — see README.md for adapter config reference.')
     print('  2. Start the daemon manually:')
     print(f'       synkraken-daemon --config ./{DEFAULT_CONFIG_PATH.name}')
     print('     Or install the user service:')

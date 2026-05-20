@@ -92,7 +92,7 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
     ),
     RuntimeDefinition(
         runtime_id="openclaw-main",
-        label="OpenClaw main",
+        label="OpenClaw",
         runtime_type="openclaw",
         command_names=("openclaw",),
         capabilities=("coding", "review", "files", "shell"),

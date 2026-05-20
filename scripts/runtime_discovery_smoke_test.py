@@ -139,8 +139,16 @@ def test_cli_json_output(tmp: Path) -> None:
 def test_cli_formatting_with_long_command(tmp: Path) -> None:
     long_dir = tmp / ("very-long-command-path-" + ("nested-" * 8)) / "bin"
     long_dir.mkdir(parents=True)
-    long_version = "goose " + ("version-segment-" * 12)
+    long_version = (
+        "goose "
+        + ("version segment " * 12)
+        + "\n"
+        "probe detail with enough separate words to wrap cleanly in a normal terminal "
+        "while still remaining readable after indentation\n"
+        "update available with a long diagnostic sentence that should stay in the probes list"
+    )
     _fake_binary(long_dir, "goose", long_version)
+    _fake_binary(long_dir, "agy", "Google Antigravity smoke")
     env = os.environ.copy()
     env["COLUMNS"] = "80"
     env["PATH"] = str(long_dir)
@@ -153,15 +161,19 @@ def test_cli_formatting_with_long_command(tmp: Path) -> None:
         text=True,
     )
     lines = plain.splitlines()
-    assert lines[0].startswith("Runtime"), plain
-    assert "Command" in lines[0], plain
-    assert lines[1].startswith("─"), plain
-    runtime_line = next(line for line in lines if line.startswith("Goose"))
-    version_line = next(line for line in lines if line.strip().startswith("version:"))
-    assert "..." in runtime_line, plain
-    assert str(long_dir / "goose") not in runtime_line, plain
-    assert len(runtime_line) <= 80, plain
-    assert len(version_line) <= 80, plain
+    assert lines[0] == "Discovered AI workers:", plain
+    assert lines[1] == "", plain
+    checklist_lines = [line for line in lines if line.startswith("[x] ")]
+    assert "[x] Goose" in checklist_lines, plain
+    assert "[x] Google Antigravity" in checklist_lines, plain
+    assert lines[-1] == f"Total found: {len(checklist_lines)}", plain
+    assert str(long_dir / "goose") not in plain, plain
+    assert "version" not in plain.lower(), plain
+    assert "command:" not in plain, plain
+    assert "detection:" not in plain, plain
+    assert "capabilities:" not in plain, plain
+    assert "adapter_type" not in plain, plain
+    assert "runtime_type" not in plain, plain
 
     raw = subprocess.check_output(
         [sys.executable, "-m", "synkraken.cli_main", "discover", "--json"],
@@ -178,6 +190,7 @@ def test_cli_formatting_with_long_command(tmp: Path) -> None:
     assert json.loads(raw) == json.loads(raw_verbose)
     by_id = {runtime["runtime_id"]: runtime for runtime in json.loads(raw)["runtimes"]}
     assert by_id["goose"]["command"][0] == str(long_dir / "goose")
+    assert "probe_output" not in by_id["goose"]
 
     verbose = subprocess.check_output(
         [sys.executable, "-m", "synkraken.cli_main", "discover", "--verbose"],
@@ -186,7 +199,21 @@ def test_cli_formatting_with_long_command(tmp: Path) -> None:
         text=True,
     )
     assert str(long_dir / "goose") in verbose
-    assert f"probe: {long_version}" in verbose
+    verbose_lines = verbose.splitlines()
+    goose_start = verbose_lines.index("Goose")
+    goose_end = next(
+        (idx for idx in range(goose_start + 1, len(verbose_lines)) if verbose_lines[idx] and not verbose_lines[idx].startswith("  ")),
+        len(verbose_lines),
+    )
+    goose_block = "\n".join(verbose_lines[goose_start:goose_end])
+    assert "  command: " in goose_block
+    assert "  version: goose version segment" in goose_block
+    assert "  detection: path" in goose_block
+    assert "  capabilities: coding, review, files, shell" in goose_block
+    assert "probes:" not in verbose
+    assert "diagnostics:" not in verbose
+    assert "adapter_type" not in verbose
+    assert "runtime_type" not in verbose
 
 
 def main() -> None:

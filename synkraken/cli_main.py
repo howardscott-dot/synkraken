@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import urllib.error
@@ -70,85 +69,31 @@ def print_health(data: dict) -> None:
             print(f"{marker(enabled)} {runtime_name:<10} [{adapter_id}]  type={adapter_type}  enabled={str(enabled).lower()}")
 
 
-def _truncate_middle(value: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return "." * width
-    left = max(1, (width - 3) // 2)
-    right = max(1, width - 3 - left)
-    return f"{value[:left]}...{value[-right:]}"
-
-
-def _clip_right(value: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return "." * width
-    return f"{value[:width - 3]}..."
-
-
-def _discovery_columns(width: int) -> tuple[int, int, int, int, int]:
-    spacing = 8
-    minimum_command = 14
-    preferred = (20, 22, 20, 9)
-    compact = (16, 16, 14, 8)
-    runtime_w, id_w, type_w, status_w = preferred
-    command_w = width - sum(preferred) - spacing
-    if command_w >= minimum_command:
-        return runtime_w, id_w, type_w, status_w, command_w
-    runtime_w, id_w, type_w, status_w = compact
-    command_w = max(minimum_command, width - sum(compact) - spacing)
-    return runtime_w, id_w, type_w, status_w, command_w
-
-
 def print_discovery(data: dict, *, verbose: bool = False) -> None:
     runtimes = data.get("runtimes", [])
-    if not runtimes:
-        print("No runtimes detected.")
+    if not verbose:
+        print("Discovered AI workers:")
+        print()
+        for runtime in runtimes:
+            label = runtime.get("label") or runtime.get("runtime_id") or runtime.get("id")
+            print(f"[x] {label}")
+        print()
+        print(f"Total found: {len(runtimes)}")
         return
-    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
-    width = max(72, terminal_width)
-    runtime_w, id_w, type_w, status_w, command_w = _discovery_columns(width)
-    header = (
-        f"{'Runtime':<{runtime_w}}  "
-        f"{'ID':<{id_w}}  "
-        f"{'Type':<{type_w}}  "
-        f"{'Status':<{status_w}}  "
-        "Command"
-    )
-    print(header.rstrip())
-    print("─" * min(width, len(header) + max(command_w - len("Command"), 0)))
-    for runtime in runtimes:
-        runtime_id = runtime.get("runtime_id") or runtime.get("id")
-        label = runtime.get("label") or runtime_id
-        runtime_type = runtime.get("runtime_type") or runtime.get("type")
-        support = "adapter" if runtime.get("adapter_supported") else "registry"
+
+    for index, runtime in enumerate(runtimes):
+        if index:
+            print()
+        label = runtime.get("label") or runtime.get("runtime_id") or runtime.get("id")
         command = " ".join(str(item) for item in runtime.get("command") or [])
         version = runtime.get("version") or ""
-        display_command = command if verbose else _truncate_middle(command, command_w)
-        print(
-            f"{_clip_right(str(label), runtime_w):<{runtime_w}}  "
-            f"{_clip_right(str(runtime_id), id_w):<{id_w}}  "
-            f"{_clip_right(str(runtime_type), type_w):<{type_w}}  "
-            f"{support:<{status_w}}  "
-            f"{display_command}"
-        )
-        if version:
-            version_text = str(version)
-            if not verbose:
-                version_text = _clip_right(version_text, max(12, width - len("  version: ")))
-            print(f"  version: {version_text}")
-        if verbose:
-            outputs = runtime.get("probe_output") or []
-            for output in outputs:
-                for line in str(output).splitlines():
-                    print(f"   probe: {line}")
-        print()
+        detection = ", ".join(runtime.get("detected_by") or []) or "unknown"
+        capabilities = ", ".join(str(item) for item in runtime.get("capabilities") or [])
+        print(label)
+        print(f"  command: {command}")
+        print(f"  version: {version}")
+        print(f"  detection: {detection}")
+        print(f"  capabilities: {capabilities}")
 
 
 def print_recent(data: dict) -> None:
