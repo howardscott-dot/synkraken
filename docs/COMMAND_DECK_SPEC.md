@@ -19,8 +19,12 @@ Provide a browser-based local operator surface that:
 - supports broadcasting to all agents
 - supports bounded Discussion Mode commands in the composer
 - exposes editable Room Memory for the selected room
+- exposes inspectable Shared Memory and its injection budget
 - supports explicit Team Task Mode for the selected room
 - shows recent Team Runs with owner, reviewer, status, and approval controls
+- supports explicit Goal Mode for the selected room
+- shows Goal Runs with round, score, threshold, owner, reviewers, Token Police,
+  Guardrail Agent, status, details, and cancellation for active runs
 
 ## v0.2 goals
 
@@ -67,6 +71,9 @@ The human operator is in control. The default interaction is:
   `goose turn 1`, `hermes turn 2`, and `hermes final recommendation`
 - team task progress appears as transcript messages for clarify, nominate,
   owner selection, execute, review, and final report phases
+- goal progress appears as transcript messages for criteria, assignment,
+  control roles, context budget, owner work, token review, guardrail review,
+  quality review, score, revision, and final report phases
 - terminal transcript views must keep scrollback navigable with Up/Down,
   PgUp/PgDn, Home/End, preserve the operator's history position while new
   messages arrive, show when the operator is viewing history, support jumping
@@ -88,6 +95,12 @@ The human operator is in control. The default interaction is:
 - show recent Team Runs
 - show owner, reviewers, status, and approval state
 - approve or reject runs waiting for review
+- show recent Goal Runs
+- start a goal for the selected room
+- show current round, score, threshold, owner, reviewers, Token Police,
+  Guardrail Agent, guardrail status, and run status
+- inspect one Goal Run's recent events and final report summary
+- cancel active Goal Runs
 - list durable tasks
 - create a task
 - optionally assign it to an agent
@@ -108,6 +121,8 @@ The human operator is in control. The default interaction is:
   `--turns N` and `--room name`
 - `/team "question or task"` and `/team --turns N "question or task"`
 - Ask team action for the selected room
+- `/goal "goal text"` and `/goal --threshold 80 --rounds 3 "goal text"`
+- Start goal action for the selected room
 
 ## Backend contract
 
@@ -118,11 +133,13 @@ The command deck must use the existing daemon model:
 | agents / presence | `GET /health`, `GET /v1/agents`, `GET /v1/agents/{id}`, `GET /v1/agents/{id}/events` |
 | rooms | `GET /v1/rooms` |
 | room memory | `GET /v1/rooms/{name}/memory`, `PUT /v1/rooms/{name}/memory`, `GET /v1/rooms/{name}/memory/events` |
+| shared memory | `GET /v1/memory`, `GET /v1/memory/{id}`, `POST /v1/memory/propose`, `POST /v1/memory/{id}/review`, `POST /v1/memory/{id}/approve`, `POST /v1/memory/{id}/reject`, `POST /v1/memory/{id}/archive`, `GET /v1/memory/search?q=`, `GET /v1/memory/budget` |
 | transcript | `GET /v1/rooms/{name}/messages` |
 | send | `POST /v1/messages` |
 | discussions | `POST /v1/discussions` |
 | team tasks | `POST /v1/team-tasks` |
 | team governance | `GET /v1/team-runs`, `GET /v1/team-runs/{id}`, `GET /v1/team-runs/{id}/events`, `POST /v1/team-runs/{id}/approve`, `POST /v1/team-runs/{id}/reject` |
+| goal mode | `POST /v1/goal-runs`, `GET /v1/goal-runs`, `GET /v1/goal-runs/{id}`, `GET /v1/goal-runs/{id}/events`, `POST /v1/goal-runs/{id}/cancel` |
 | live updates | `GET /v1/events/stream` |
 | tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
 | task comments | `POST /v1/tasks/{id}/comment` |
@@ -157,6 +174,10 @@ it should not invent alternate semantics.
   failure is persisted in the visible room transcript or conversation
 - room-scoped sends and discussions receive concise Room Memory context from
   the daemon; the web UI edits the memory but does not perform prompt assembly
+- room-scoped sends, discussions, and team tasks may receive approved Shared
+  Memory from the daemon, labelled `[SynKraken approved memory]`, never
+  rejected/archived/proposed entries, and only within configured item and
+  character budgets
 - max turns are bounded; the default operator command uses four total agent
   messages, and the final turn requests a recommendation
 - Team Task Mode is daemon-orchestrated through `POST /v1/team-tasks`
@@ -175,6 +196,21 @@ it should not invent alternate semantics.
   transcript context.
 - Team Governance records every run in `team_runs` and its audit trail in
   `team_events`
+- Goal Mode is daemon-orchestrated through `POST /v1/goal-runs`
+- Goal Mode requires a selected room; without one, clients must surface:
+  `Goal mode needs a room. Create or select a room first.`
+- Goal Mode defines criteria, assigns owner/reviewers/control roles, executes
+  bounded rounds, checks token budget, checks guardrails, scores reviewer
+  output, and stops at threshold or max rounds
+- Goal Mode context must be compact between rounds and display:
+  `Goal context budget`, current round, estimated context chars, and limit
+- Goal Mode creates a linked task. `achieved` and `partially_achieved` map to
+  done with partial status documented; `blocked`, `failed`, and `cancelled` map
+  to blocked.
+- Goal Mode records every run in `goal_runs` and its audit trail in
+  `goal_events`
+- Goal Mode is not infinite autonomy, hidden work, background scheduling,
+  permissionless execution, unbounded token use, or hardcoded project context
 - `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
   including failure summary and partial transcript. `/continue-team-run <id>` is
   future work.
@@ -203,6 +239,9 @@ it should not invent alternate semantics.
 - Room Memory is persistent room context, not agent memory, hidden
   chain-of-thought, RAG, embeddings, semantic search, autonomous planning,
   decisions, or cloud sync
+- Shared Memory is peer-reviewed workspace knowledge, not hidden autonomous
+  memory, vector search, RAG, personal profiling, cloud sync, unlimited context
+  stuffing, or background memory mining
 - Team Mode is human-commanded orchestration, not autonomous background work,
   scheduling, hidden agent work, or cloud sync
 - richer agent lifecycle states belong to Agent Presence work after the agent
@@ -222,7 +261,7 @@ it should not invent alternate semantics.
 - tasks or decisions UI
 - authentication
 - remote hosting
-- Studio:Blueprint integration
+- external product integrations
 
 ## Still out of scope for v0.2
 
@@ -231,6 +270,8 @@ it should not invent alternate semantics.
 - task automation, recurring tasks, decision workflows, RAG, embeddings, or
   autonomous memory workflows
 - authentication and remote deployment
+- installation-specific branding, organisation context, personal workflows, or
+  proprietary project context in shipped defaults
 
 ## Success criteria
 

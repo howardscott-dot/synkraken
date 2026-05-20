@@ -75,7 +75,7 @@ def main() -> None:
         fabric, adapters = build_fabric(Path(tmp) / "room-memory.sqlite3")
 
         memory = fabric.storage.upsert_room_memory("test1", {
-            "purpose": "Build SynKraken",
+            "purpose": "Coordinate a portable software project",
             "objective": "Implement room memory",
             "rules": "No cloud dependencies",
             "constraints": "Python stdlib preferred",
@@ -96,7 +96,7 @@ def main() -> None:
         base = f"http://127.0.0.1:{server.server_address[1]}"
         try:
             api_memory = get_json(base, "/v1/rooms/test1/memory")
-            assert api_memory["purpose"] == "Build SynKraken"
+            assert api_memory["purpose"] == "Coordinate a portable software project"
             updated = put_json(base, "/v1/rooms/test1/memory", {
                 "objective": "Verify memory APIs",
                 "actor": "api-smoke",
@@ -105,15 +105,15 @@ def main() -> None:
             api_events = get_json(base, "/v1/rooms/test1/memory/events")
             assert any(event["actor"] == "api-smoke" for event in api_events["events"])
             state = {"current_room": "test1"}
-            label, lines = _memory_command_lines("/memory", base, state)
+            label, lines = _memory_command_lines("/memory edit", base, state)
             assert label == "#test1 memory"
             assert any("Verify memory APIs" in line for line in lines)
             _label, updated_lines = _memory_command_lines('/memory set focus "TUI command smoke"', base, state)
             assert any("TUI command smoke" in line for line in updated_lines)
             _label, edit_lines = _memory_command_lines("/memory edit", base, state)
             assert any('/memory set objective "..."' in line for line in edit_lines)
-            _label, error_lines = _memory_command_lines("/memory", base, {})
-            assert error_lines == ["not in a room"]
+            _label, error_lines = _memory_command_lines("/memory set focus nope", base, {})
+            assert "usage: /memory" in error_lines[0]
         finally:
             server.shutdown()
             server.server_close()
@@ -128,7 +128,7 @@ def main() -> None:
         assert len(room_result["routing"]["memory_context"]) <= 485
         assert {delivery["delivery_target"] for delivery in room_result["deliveries"]} == {"goose", "hermes"}
         assert "Room context:" in adapters["goose"].messages[-1].body
-        assert "Purpose: Build SynKraken" in adapters["goose"].messages[-1].body
+        assert "Purpose: Coordinate a portable software project" in adapters["goose"].messages[-1].body
         assert "Message:\nDoes room memory reach room fanout?" in adapters["goose"].messages[-1].body
 
         direct_result = fabric.dispatch({

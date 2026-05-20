@@ -70,6 +70,7 @@ INDEX_HTML = """<!doctype html>
         <h2 id="room-title">Select a target</h2>
         <button id="refresh-room" type="button">Refresh</button>
       </div>
+      <div id="flight-cards" class="flight-cards"></div>
       <div id="messages" class="messages empty">Choose a room to view its transcript, or an agent to send a direct message.</div>
       <form id="composer">
         <label for="message-body" id="composer-label">No target selected</label>
@@ -78,6 +79,7 @@ INDEX_HTML = """<!doctype html>
           <button id="send-target" type="submit">Send</button>
           <button id="broadcast" type="button">Broadcast</button>
           <button id="ask-team" type="button">Ask team</button>
+          <button id="start-goal" type="button">Start goal</button>
         </div>
       </form>
     </section>
@@ -90,6 +92,21 @@ INDEX_HTML = """<!doctype html>
       <section class="team-runs-box">
         <h2>Recent Team Runs</h2>
         <div id="team-runs-list" class="stack"></div>
+      </section>
+      <section class="goal-runs-box">
+        <h2>Goal Runs</h2>
+        <form id="goal-form" class="compact">
+          <label for="goal-text">Start goal</label>
+          <textarea id="goal-text" rows="2" placeholder="Improve the selected room workflow"></textarea>
+          <div class="goal-inputs">
+            <label for="goal-threshold">Threshold</label>
+            <input id="goal-threshold" type="number" min="1" max="100" value="80">
+            <label for="goal-rounds">Rounds</label>
+            <input id="goal-rounds" type="number" min="1" max="3" value="3">
+          </div>
+          <button type="submit">Start goal</button>
+        </form>
+        <div id="goal-runs-list" class="stack"></div>
       </section>
       <form id="task-form" class="compact task-form">
         <label for="task-title">Create task</label>
@@ -212,6 +229,19 @@ button:hover { border-color: var(--accent); }
   border-radius: 12px;
   padding: .75rem;
 }
+.flight-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .5rem;
+  margin-bottom: .75rem;
+}
+.flight-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: .55rem;
+}
+.flight-card strong { display: block; font-size: 1.05rem; }
 .message.activity {
   border-left-color: var(--warn);
   color: var(--muted);
@@ -292,18 +322,35 @@ select {
   margin: 0;
 }
 .inline input { width: auto; }
-.team-runs-box {
+.team-runs-box,
+.goal-runs-box {
   border-bottom: 1px solid var(--line);
   margin-bottom: 1rem;
   padding-bottom: .75rem;
 }
-.team-run { display: grid; gap: .4rem; }
+.goal-inputs {
+  display: grid;
+  grid-template-columns: 1fr 74px;
+  align-items: center;
+  gap: .45rem;
+}
+.goal-inputs label { margin: 0; }
+.team-run,
+.goal-run { display: grid; gap: .4rem; }
 .team-run.status-awaiting_approval { border-color: var(--warn); }
 .team-run.status-approved,
-.team-run.status-completed { border-color: var(--ok); }
+.team-run.status-completed,
+.goal-run.status-achieved { border-color: var(--ok); }
 .team-run.status-rejected,
 .team-run.status-failed,
-.team-run.status-blocked { border-color: #ff8a80; }
+.team-run.status-blocked,
+.goal-run.status-failed,
+.goal-run.status-blocked,
+.goal-run.status-cancelled { border-color: #ff8a80; }
+.goal-run.status-running,
+.goal-run.status-reviewing,
+.goal-run.status-planning { border-color: var(--warn); }
+.goal-run.status-partially_achieved { border-color: var(--accent); }
 .team-actions { display: flex; gap: .45rem; }
 .task { display: grid; gap: .55rem; }
 .task.status-blocked { border-color: #ff8a80; }
@@ -345,6 +392,8 @@ const state = {
   agents: [],
   tasks: [],
   teamRuns: [],
+  goalRuns: [],
+  flight: null,
   memory: null,
   currentRoom: null,
   currentAgent: null,
@@ -531,6 +580,27 @@ async function refreshHealth() {
   }
 }
 
+async function refreshFlight() {
+  try {
+    const flight = await api("/v1/flight");
+    state.flight = flight;
+    $("flight-cards").innerHTML = [
+      ["agents", `${flight.agents_online}/${flight.agents_total}`, "online"],
+      ["goals", `${flight.active_goals}`, `${flight.blocked_goals} blocked`],
+      ["token", flight.token_risk, `cost ${flight.cost_complexity}`],
+      ["reviews", `${flight.pending_reviews}`, `${flight.dead_letters} dead letters`],
+    ].map(([label, value, meta]) => `
+      <article class="flight-card">
+        <span class="meta">${esc(label)}</span>
+        <strong>${esc(value)}</strong>
+        <span class="meta">${esc(meta)}</span>
+      </article>
+    `).join("");
+  } catch (_) {
+    $("flight-cards").innerHTML = "";
+  }
+}
+
 async function refreshAgents() {
   const data = await api("/v1/agents");
   state.agents = data.agents || [];
@@ -541,6 +611,9 @@ async function refreshAgents() {
         <span class="presence-status">${presenceMarker(agent.status)} ${esc(agent.status || "configured")}</span>
       </span>
       <span class="meta">${esc(agent.adapter_id)} · last seen ${timeAgo(agent.last_seen_at)}${state.typing.has(agent.adapter_id) ? ' · <span class="typing">typing…</span>' : ""}</span>
+      <span class="presence-detail">profile: ${esc(agent.cost_tier || "medium")} · speed ${esc(agent.speed || 5)}/10 · trust ${esc(agent.trust || 5)}/10</span>
+      <span class="presence-detail">roles: ${esc((agent.preferred_roles || []).join(", ") || "none")}</span>
+      <span class="presence-detail">caps: ${esc((agent.capabilities || []).join(", ") || "none")}</span>
       <span class="presence-detail">room: ${esc(agent.current_room || "none")}</span>
       <span class="presence-detail">task: ${esc(agent.current_task_id || "none")}</span>
     </button>
@@ -587,6 +660,7 @@ async function selectRoom(name) {
   await refreshMessages();
   await refreshMemory();
   await refreshTeamRuns();
+  await refreshGoalRuns();
   await refreshTasks();
 }
 
@@ -607,6 +681,7 @@ async function selectAgent(adapterId) {
   await refreshRooms();
   await refreshAgents();
   await refreshTeamRuns();
+  await refreshGoalRuns();
   await refreshTasks();
 }
 
@@ -820,6 +895,79 @@ async function rejectTeamRun(teamRunId) {
   setNotice("team run rejected");
 }
 
+async function refreshGoalRuns() {
+  const suffix = state.currentRoom ? `?room=${encodeURIComponent(state.currentRoom)}` : "";
+  const data = await api(`/v1/goal-runs${suffix}`);
+  state.goalRuns = data.goal_runs || [];
+  $("goal-runs-list").innerHTML = state.goalRuns.map((run) => `
+    <article class="item goal-run status-${esc(run.status)}">
+      <strong>${esc(run.status)}</strong>
+      <span class="meta">round: ${esc(run.current_round || 0)}/${esc(run.max_rounds || 0)} · score: ${esc(run.latest_score || 0)}/${esc(run.threshold || 0)}</span>
+      <span class="meta">owner: ${esc(run.owner_agent || "none")}</span>
+      <span class="meta">reviewers: ${esc((run.reviewers || []).join(", ") || "none")}</span>
+      <span class="meta">token police: ${esc(run.token_police_agent || "none")}</span>
+      <span class="meta">guardrail: ${esc(run.guardrail_agent || "none")} · ${esc(run.guardrail_status || "pending")}</span>
+      <span class="meta">${esc((run.source_goal || "").slice(0, 90))}</span>
+      <div class="team-actions">
+        <button class="tiny" type="button" data-goal-details="${esc(run.goal_run_id)}">Details</button>
+        ${["planning", "running", "reviewing"].includes(run.status) ? `<button class="tiny" type="button" data-goal-cancel="${esc(run.goal_run_id)}">Cancel</button>` : ""}
+      </div>
+      <div id="goal-details-${esc(run.goal_run_id)}" class="task-details hidden"></div>
+    </article>
+  `).join("") || `<div class="meta">No goal runs${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+  document.querySelectorAll("[data-goal-details]").forEach((el) => {
+    el.addEventListener("click", () => toggleGoalRunDetails(el.dataset.goalDetails));
+  });
+  document.querySelectorAll("[data-goal-cancel]").forEach((el) => {
+    el.addEventListener("click", () => cancelGoalRun(el.dataset.goalCancel));
+  });
+}
+
+async function toggleGoalRunDetails(goalRunId) {
+  const box = $(`goal-details-${goalRunId}`);
+  if (!box.classList.contains("hidden")) {
+    box.classList.add("hidden");
+    return;
+  }
+  const run = await api(`/v1/goal-runs/${encodeURIComponent(goalRunId)}`);
+  const events = (run.events || []).slice(-10);
+  box.innerHTML = `
+    <div>status: ${esc(run.status)} · score: ${esc(run.latest_score || 0)}/${esc(run.threshold || 0)}</div>
+    <div>context: ${esc(run.estimated_context_chars || 0)}/${esc(run.token_budget_chars || 0)} chars</div>
+    <div>task: ${esc(run.linked_task_id || "none")}</div>
+    <div>events:</div>
+    ${events.map((event) => `<div>• ${esc(event.event_type)} ${event.actor ? `by ${esc(event.actor)}` : ""}</div>`).join("") || "<div>• none</div>"}
+    ${run.final_report ? `<div>report: ${esc(run.final_report.slice(0, 320))}</div>` : ""}
+  `;
+  box.classList.remove("hidden");
+}
+
+async function startGoal(payload) {
+  if (!payload.room_name) throw new Error("Goal mode needs a room. Create or select a room first.");
+  state.visibleRows = [
+    ...state.visibleRows,
+    { source: "synkraken-web", target: `room:${payload.room_name}`, body: `Goal started: ${payload.goal}`, timestamp: new Date().toISOString(), message_id: `pending-goal:${Date.now()}` },
+  ];
+  renderMessageRows(state.visibleRows, { taskButtons: true });
+  const result = await api("/v1/goal-runs", {
+    method: "POST",
+    body: JSON.stringify({ source: "synkraken-web", ...payload }),
+  });
+  setNotice(`goal ${result.status}: score ${result.latest_score || 0}/${result.threshold || 0}`);
+  await refreshMessages();
+  await refreshTasks();
+  await refreshGoalRuns();
+}
+
+async function cancelGoalRun(goalRunId) {
+  await api(`/v1/goal-runs/${encodeURIComponent(goalRunId)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ actor: "synkraken-web" }),
+  });
+  await Promise.all([refreshGoalRuns(), refreshTasks(), state.currentRoom ? refreshMessages() : Promise.resolve()]);
+  setNotice("goal run cancelled");
+}
+
 async function toggleTaskDetails(taskId) {
   const box = $(`task-details-${taskId}`);
   if (!box.classList.contains("hidden")) {
@@ -927,6 +1075,31 @@ function parseTeam(rawBody) {
   return { room_name: state.currentRoom, question, turns };
 }
 
+function parseGoal(rawBody) {
+  const text = rawBody.trim();
+  if (!text.startsWith("/goal ")) return null;
+  const matches = [...text.slice("/goal ".length).matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3]);
+  let threshold = 80;
+  let rounds = 3;
+  const values = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    if (matches[i] === "--threshold") {
+      i += 1;
+      threshold = Number.parseInt(matches[i] || "80", 10);
+    } else if (matches[i] === "--rounds") {
+      i += 1;
+      rounds = Number.parseInt(matches[i] || "3", 10);
+    } else {
+      values.push(matches[i]);
+    }
+  }
+  const goal = values.join(" ").trim();
+  if (!state.currentRoom) throw new Error("Goal mode needs a room. Create or select a room first.");
+  if (!goal) throw new Error('usage: /goal [--threshold N] [--rounds N] "goal"');
+  return { room_name: state.currentRoom, goal, threshold, max_rounds: rounds };
+}
+
 async function discuss(payload) {
   if (!payload.room_name) {
     state.currentRoom = null;
@@ -971,11 +1144,18 @@ async function askTeam(payload) {
   await refreshMessages();
   await refreshTasks();
   await refreshTeamRuns();
+  await refreshGoalRuns();
 }
 
 async function send(target) {
   const rawBody = $("message-body").value.trim();
   if (!rawBody) return;
+  const goal = parseGoal(rawBody);
+  if (goal) {
+    await startGoal(goal);
+    $("message-body").value = "";
+    return;
+  }
   const team = parseTeam(rawBody);
   if (team) {
     await askTeam(team);
@@ -1032,6 +1212,17 @@ $("ask-team").addEventListener("click", async () => {
     setNotice(`team task failed: ${error.message}`);
   }
 });
+$("start-goal").addEventListener("click", async () => {
+  try {
+    const goal = $("message-body").value.trim();
+    if (!state.currentRoom) throw new Error("Goal mode needs a room. Create or select a room first.");
+    if (!goal) return;
+    await startGoal({ room_name: state.currentRoom, goal, threshold: 80, max_rounds: 3 });
+    $("message-body").value = "";
+  } catch (error) {
+    setNotice(`goal failed: ${error.message}`);
+  }
+});
 $("refresh-room").addEventListener("click", refreshMessages);
 $("send-target").disabled = true;
 $("toggle-room-form").addEventListener("click", () => $("room-form").classList.toggle("hidden"));
@@ -1070,10 +1261,27 @@ $("memory-form").addEventListener("submit", async (event) => {
     setNotice(`memory update failed: ${error.message}`);
   }
 });
+$("goal-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const goal = $("goal-text").value.trim();
+    if (!state.currentRoom) throw new Error("Goal mode needs a room. Create or select a room first.");
+    if (!goal) return;
+    await startGoal({
+      room_name: state.currentRoom,
+      goal,
+      threshold: Number.parseInt($("goal-threshold").value || "80", 10),
+      max_rounds: Number.parseInt($("goal-rounds").value || "3", 10),
+    });
+    $("goal-text").value = "";
+  } catch (error) {
+    setNotice(`goal failed: ${error.message}`);
+  }
+});
 
 async function bootstrap() {
   clearMemoryForm();
-  await Promise.all([refreshHealth(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns()]);
+  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns()]);
   if (state.rooms[0]) await selectRoom(state.rooms[0].name);
   const events = new EventSource("/api/v1/events/stream");
   events.onmessage = async (event) => {
@@ -1100,6 +1308,8 @@ async function bootstrap() {
       }
       if (payload.event.startsWith("task.")) await refreshTasks();
       if (payload.event.startsWith("team.")) await refreshTeamRuns();
+      if (payload.event.startsWith("goal.")) await refreshGoalRuns();
+      if (payload.event.startsWith("goal.") || payload.event.startsWith("team.") || payload.event.startsWith("memory.") || payload.event.startsWith("room.") || payload.event === "dead-letter.recorded") await refreshFlight();
       if (payload.event === "room.memory.updated" && data.room === state.currentRoom) await refreshMemory();
       if (payload.event.startsWith("typing.") || payload.event === "agent.presence") await refreshAgents();
     } catch (_) {}

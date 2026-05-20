@@ -4,7 +4,7 @@
 
 This document defines what an **agent** means inside SynKraken before the
 project adds richer presence, memory, handoffs, decisions, permissions, or
-Studio:Blueprint agent teams.
+external product integrations.
 
 The doctrine is intentionally ahead of implementation. It exists so later work
 extends one model instead of inventing several incompatible ones.
@@ -126,7 +126,22 @@ room-scoped prompts so agents can work with the visible room context.
 Room Memory is not agent memory, hidden chain-of-thought, RAG, embeddings,
 semantic search, autonomous planning, decisions, scheduling, or cloud sync.
 
-## 4.3 Team task boundary
+## 4.3 Shared memory boundary
+
+Shared Memory belongs to SynKraken's visible workspace context, not to one
+agent. Agents may propose memory, but a different available agent must review
+it before SynKraken applies the v0.1 approval rule. Approved entries can be
+used later only as labelled, bounded prompt context.
+
+Shared Memory may store facts, decisions, preferences, rules, lessons,
+technical notes, and project context. It must remain shared, inspectable,
+bounded, peer-reviewed, and token-conscious.
+
+Shared Memory is not hidden autonomous memory, vector search, RAG, personal
+profiling, unlimited context stuffing, cloud sync, or autonomous background
+memory mining.
+
+## 4.4 Team task boundary
 
 Team Task Mode v0.1 lets a human explicitly ask a room to coordinate around one
 question or task. Agents clarify, nominate an owner/reviewer, produce work, and
@@ -136,6 +151,24 @@ task and visible events; it does not grant agents background authority.
 Owner selection is deterministic: most nominations wins, then configured
 role/capability matching when present, then room order. This is coordination
 logic, not a hidden decision registry or autonomous planner.
+
+## 4.5 Goal mode boundary
+
+Goal Mode v0.1 lets a human explicitly set a room goal. Agents help define
+success criteria, nominate an owner and reviewers, and participate in bounded
+improvement rounds. SynKraken assigns Token Police and Guardrail Agent control
+roles so token use, context compaction, scope, security, architecture risks,
+goal drift, and overengineering are inspected before each decision.
+
+Goal Mode is different from Team Mode: Team Mode runs one coordinated pass;
+Goal Mode may iterate, but only within configured round, agent, context, and
+threshold limits. It records `goal_runs` and `goal_events`, writes phases into
+the room transcript, links a durable task, and stops when the threshold is met,
+guardrails block, the user cancels, or max rounds are reached.
+
+Goal Mode is not infinite autonomy, a hidden background swarm, permissionless
+execution, hidden memory writing, autonomous scheduling, or unlimited context
+stuffing.
 
 ## 5. Source of truth
 
@@ -168,17 +201,19 @@ full permission system, and no current feature should pretend that it does.
 
 ## 7. Agent roles
 
-Initial role examples:
+Shipped generic roles:
 
-- `builder`
 - `reviewer`
-- `researcher`
+- `owner`
+- `guardrail`
+- `token_police`
 - `coordinator`
-- `operator`
-- `domain-specialist`
+- `specialist`
 
 Roles should guide routing, display, and operator understanding. They are not a
-security boundary.
+security boundary and they are not identities. Repository defaults must not
+ship personal aliases, private names, founder context, or industry
+assumptions.
 
 ## 8. Agent capabilities
 
@@ -189,7 +224,7 @@ Example capabilities:
 - `web_research`
 - `repo_analysis`
 - `document_review`
-- `sb_methodology`
+- `domain_methodology`
 - `evidence_review`
 - `roadmap_planning`
 
@@ -203,10 +238,16 @@ Non-negotiable rules:
 - Agents are inspectable.
 - Agents do not silently own work.
 - Human command remains primary.
+- Shipped defaults are generic.
 - Tasks assigned to agents must remain visible.
 - Agent actions should leave events.
 - Local-first operation comes before cloud orchestration.
-- Studio:Blueprint integration must use explicit permissions.
+- External product integrations must use explicit permissions.
+
+Installation-specific identity, organisation context, project goals, and local
+working style belong in installation config, workspace config, room memory,
+shared memory, skills, runtime context, or user prompts. They must not be
+encoded in generic agent defaults.
 
 ## 10. Implications for the next roadmap
 
@@ -216,10 +257,12 @@ The recommended sequence is:
 2. Agent Presence v0.1
 3. Room Memory v0.1
 4. Team Task Mode v0.1
-5. Decisions v0.4
-6. Handoffs v0.5
-7. Workspace Packs v0.6
-8. Studio:Blueprint Agent Teams v0.7
+5. Shared Memory Skill v0.1
+6. Goal Mode v0.1
+7. Decisions v0.4
+8. Handoffs v0.5
+9. Workspace Packs v0.6
+10. External product integrations v0.7
 
 This sequence deliberately establishes identity before memory, decisions, and
 team orchestration.

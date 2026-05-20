@@ -6,11 +6,30 @@
   "storage": {
     "sqlite_path": "./data/synkraken.db"
   },
+  "instance": {
+    "instance_name": "",
+    "organisation_name": "",
+    "default_workspace": ""
+  },
   "routing": {
     "max_hops": 4,
     "default_timeout_seconds": 90,
     "retry_limit": 1,
     "retry_backoff_seconds": 1
+  },
+  "memory": {
+    "max_items_injected": 5,
+    "max_chars_injected": 1200,
+    "max_memory_chars": 500,
+    "min_confidence": 70
+  },
+  "goal": {
+    "max_rounds": 3,
+    "threshold": 80,
+    "max_reviewers": 3,
+    "max_context_chars": 4000,
+    "max_revision_chars": 1500,
+    "max_agents": 4
   },
   "adapters": {
     "goose": {

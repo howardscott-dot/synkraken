@@ -70,21 +70,22 @@ def main() -> None:
         # Regression: room fan-out must preserve the original room context when
         # persisting replies from the individual delivery targets.
         result = fabric.dispatch({
-            "source": "howard",
+            "source": "operator",
             "target": "room:test1",
             "body": "room reply persistence test",
         })
         assert {delivery["delivery_target"] for delivery in result["deliveries"]} == {"goose", "hermes"}
         assert {delivery["reply_context"] for delivery in result["deliveries"]} == {"room:test1"}
         storage_messages = fabric.storage.get_room_messages("test1", limit=20)
-        assert [(m["source"], m["target"], m["body"]) for m in storage_messages] == [
-            ("howard", "room:test1", "room reply persistence test"),
+        stored = [(m["source"], m["target"], m["body"]) for m in storage_messages]
+        assert stored[0] == ("operator", "room:test1", "room reply persistence test")
+        assert set(stored[1:]) == {
             ("goose", "room:test1", "goose reply"),
             ("hermes", "room:test1", "hermes reply"),
-        ]
+        }
 
         direct_result = fabric.dispatch({
-            "source": "howard",
+            "source": "operator",
             "target": "hermes",
             "body": "chat to goose",
             "metadata": {"room_context": "room:test1"},
@@ -94,7 +95,7 @@ def main() -> None:
         assert direct_result["deliveries"][0]["delivery_target"] == "hermes"
         assert direct_result["deliveries"][0]["reply_context"] == "room:test1"
         assert [(m["source"], m["target"], m["body"]) for m in direct_messages] == [
-            ("howard", "room:test1", "chat to goose"),
+            ("operator", "room:test1", "chat to goose"),
             ("hermes", "room:test1", "hermes reply"),
         ]
 
@@ -107,7 +108,7 @@ def main() -> None:
         base = f"http://127.0.0.1:{server.server_address[1]}"
         try:
             api_result = post_json(base, "/v1/messages", {
-                "source": "howard",
+                "source": "operator",
                 "target": "room:test1",
                 "body": "api room transcript test",
             })
@@ -121,11 +122,12 @@ def main() -> None:
 
         api_messages = transcript["messages"][-3:]
         assert api_result["message"]["target"] == "room:test1"
-        assert [(m["source"], m["target"], m["body"]) for m in api_messages] == [
-            ("howard", "room:test1", "api room transcript test"),
+        api_stored = [(m["source"], m["target"], m["body"]) for m in api_messages]
+        assert api_stored[0] == ("operator", "room:test1", "api room transcript test")
+        assert set(api_stored[1:]) == {
             ("goose", "room:test1", "goose reply"),
             ("hermes", "room:test1", "hermes reply"),
-        ]
+        }
         assert label == "#test1"
         assert state["current_room"] == "test1"
         assert room_result is not None

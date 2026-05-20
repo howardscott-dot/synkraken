@@ -44,6 +44,18 @@ def _validate_storage(raw: dict) -> None:
         raise ValueError("storage.sqlite_path must be a non-empty string")
 
 
+def _validate_instance(raw: dict) -> None:
+    instance = raw.setdefault("instance", {})
+    for key in ("instance_name", "organisation_name", "organization_name", "default_workspace"):
+        value = instance.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"instance.{key} must be a string when set")
+    for legacy_key in ("instance_name", "organisation_name", "organization_name", "default_workspace"):
+        value = raw.get(legacy_key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{legacy_key} must be a string when set")
+
+
 def _validate_routing(raw: dict) -> None:
     routing = raw.setdefault("routing", {})
     max_hops = routing.setdefault("max_hops", 4)
@@ -58,6 +70,36 @@ def _validate_routing(raw: dict) -> None:
         raise ValueError("routing.retry_limit must be a non-negative integer")
     if not isinstance(retry_backoff_seconds, int) or retry_backoff_seconds < 0:
         raise ValueError("routing.retry_backoff_seconds must be a non-negative integer")
+
+
+def _validate_memory(raw: dict) -> None:
+    memory = raw.setdefault("memory", {})
+    defaults = {
+        "max_items_injected": 5,
+        "max_chars_injected": 1200,
+        "max_memory_chars": 500,
+        "min_confidence": 70,
+    }
+    for key, default in defaults.items():
+        value = memory.setdefault(key, default)
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError(f"memory.{key} must be a positive integer")
+
+
+def _validate_goal(raw: dict) -> None:
+    goal = raw.setdefault("goal", {})
+    defaults = {
+        "max_rounds": 3,
+        "threshold": 80,
+        "max_reviewers": 3,
+        "max_context_chars": 4000,
+        "max_revision_chars": 1500,
+        "max_agents": 4,
+    }
+    for key, default in defaults.items():
+        value = goal.setdefault(key, default)
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError(f"goal.{key} must be a positive integer")
 
 
 def _validate_adapters(raw: dict) -> None:
@@ -83,7 +125,10 @@ def _validate_adapters(raw: dict) -> None:
 def _validate(raw: dict) -> None:
     _validate_server(raw)
     _validate_storage(raw)
+    _validate_instance(raw)
     _validate_routing(raw)
+    _validate_memory(raw)
+    _validate_goal(raw)
     _validate_adapters(raw)
 
 

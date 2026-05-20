@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOM_NAME = "synkraken-live-test"
+ROOM_NAME = "integration-test-room"
 FAKE_AGENT = "__synkraken_live_fake_agent__"
 
 
@@ -48,7 +48,9 @@ class LiveTest:
         self.discussion_result = "not run"
         self.task_id = ""
         self.team_task_id = ""
+        self.goal_run_id = ""
         self.presence_checked = 0
+        self.memory_id = ""
 
     def log_command(self, command: list[str], returncode: int, stdout: str, stderr: str, duration: float) -> None:
         entry = {
@@ -364,6 +366,50 @@ class LiveTest:
         else:
             self.fail("room memory events empty")
 
+    def shared_memory_flow(self) -> None:
+        if len(self.agents) < 2:
+            self.skip("shared memory", "fewer than two agents for peer review")
+            return
+        proposer = self.agents[0]
+        reviewer = self.agents[1]
+        content = f"Live integration memory {self.started.isoformat()}: keep shared memory peer-reviewed and bounded."
+        status, proposed = self.request("POST", "/v1/memory/propose", {
+            "created_by": proposer,
+            "room_name": ROOM_NAME,
+            "memory_type": "rule",
+            "content": content,
+            "auto_review": False,
+        }, required=False, timeout=max(self.args.timeout, 120))
+        if not (200 <= status < 300):
+            self.fail(f"shared memory propose failed: {status} {proposed.get('error', proposed)}")
+            return
+        memory = proposed.get("memory") or {}
+        self.memory_id = str(memory.get("memory_id") or "")
+        status, reviewed = self.request("POST", f"/v1/memory/{urllib.parse.quote(self.memory_id)}/review", {
+            "reviewer": reviewer,
+            "review": "Decision: approve\nConfidence: 90\nMemory type: rule\nReason: durable bounded integration-test memory",
+        }, required=False, timeout=max(self.args.timeout, 120))
+        if not (200 <= status < 300):
+            self.fail(f"shared memory review failed: {status} {reviewed.get('error', reviewed)}")
+            return
+        memory = reviewed.get("memory") or {}
+        if memory.get("status") == "peer_approved":
+            self.pass_check("shared memory peer approved", self.memory_id)
+        else:
+            self.fail(f"shared memory was not peer approved: {memory}")
+            return
+        _status, fetched = self.request("GET", f"/v1/memory/{urllib.parse.quote(self.memory_id)}", required=False)
+        if fetched.get("memory_id") == self.memory_id and fetched.get("events"):
+            self.pass_check("shared memory fetched", f"{len(fetched.get('events', []))} events")
+        else:
+            self.fail(f"shared memory fetch mismatch: {fetched}")
+        _status, budget = self.request("GET", f"/v1/memory/budget?room={urllib.parse.quote(ROOM_NAME)}", required=False)
+        selected_ids = {str(item.get("memory_id")) for item in budget.get("selected", [])}
+        if self.memory_id in selected_ids and budget.get("estimated_chars", 0) <= budget.get("injected_max_chars", 0):
+            self.pass_check("shared memory budget", f"{budget.get('estimated_chars')} chars")
+        else:
+            self.fail(f"shared memory budget missing approved memory: {budget}")
+
     def verify_room_replies(self, expected: set[str]) -> None:
         if not expected:
             self.skip("room reply persistence", "no successful room deliveries to verify")
@@ -564,6 +610,45 @@ class LiveTest:
         else:
             self.fail("team task transcript missing prompt, owner selection, or final report")
 
+    def run_goal_if_available(self) -> None:
+        if len(self.agents) < 2:
+            self.skip("goal mode", "fewer than two configured agents")
+            return
+        payload = {
+            "source": "live-integration-test",
+            "room_name": ROOM_NAME,
+            "goal": "Produce one concise, bounded improvement note for the selected room workflow.",
+            "threshold": 50,
+            "max_rounds": 1,
+        }
+        goal_timeout = max(self.args.timeout + 240, self.args.timeout * max(4, len(self.agents)))
+        status, result = self.request("POST", "/v1/goal-runs", payload, required=False, timeout=goal_timeout)
+        if not (200 <= status < 300):
+            self.fail(f"goal mode failed: {status} {result.get('error', result)}")
+            return
+        run = result.get("goal_run") or {}
+        self.goal_run_id = str(run.get("goal_run_id") or "")
+        if run.get("status") in {"achieved", "partially_achieved"} and self.goal_run_id:
+            self.pass_check("goal mode completed", f"{run.get('status')} score={run.get('latest_score')}")
+        else:
+            self.fail(f"goal mode unexpected status: {run}")
+            return
+        if run.get("linked_task_id"):
+            self.pass_check("goal task linked", str(run.get("linked_task_id")))
+        else:
+            self.fail(f"goal mode missing linked task: {run}")
+        _status, events = self.request("GET", f"/v1/goal-runs/{urllib.parse.quote(self.goal_run_id)}/events", required=False)
+        event_types = {str(event.get("event_type")) for event in events.get("events", [])}
+        if {"goal_started", "token_budget_checked", "guardrail_checked", "score_recorded"} <= event_types:
+            self.pass_check("goal events", ", ".join(sorted(event_types)))
+        else:
+            self.fail(f"goal events missing expected lifecycle: {event_types}")
+        report = str(run.get("final_report", ""))
+        if "Token notes:" in report and "Guardrail notes:" in report:
+            self.pass_check("goal control notes", self.goal_run_id)
+        else:
+            self.fail("goal final report missing token or guardrail notes")
+
     def fake_agent_failure(self) -> None:
         before_status, before = self.request("GET", "/v1/dead-letters?limit=20", required=False)
         before_count = len(before.get("dead_letters", [])) if before_status == 200 else 0
@@ -638,6 +723,7 @@ class LiveTest:
 
         self.ensure_room()
         self.ensure_room_memory()
+        self.shared_memory_flow()
         room = self.send_message(
             f"room:{ROOM_NAME}",
             "Live integration room @everyone broadcast. Reply briefly.",
@@ -647,6 +733,8 @@ class LiveTest:
         self.record_fanout_diagnostics("room broadcast", room)
         if (room.get("routing") or {}).get("memory_context"):
             self.pass_check("room broadcast memory injected", ROOM_NAME)
+            if self.memory_id and "[SynKraken approved memory]" in str((room.get("routing") or {}).get("memory_context")):
+                self.pass_check("shared memory injected", self.memory_id)
         else:
             self.fail("room broadcast did not report memory_context")
         room_success = {str(delivery.get("delivery_target") or delivery.get("adapter_id")) for delivery in room.get("deliveries", []) if delivery.get("ok")}
@@ -659,6 +747,7 @@ class LiveTest:
         self.run_discussion_if_available()
         self.check_presence("after discussion", require_events=True)
         self.run_team_task_if_available()
+        self.run_goal_if_available()
         self.task_flow()
         self.restart_daemon()
         self.verify_task_persists()
@@ -679,7 +768,9 @@ class LiveTest:
         print(f"discussion result: {self.discussion_result}")
         print(f"presence checks: {self.presence_checked}")
         print(f"team task id: {self.team_task_id or '(none)'}")
+        print(f"goal run id: {self.goal_run_id or '(none)'}")
         print(f"task id: {self.task_id or '(none)'}")
+        print(f"shared memory id: {self.memory_id or '(none)'}")
         print(f"report: {self.report_path}")
 
     def summary(self) -> dict[str, Any]:
@@ -691,7 +782,9 @@ class LiveTest:
             "discussion_result": self.discussion_result,
             "presence_checks": self.presence_checked,
             "team_task_id": self.team_task_id,
+            "goal_run_id": self.goal_run_id,
             "task_id": self.task_id,
+            "memory_id": self.memory_id,
             "failures": self.failures,
             "skips": self.skips,
             "report_path": str(self.report_path),
@@ -711,7 +804,9 @@ class LiveTest:
             f"- Discussion result: `{self.discussion_result}`",
             f"- Presence checks: `{self.presence_checked}`",
             f"- Team task id: `{self.team_task_id or '(none)'}`",
+            f"- Goal run id: `{self.goal_run_id or '(none)'}`",
             f"- Task id: `{self.task_id or '(none)'}`",
+            f"- Shared memory id: `{self.memory_id or '(none)'}`",
             "",
             "## Checks",
             "",

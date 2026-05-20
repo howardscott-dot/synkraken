@@ -11,7 +11,7 @@
    █ █  █ █  █ █  █
 ```
 
-**A local bridge that lets heterogeneous AI runtimes talk to each other.**
+**Open-source control plane for AI workforces.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -21,14 +21,14 @@
 
 ---
 
-SYNKRAKEN is a small local HTTP daemon + curses TUI that connects multiple AI
-CLI agents on the same machine — **Claude Code, Goose, Hermes, OpenClaw** — and
-lets them message each other directly, broadcast across the fleet, or hold
-persistent multi-agent conversations in named rooms.
+SYNKRAKEN is a local-first, runtime-neutral control plane around multiple AI
+CLI agents on the same machine — **Claude Code, Goose, Hermes, OpenClaw** — so
+operators can see, direct, govern, recover, and coordinate work across the
+runtimes they already choose.
 
-You sit at the TUI like Slack for AIs. They sit on the other side of an HTTP
-bridge, each running natively in their own runtime. No vendor lock-in, no SaaS,
-no LangGraph. Just a daemon and four adapters.
+You sit at the TUI or Web Command Deck. The runtimes stay native on the other
+side of small adapters. Users own subscriptions, API keys, costs, and runtimes;
+SynKraken owns visibility, governance, coordination, and recovery.
 
 ## Why
 
@@ -58,15 +58,49 @@ Synkraken gives you:
 - **Room Memory v0.1** for persistent, inspectable room context: purpose,
   objective, rules, constraints, focus, and notes. It is injected concisely
   into room-scoped prompts.
+- **Shared Memory Skill v0.1** for peer-reviewed workspace knowledge. Agents
+  may propose memories, a different available agent reviews them, SynKraken
+  approves only bounded high-confidence memories by rule, and operators can
+  inspect or override.
 - **Team Task Mode v0.1** for explicitly-invoked room teamwork: clarify,
   nominate, select an owner, execute, review, and produce a final report in
   the visible room transcript.
 - **Team Governance v0.1** for inspectable team runs, approval-required mode,
   approval/rejection commands, and durable team event audit trails.
+- **Goal Mode v0.1** for bounded room goals. SynKraken defines success
+  criteria, selects an owner, assigns token and guardrail control roles, runs
+  review-scored improvement rounds, and stops when the threshold or round limit
+  is reached.
 - **Durable Tasks v0.1** for the first step beyond chat: optionally linked to a
   room, assigned agent, and source message
 - **A portable bridge skill** that agents read to learn how to use the bridge
   back (so any participating agent can reach the others, not just you)
+
+## Positioning
+
+SynKraken is:
+
+- local-first
+- runtime-neutral
+- an AI workforce control plane
+- a management harness
+- a governance layer
+- a memory layer
+- a coordination system
+- an observability layer
+
+SynKraken is not another coding agent, an orchestration LLM, a chatbot, a
+CrewAI clone, or a hidden autonomous swarm.
+
+Architecture and category lock docs:
+
+- [`docs/VISION_01.md`](docs/VISION_01.md)
+- [`docs/CONTROL_PLANE_DOCTRINE.md`](docs/CONTROL_PLANE_DOCTRINE.md)
+- [`docs/CATEGORY_POSITION.md`](docs/CATEGORY_POSITION.md)
+- [`docs/COST_AND_RUNTIME_DOCTRINE.md`](docs/COST_AND_RUNTIME_DOCTRINE.md)
+- [`docs/WORKFORCE_MODEL.md`](docs/WORKFORCE_MODEL.md)
+- [`docs/IDENTITY_AND_ROLE_DOCTRINE.md`](docs/IDENTITY_AND_ROLE_DOCTRINE.md)
+- [`docs/PACKS_ARCHITECTURE.md`](docs/PACKS_ARCHITECTURE.md)
 
 ## TUI on first launch
 
@@ -85,8 +119,8 @@ Synkraken gives you:
 │                                           │  │  @goose         →  Goose                 │
 │  agents                                   │  │  @hermes        →  Hermes                │
 │    ● Goose      [goose]                   │  │  @claude        →  Claude                │
-│    ● Hermes     [hermes]                  │  │  @stanley       →  Stanley               │
-│    ● Stanley    [openclaw-main]           │  │  @everyone      →  broadcast             │
+│    ● Hermes     [hermes]                  │  │  @openclaw      →  OpenClaw main         │
+│    ● OpenClaw   [openclaw-main]           │  │  @everyone      →  broadcast             │
 │    ● Claude     [claude]                  │  │                                          │
 ╰───────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ╭─ LATEST REPLIES  ·  inbox ────────────────────────────────────────────────────────────────╮
@@ -107,7 +141,7 @@ blue at the tentacle tips. Each agent gets a distinct color.
 
 ```bash
 # 1. Clone and install (zero runtime dependencies — stdlib only)
-git clone https://github.com/howardscott-dot/synkraken.git
+git clone https://github.com/example/synkraken.git
 cd synkraken
 pip install -e .
 
@@ -218,6 +252,21 @@ summary into the room. Use `/team-run <id>` or `GET /v1/team-runs/{id}` to
 inspect the partial run. Continuing a blocked team run with `/continue-team-run`
 is future work.
 
+Goal Mode is bounded team execution for room goals. Use `/goal "goal text"` or
+`/goal --threshold 80 --rounds 3 "goal text"` inside a selected room. SynKraken
+asks room agents to define success criteria, chooses an owner and reviewers,
+assigns Token Police and Guardrail Agent roles, executes compact improvement
+rounds, scores reviewer feedback, and stops when the score meets the threshold
+or the configured round limit is reached. It creates a linked durable task;
+`achieved` and `partially_achieved` map the task to `done`, with partial status
+called out in the final report, while `blocked` and `failed` map the task to
+`blocked`.
+
+Goal Mode is not infinite autonomy, hidden work, a background agent swarm,
+permissionless execution, unbounded token use, or a place for hardcoded project
+context. Every phase is visible in the room transcript and recorded in
+`goal_events`.
+
 Useful local TUI commands:
 
 ```text
@@ -228,7 +277,7 @@ Useful local TUI commands:
 /presence  list agent operational presence
 /agent ID  show one agent's status and recent presence events
 /rooms     list rooms
-/memory    show or edit current room memory
+/memory    inspect peer-reviewed shared memory and budget
 /tasks     list recent/open tasks
 /discuss   start a bounded multi-agent discussion
 /team      run bounded room team task mode
@@ -236,6 +285,10 @@ Useful local TUI commands:
 /team-run  inspect one team run, including failure summary and partial transcript
 /approve   approve a pending team run
 /reject    reject a pending team run
+/goal      run bounded room goal mode
+/goals     list recent goal runs
+/goal-run  inspect one goal run
+/cancel-goal cancel an active goal run
 /tail      jump the current transcript back to live
 /transcript show transcript mode: team runs, room history, and filters
 /save-transcript export the current room/chat transcript under exports/
@@ -284,6 +337,33 @@ header, capped below 500 characters, before the operator message. This is not
 agent memory, RAG, embeddings, semantic search, autonomous planning, decisions,
 or cloud sync.
 
+Shared Memory is peer-reviewed workspace knowledge. Agents can propose facts,
+decisions, preferences, rules, lessons, technical notes, or project context.
+A different available agent reviews each proposal for usefulness, durability,
+safety, vagueness, length, type, and confidence. SynKraken approves by rule
+when the reviewer approves, confidence is at least `memory.min_confidence`
+(default `70`), the content is within `memory.max_memory_chars` (default
+`500`), and no simple exact/LIKE duplicate is found. Human operators can still
+approve, reject, archive, or inspect entries, but human approval is not
+required by default.
+
+Prompt injection is bounded and visible. Only `peer_approved` memories are
+eligible, current-room memories are preferred before workspace/global entries,
+and injected memory is labelled:
+
+```text
+[SynKraken approved memory]
+- rule: ...
+- decision: ...
+```
+
+Defaults are `memory.max_items_injected = 5`,
+`memory.max_chars_injected = 1200`, `memory.max_memory_chars = 500`, and
+`memory.min_confidence = 70`. `/memory budget` shows approved memories,
+injection limits, and estimated character/token load. Shared Memory is not
+hidden autonomous memory, vector search, RAG, personal profiling, cloud sync,
+unlimited context stuffing, or autonomous background memory mining.
+
 ## Live integration test
 
 For an end-to-end check against a running local daemon, run:
@@ -294,14 +374,14 @@ python3 scripts/live_integration_test.py --skip-restart
 
 The test uses the installed `synkraken` CLI plus the daemon HTTP API. It checks
 presence, sends direct messages, broadcasts, room messages, a bounded
-discussion when goose and hermes are available, task lifecycle updates, and a
-clean fake-agent failure.
+discussion when enough agents are available, team task flow, goal mode flow,
+task lifecycle updates, shared memory, and a clean fake-agent failure.
 Each run writes a local audit bundle under `audits/live-test-YYYYMMDD-HHMMSS/`
 with `report.md`, `raw.json`, and `commands.log`.
 
-## Adapters (the runtimes you can bridge)
+## Adapters (runtime integrations)
 
-| Adapter id  | Type       | What it bridges to                                       | Default invocation |
+| Adapter id  | Type       | Runtime                                                  | Default invocation |
 |-------------|------------|----------------------------------------------------------|--------------------|
 | `goose`     | `goose`    | [Goose](https://github.com/block/goose) CLI              | `goose run --text <msg> --quiet --no-session` |
 | `hermes`    | `hermes`   | Hermes agent CLI                                         | `python -m hermes_cli.main -z <msg>` |
@@ -345,9 +425,9 @@ Adding a new one is a small focused PR — see
         └──────────┘         └──────────┘         └──────────┘  └──────────┘
 ```
 
-The daemon is small (~150 lines). Each adapter is small. SQLite gives durable
-storage with zero ops. The TUI is the only fancy part, and it's still a single
-Python file with no dependencies beyond `curses`.
+The daemon is the local control-plane source of truth. Each adapter is small.
+SQLite gives durable storage with zero ops. The TUI is the fast terminal
+surface, and the Web Command Deck is the browser surface over the same backend.
 
 The Web Command Deck is served separately on `127.0.0.1:9461` and proxies the
 existing daemon API on `127.0.0.1:9460`, so the TUI and web UI remain peers over
@@ -378,6 +458,15 @@ extend one model rather than several.
 | GET    | `/v1/rooms/{name}/memory`                       | fetch room memory                    |
 | PUT    | `/v1/rooms/{name}/memory`                       | update room memory                   |
 | GET    | `/v1/rooms/{name}/memory/events`                | room memory history                  |
+| GET    | `/v1/memory`                                    | list shared memories                 |
+| GET    | `/v1/memory/{id}`                               | inspect one shared memory            |
+| POST   | `/v1/memory/propose`                            | propose peer-reviewed memory         |
+| POST   | `/v1/memory/{id}/review`                        | peer review memory                   |
+| POST   | `/v1/memory/{id}/approve`                       | human override approve               |
+| POST   | `/v1/memory/{id}/reject`                        | human override reject                |
+| POST   | `/v1/memory/{id}/archive`                       | archive memory                       |
+| GET    | `/v1/memory/search?q=`                          | simple shared memory search          |
+| GET    | `/v1/memory/budget`                             | inspect injection budget             |
 | DELETE | `/v1/rooms/{name}`                              | delete a room                        |
 | POST   | `/v1/rooms/{name}/members`                      | add a member                         |
 | DELETE | `/v1/rooms/{name}/members/{adapter_id}`         | remove a member                      |
@@ -389,6 +478,11 @@ extend one model rather than several.
 | GET    | `/v1/team-runs/{id}/events`                     | team run audit events                |
 | POST   | `/v1/team-runs/{id}/approve`                    | approve an awaiting team run         |
 | POST   | `/v1/team-runs/{id}/reject`                     | reject an awaiting team run          |
+| POST   | `/v1/goal-runs`                                 | run bounded room goal mode           |
+| GET    | `/v1/goal-runs`                                 | list recent goal runs                |
+| GET    | `/v1/goal-runs/{id}`                            | inspect a goal run and events        |
+| GET    | `/v1/goal-runs/{id}/events`                     | goal run audit events                |
+| POST   | `/v1/goal-runs/{id}/cancel`                     | cancel an active goal run            |
 | GET    | `/v1/tasks`                                     | list tasks                           |
 | POST   | `/v1/tasks`                                     | create a task                        |
 | PATCH  | `/v1/tasks/{id}`                                | update a task                        |
@@ -458,6 +552,10 @@ Room Memory is durable operational room context, not hidden agent memory. It is
 stored in `room_memory`, audited in `memory_events`, and injected only for
 room-scoped message, broadcast, and discussion prompts.
 
+Shared Memory lives in `shared_memory` and is audited through shared-memory
+rows in `memory_events`. It is injected into room messages, room discussions,
+and team tasks only within the configured budget and only after peer approval.
+
 SQLite foreign-key enforcement is enabled for new connections. Existing
 databases created before Tasks Hardening v0.15 automatically gain the new
 ownership columns, but SQLite cannot add a new foreign key constraint to an
@@ -489,6 +587,23 @@ Two example configs ship under `examples/`:
 
 Your active local config goes in `config.local.json` at the repo root.
 That file is gitignored — it's yours, never shared.
+
+Optional installation context belongs in local config, not shipped defaults:
+
+```json
+{
+  "instance": {
+    "instance_name": "",
+    "organisation_name": "",
+    "default_workspace": ""
+  }
+}
+```
+
+Keep repository examples generic. Put project goals, organisation names,
+workspace labels, and local workflows in installation config, workspace config,
+room memory, shared memory, runtime context, skills, or user prompts. See
+[`docs/CONFIGURATION_DOCTRINE.md`](docs/CONFIGURATION_DOCTRINE.md).
 
 ### Adding a new agent
 
@@ -565,7 +680,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). Small focused PRs welcome.
 
 ## License
 
-[MIT](LICENSE) © 2026 Howard Scott.
+[MIT](LICENSE) © 2026 SynKraken contributors.
 
 Skills, brand assets, and color palette inherit the same license unless noted
 otherwise.

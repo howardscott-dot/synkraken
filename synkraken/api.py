@@ -15,6 +15,8 @@ from .models import new_id
 _ROOM_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
 _TASK_STATUSES = {"open", "in_progress", "blocked", "done"}
 _TASK_PRIORITIES = {"low", "normal", "high"}
+_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
+_PROFILE_FIELDS = {"cost_tier", "preferred_roles", "capabilities", "speed", "trust", "actor"}
 
 
 def _utc_now_iso() -> str:
@@ -48,6 +50,48 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/agents":
             self._send(HTTPStatus.OK, {"agents": self.fabric.list_agents()})
+            return
+        if path == "/v1/profiles":
+            self._send(HTTPStatus.OK, {"profiles": self.fabric.list_agents()})
+            return
+        if path == "/v1/runtimes":
+            self._send(HTTPStatus.OK, {"runtimes": self.fabric.list_runtimes()})
+            return
+        if path == "/v1/runtimes/doctor":
+            self._send(HTTPStatus.OK, self.fabric.runtime_doctor())
+            return
+        m = re.fullmatch(r"/v1/runtimes/([^/]+)", path)
+        if m:
+            runtime_id = unquote(m.group(1))
+            runtime = self.fabric.storage.get_runtime(runtime_id)
+            if not runtime:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"runtime not found: {runtime_id}"})
+                return
+            self._send(HTTPStatus.OK, runtime)
+            return
+        if path == "/v1/flight":
+            self._send(HTTPStatus.OK, self.fabric.flight_summary())
+            return
+        if path == "/v1/workspaces":
+            self._send(HTTPStatus.OK, {"workspaces": self.fabric.storage.list_workspace_packs()})
+            return
+        m = re.fullmatch(r"/v1/workspaces/([^/]+)", path)
+        if m:
+            name = unquote(m.group(1))
+            workspace = self.fabric.storage.get_workspace_pack(name)
+            if not workspace:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"workspace not found: {name}"})
+                return
+            self._send(HTTPStatus.OK, {"workspace": workspace})
+            return
+        m = re.fullmatch(r"/v1/agents/([^/]+)/profile", path)
+        if m:
+            agent_id = unquote(m.group(1))
+            agent = self.fabric.storage.get_agent(agent_id)
+            if not agent:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"agent not found: {agent_id}"})
+                return
+            self._send(HTTPStatus.OK, {"profile": agent})
             return
         m = re.fullmatch(r"/v1/agents/([^/]+)/events", path)
         if m:
@@ -89,11 +133,89 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             room = qs.get("room", [None])[0]
             self._send(HTTPStatus.OK, {"tasks": self.fabric.storage.list_tasks(room_name=room)})
             return
+        if path == "/v1/memory":
+            qs = parse_qs(parsed.query)
+            status = qs.get("status", [None])[0]
+            room = qs.get("room", [None])[0]
+            workspace = qs.get("workspace", [None])[0]
+            limit = int(qs.get("limit", [50])[0])
+            if status and status not in _MEMORY_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid memory status"})
+                return
+            self._send(HTTPStatus.OK, {
+                "memories": self.fabric.storage.list_shared_memory(
+                    status=status,
+                    room_name=room,
+                    workspace=workspace,
+                    limit=limit,
+                )
+            })
+            return
+        if path == "/v1/memory/search":
+            qs = parse_qs(parsed.query)
+            query = qs.get("q", [""])[0]
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, {"memories": self.fabric.storage.search_shared_memory(query, limit=limit)})
+            return
+        if path == "/v1/memory/budget":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", [None])[0]
+            self._send(HTTPStatus.OK, self.fabric.memory_budget(room_name=room))
+            return
+        m = re.fullmatch(r"/v1/memory/([^/]+)/events", path)
+        if m:
+            memory_id = unquote(m.group(1))
+            events = self.fabric.storage.list_shared_memory_events(memory_id)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"memory not found: {memory_id}"})
+                return
+            self._send(HTTPStatus.OK, {"memory_id": memory_id, "events": events})
+            return
+        m = re.fullmatch(r"/v1/memory/([^/]+)", path)
+        if m:
+            memory_id = unquote(m.group(1))
+            memory = self.fabric.storage.get_shared_memory(memory_id)
+            if not memory:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"memory not found: {memory_id}"})
+                return
+            memory["events"] = self.fabric.storage.list_shared_memory_events(memory_id) or []
+            self._send(HTTPStatus.OK, memory)
+            return
         if path == "/v1/team-runs":
             qs = parse_qs(parsed.query)
             room = qs.get("room", [None])[0]
             limit = int(qs.get("limit", [25])[0])
             self._send(HTTPStatus.OK, {"team_runs": self.fabric.storage.list_team_runs(room_name=room, limit=limit)})
+            return
+        if path == "/v1/goal-runs":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", [None])[0]
+            limit = int(qs.get("limit", [25])[0])
+            self._send(HTTPStatus.OK, {"goal_runs": self.fabric.storage.list_goal_runs(room_name=room, limit=limit)})
+            return
+        m = re.fullmatch(r"/v1/goal-runs/([^/]+)/events", path)
+        if m:
+            goal_run_id = unquote(m.group(1))
+            events = self.fabric.storage.list_goal_events(goal_run_id)
+            if events is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"goal run not found: {goal_run_id}"})
+                return
+            self._send(HTTPStatus.OK, {"goal_run_id": goal_run_id, "events": events})
+            return
+        m = re.fullmatch(r"/v1/goal-runs/([^/]+)", path)
+        if m:
+            goal_run_id = unquote(m.group(1))
+            run = self.fabric.storage.get_goal_run(goal_run_id)
+            if not run:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"goal run not found: {goal_run_id}"})
+                return
+            run["events"] = self.fabric.storage.list_goal_events(goal_run_id) or []
+            run["task"] = self.fabric.storage.get_task(run["linked_task_id"]) if run.get("linked_task_id") else None
+            run["messages"] = [
+                message for message in self.fabric.storage.get_room_messages(run["room_name"], limit=200)
+                if message.get("conversation_id") == goal_run_id
+            ]
+            self._send(HTTPStatus.OK, run)
             return
         m = re.fullmatch(r"/v1/team-runs/([^/]+)/events", path)
         if m:
@@ -264,6 +386,60 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, result)
             return
 
+        if path == "/v1/goal-runs":
+            try:
+                payload = self._read_json()
+                result = self.fabric.goal_run(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        m = re.fullmatch(r"/v1/goal-runs/([^/]+)/cancel", path)
+        if m:
+            goal_run_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                result = self.fabric.cancel_goal_run(goal_run_id, actor)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path == "/v1/memory/propose":
+            try:
+                payload = self._read_json()
+                result = self.fabric.propose_memory(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        m = re.fullmatch(r"/v1/memory/([^/]+)/(review|approve|reject|archive)", path)
+        if m:
+            memory_id = unquote(m.group(1))
+            action = m.group(2)
+            try:
+                payload = self._read_json()
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if action == "review":
+                    result = self.fabric.review_memory(memory_id, payload)
+                elif action == "approve":
+                    result = self.fabric.approve_memory(memory_id, actor)
+                elif action == "reject":
+                    result = self.fabric.reject_memory(memory_id, actor, str(payload.get("reason", "")).strip() or None)
+                else:
+                    result = self.fabric.archive_memory(memory_id, actor)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
         m = re.fullmatch(r"/v1/team-runs/([^/]+)/(approve|reject)", path)
         if m:
             team_run_id = unquote(m.group(1))
@@ -390,11 +566,30 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("adapter_id required")
                 if not self.fabric.storage.room_exists(room):
                     raise ValueError(f"room not found: {room}")
-                self.fabric.storage.add_room_member(room, adapter_id, _utc_now_iso())
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                self.fabric.add_room_member(room, adapter_id, actor=actor)
             except Exception as exc:  # noqa: BLE001
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._send(HTTPStatus.OK, self.fabric.storage.get_room(room))
+            return
+
+        m = re.fullmatch(r"/v1/workspaces/(init|load|export)", path)
+        if m:
+            action = m.group(1)
+            try:
+                payload = self._read_json()
+                name = str(payload.get("name") or "").strip() or None
+                if action == "init":
+                    result = self.fabric.init_workspace(name)
+                elif action == "load":
+                    result = self.fabric.load_workspace(name)
+                else:
+                    result = self.fabric.export_workspace(name)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
             return
 
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -402,6 +597,20 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        m = re.fullmatch(r"/v1/agents/([^/]+)/profile", path)
+        if m:
+            agent_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                extra = set(payload) - _PROFILE_FIELDS
+                if extra:
+                    raise ValueError(f"unknown profile fields: {', '.join(sorted(extra))}")
+                profile = self.fabric.update_agent_profile(agent_id, payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, {"profile": profile})
+            return
         m = re.fullmatch(r"/v1/tasks/([^/]+)", path)
         if not m:
             self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -501,7 +710,7 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if m:
             room = unquote(m.group(1))
             adapter_id = unquote(m.group(2))
-            self.fabric.storage.remove_room_member(room, adapter_id)
+            self.fabric.remove_room_member(room, adapter_id)
             data = self.fabric.storage.get_room(room) or {"room": room, "removed": adapter_id}
             self._send(HTTPStatus.OK, data)
             return

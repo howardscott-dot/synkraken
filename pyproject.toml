@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-  { name = "Howard Scott" }
+  { name = "SynKraken contributors" }
 ]
 keywords = [
   "ai",
@@ -44,10 +44,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage      = "https://github.com/howardscott-dot/synkraken"
-Repository    = "https://github.com/howardscott-dot/synkraken"
-Issues        = "https://github.com/howardscott-dot/synkraken/issues"
-Changelog     = "https://github.com/howardscott-dot/synkraken/blob/main/CHANGELOG.md"
+Homepage      = "https://github.com/example/synkraken"
+Repository    = "https://github.com/example/synkraken"
+Issues        = "https://github.com/example/synkraken/issues"
+Changelog     = "https://github.com/example/synkraken/blob/main/CHANGELOG.md"
 
 [project.scripts]
 synkraken         = "synkraken.cli_main:main"

@@ -17,7 +17,7 @@ welcome.
 ## Development setup
 
 ```bash
-git clone https://github.com/howardscott-dot/synkraken.git
+git clone https://github.com/example/synkraken.git
 cd synkraken
 
 # (Optional but recommended) virtualenv
@@ -59,6 +59,28 @@ python3 scripts/smoke_test.py
 - Prefer composition over abstraction. The codebase is intentionally flat
   (no factories where a function would do).
 - Keep adapter modules independent of one another — each adapter is a leaf.
+- Preserve the category lock: SynKraken is an open-source control plane for AI
+  workforces, not another coding agent, orchestration LLM, chatbot, CrewAI
+  clone, or hidden autonomous swarm.
+- Keep shipped roles generic. Use `owner`, `reviewer`, `guardrail`,
+  `token_police`, `coordinator`, and `specialist`; do not add personal aliases,
+  private names, founder context, or industry assumptions to defaults.
+- Users own subscriptions, API keys, costs, and runtimes. SynKraken owns
+  visibility, governance, coordination, and recovery.
+
+## Doctrine docs
+
+Read these before changing architecture, role behavior, runtime handling,
+governance, memory, packs, or product positioning:
+
+- `docs/VISION_01.md`
+- `docs/CONTROL_PLANE_DOCTRINE.md`
+- `docs/CATEGORY_POSITION.md`
+- `docs/COST_AND_RUNTIME_DOCTRINE.md`
+- `docs/WORKFORCE_MODEL.md`
+- `docs/IDENTITY_AND_ROLE_DOCTRINE.md`
+- `docs/PACKS_ARCHITECTURE.md`
+- `docs/CONFIGURATION_DOCTRINE.md`
 
 ## Adding a new adapter
 
@@ -90,6 +112,8 @@ agents know your runtime can be addressed.
 - Write a clear PR description: what you changed and why.
 - If your change is user-visible, add a line to `CHANGELOG.md` under
   `## [Unreleased]`.
+- Before publishing, run `python3 scripts/context_audit.py` to catch private
+  names, personal aliases, local paths, and installation-specific context.
 
 ## Reporting security issues
 

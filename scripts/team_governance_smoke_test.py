@@ -101,9 +101,9 @@ def main() -> None:
             assert run["owner_agent"] == "goose"
             task = fabric.storage.get_task(run["task_id"])
             assert task is not None and task["status"] == "in_progress"
-            approved = post_json(base, f"/v1/team-runs/{team_run_id}/approve", {"actor": "howard"})
+            approved = post_json(base, f"/v1/team-runs/{team_run_id}/approve", {"actor": "operator"})
             assert approved["team_run"]["status"] == "approved"
-            assert approved["team_run"]["approved_by"] == "howard"
+            assert approved["team_run"]["approved_by"] == "operator"
             task = fabric.storage.get_task(run["task_id"])
             assert task is not None and task["status"] == "done"
             events = get_json(base, f"/v1/team-runs/{team_run_id}/events")["events"]
@@ -116,7 +116,7 @@ def main() -> None:
                 "question": "Reject this governance run",
                 "approval_mode": "REVIEW_REQUIRED",
             })
-            rejected = post_json(base, f"/v1/team-runs/{reject_run['team_run_id']}/reject", {"actor": "howard"})
+            rejected = post_json(base, f"/v1/team-runs/{reject_run['team_run_id']}/reject", {"actor": "operator"})
             assert rejected["team_run"]["status"] == "rejected"
             reject_task = fabric.storage.get_task(rejected["team_run"]["task_id"])
             assert reject_task is not None and reject_task["status"] == "blocked"

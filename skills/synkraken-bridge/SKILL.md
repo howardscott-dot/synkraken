@@ -2,7 +2,7 @@
 name: synkraken-bridge
 description: "Use synkraken to message other local AI runtimes."
 version: 1.3.0
-author: Howard Scott
+author: SynKraken contributors
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

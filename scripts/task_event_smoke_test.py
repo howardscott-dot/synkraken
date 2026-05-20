@@ -31,13 +31,13 @@ if __name__ == "__main__":
             room_name="ops",
             assigned_agent_id="goose",
             source_message_id=message.message_id,
-            actor="Howard",
+            actor="operator",
             created_at="2026-05-18T00:00:01+00:00",
         )
-        assert task["created_by"] == "Howard"
-        storage.update_task("task-1", {"assigned_agent_id": "hermes"}, "Howard", "2026-05-18T00:00:02+00:00")
+        assert task["created_by"] == "operator"
+        storage.update_task("task-1", {"assigned_agent_id": "hermes"}, "operator", "2026-05-18T00:00:02+00:00")
         storage.update_task("task-1", {"status": "blocked"}, "hermes", "2026-05-18T00:00:03+00:00")
-        storage.add_task_comment("comment-1", "task-1", "Howard", "Waiting on logs", "Howard", "2026-05-18T00:00:04+00:00")
+        storage.add_task_comment("comment-1", "task-1", "operator", "Waiting on logs", "operator", "2026-05-18T00:00:04+00:00")
         storage.update_task("task-1", {"status": "done"}, "hermes", "2026-05-18T00:00:05+00:00")
 
         events = storage.list_task_events("task-1")

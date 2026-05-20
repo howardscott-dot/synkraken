@@ -10,6 +10,12 @@ from .models import AdapterReply, FabricMessage, utc_now_iso
 
 
 AGENT_STATUSES = {"configured", "online", "idle", "working", "blocked", "offline", "disabled"}
+AGENT_COST_TIERS = {"cheap", "medium", "premium", "local"}
+AGENT_PROFILE_ROLES = {"owner", "reviewer", "guardrail", "token_police", "summary", "ops"}
+SHARED_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
+SHARED_MEMORY_TYPES = {
+    "fact", "decision", "preference", "rule", "lesson", "technical_note", "project_context",
+}
 
 
 SCHEMA = """
@@ -74,15 +80,43 @@ CREATE TABLE IF NOT EXISTS room_memory (
     FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS shared_memory (
+    memory_id TEXT PRIMARY KEY,
+    room_name TEXT NULL,
+    workspace TEXT NULL,
+    memory_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL,
+    confidence INTEGER DEFAULT 0,
+    created_by TEXT,
+    created_at TEXT,
+    reviewed_by TEXT NULL,
+    review_result TEXT NULL,
+    review_reason TEXT NULL,
+    reviewed_at TEXT NULL,
+    approved_by TEXT NULL,
+    approved_at TEXT NULL,
+    source_team_run_id TEXT NULL,
+    source_task_id TEXT NULL,
+    source_message_id TEXT NULL,
+    token_cost_estimate INTEGER DEFAULT 0,
+    use_count INTEGER DEFAULT 0,
+    last_used_at TEXT NULL
+);
+
 CREATE TABLE IF NOT EXISTS memory_events (
     event_id TEXT PRIMARY KEY,
-    room_name TEXT NOT NULL,
+    room_name TEXT,
+    memory_id TEXT,
+    event_type TEXT,
     actor TEXT NOT NULL,
-    field_changed TEXT NOT NULL,
+    field_changed TEXT,
     old_value TEXT,
     new_value TEXT,
+    details TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE
+    FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE,
+    FOREIGN KEY(memory_id) REFERENCES shared_memory(memory_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -95,7 +129,12 @@ CREATE TABLE IF NOT EXISTS agents (
     runtime TEXT NOT NULL DEFAULT '',
     current_task_id TEXT,
     current_room TEXT,
-    last_message_at TEXT
+    last_message_at TEXT,
+    cost_tier TEXT NOT NULL DEFAULT 'medium',
+    preferred_roles_json TEXT NOT NULL DEFAULT '[]',
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    speed INTEGER NOT NULL DEFAULT 5,
+    trust INTEGER NOT NULL DEFAULT 5
 );
 
 CREATE TABLE IF NOT EXISTS agent_events (
@@ -183,6 +222,73 @@ CREATE TABLE IF NOT EXISTS team_events (
     FOREIGN KEY(team_run_id) REFERENCES team_runs(team_run_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS goal_runs (
+    goal_run_id TEXT PRIMARY KEY,
+    room_name TEXT NOT NULL,
+    source_goal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    max_rounds INTEGER NOT NULL,
+    current_round INTEGER NOT NULL,
+    owner_agent TEXT NULL,
+    reviewers TEXT,
+    participants TEXT,
+    token_police_agent TEXT NULL,
+    guardrail_agent TEXT NULL,
+    success_criteria TEXT,
+    latest_score INTEGER DEFAULT 0,
+    final_report TEXT,
+    token_budget_chars INTEGER DEFAULT 4000,
+    estimated_context_chars INTEGER DEFAULT 0,
+    guardrail_status TEXT,
+    linked_task_id TEXT NULL,
+    linked_team_run_ids TEXT,
+    started_at TEXT,
+    completed_at TEXT NULL,
+    created_by TEXT,
+    FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE,
+    FOREIGN KEY(linked_task_id) REFERENCES tasks(task_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS goal_events (
+    event_id TEXT PRIMARY KEY,
+    goal_run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(goal_run_id) REFERENCES goal_runs(goal_run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS runtime_registry (
+    runtime_id TEXT PRIMARY KEY,
+    runtime_type TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '',
+    command_json TEXT NOT NULL DEFAULT '[]',
+    working_dir TEXT NOT NULL DEFAULT '',
+    timeout INTEGER NOT NULL DEFAULT 90,
+    cost_profile TEXT NOT NULL DEFAULT 'medium',
+    supported_modes_json TEXT NOT NULL DEFAULT '[]',
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspace_packs (
+    workspace_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    rooms_json TEXT NOT NULL DEFAULT '[]',
+    agents_json TEXT NOT NULL DEFAULT '[]',
+    memory_json TEXT NOT NULL DEFAULT '[]',
+    skills_json TEXT NOT NULL DEFAULT '[]',
+    goals_json TEXT NOT NULL DEFAULT '[]',
+    repos_json TEXT NOT NULL DEFAULT '[]',
+    governance_json TEXT NOT NULL DEFAULT '{}',
+    runtime_refs_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target);
 CREATE INDEX IF NOT EXISTS idx_deliveries_message_id ON deliveries(message_id);
@@ -191,6 +297,9 @@ CREATE INDEX IF NOT EXISTS idx_room_members_room_name ON room_members(room_name)
 CREATE INDEX IF NOT EXISTS idx_room_memory_room_name ON room_memory(room_name);
 CREATE INDEX IF NOT EXISTS idx_memory_events_room_name ON memory_events(room_name);
 CREATE INDEX IF NOT EXISTS idx_memory_events_created_at ON memory_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_shared_memory_status ON shared_memory(status);
+CREATE INDEX IF NOT EXISTS idx_shared_memory_room ON shared_memory(room_name);
+CREATE INDEX IF NOT EXISTS idx_shared_memory_workspace ON shared_memory(workspace);
 CREATE INDEX IF NOT EXISTS idx_agent_events_agent_id ON agent_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_created_at ON agent_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -203,6 +312,12 @@ CREATE INDEX IF NOT EXISTS idx_team_runs_room ON team_runs(room_name);
 CREATE INDEX IF NOT EXISTS idx_team_runs_status ON team_runs(status);
 CREATE INDEX IF NOT EXISTS idx_team_events_run ON team_events(team_run_id);
 CREATE INDEX IF NOT EXISTS idx_team_events_created ON team_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_goal_runs_room ON goal_runs(room_name);
+CREATE INDEX IF NOT EXISTS idx_goal_runs_status ON goal_runs(status);
+CREATE INDEX IF NOT EXISTS idx_goal_events_run ON goal_events(goal_run_id);
+CREATE INDEX IF NOT EXISTS idx_goal_events_created ON goal_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_registry_type ON runtime_registry(runtime_type);
+CREATE INDEX IF NOT EXISTS idx_workspace_packs_name ON workspace_packs(name);
 """
 
 
@@ -236,10 +351,106 @@ class Storage:
             "current_task_id": "TEXT",
             "current_room": "TEXT",
             "last_message_at": "TEXT",
+            "cost_tier": "TEXT NOT NULL DEFAULT 'medium'",
+            "preferred_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+            "capabilities_json": "TEXT NOT NULL DEFAULT '[]'",
+            "speed": "INTEGER NOT NULL DEFAULT 5",
+            "trust": "INTEGER NOT NULL DEFAULT 5",
         }
         for column, definition in agent_additions.items():
             if column not in agent_columns:
                 self._conn.execute(f"ALTER TABLE agents ADD COLUMN {column} {definition}")
+        memory_event_info = self._conn.execute("PRAGMA table_info(memory_events)").fetchall()
+        memory_event_notnull = {row["name"]: bool(row["notnull"]) for row in memory_event_info}
+        if memory_event_notnull.get("room_name") or memory_event_notnull.get("field_changed"):
+            self._conn.executescript(
+                """
+                CREATE TABLE memory_events_new (
+                    event_id TEXT PRIMARY KEY,
+                    room_name TEXT,
+                    memory_id TEXT,
+                    event_type TEXT,
+                    actor TEXT NOT NULL,
+                    field_changed TEXT,
+                    old_value TEXT,
+                    new_value TEXT,
+                    details TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(room_name) REFERENCES rooms(name) ON DELETE CASCADE,
+                    FOREIGN KEY(memory_id) REFERENCES shared_memory(memory_id) ON DELETE CASCADE
+                );
+                INSERT INTO memory_events_new (
+                    event_id, room_name, memory_id, event_type, actor,
+                    field_changed, old_value, new_value, details, created_at
+                )
+                SELECT
+                    event_id, room_name, NULL, NULL, actor,
+                    field_changed, old_value, new_value, NULL, created_at
+                FROM memory_events;
+                DROP TABLE memory_events;
+                ALTER TABLE memory_events_new RENAME TO memory_events;
+                CREATE INDEX IF NOT EXISTS idx_memory_events_room_name ON memory_events(room_name);
+                CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id ON memory_events(memory_id);
+                CREATE INDEX IF NOT EXISTS idx_memory_events_created_at ON memory_events(created_at);
+                """
+            )
+            memory_event_info = self._conn.execute("PRAGMA table_info(memory_events)").fetchall()
+        memory_event_columns = {row["name"] for row in memory_event_info}
+        memory_event_additions = {
+            "memory_id": "TEXT",
+            "event_type": "TEXT",
+            "details": "TEXT",
+        }
+        for column, definition in memory_event_additions.items():
+            if column not in memory_event_columns:
+                self._conn.execute(f"ALTER TABLE memory_events ADD COLUMN {column} {definition}")
+        shared_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(shared_memory)").fetchall()
+        }
+        shared_additions = {
+            "token_cost_estimate": "INTEGER DEFAULT 0",
+            "use_count": "INTEGER DEFAULT 0",
+            "last_used_at": "TEXT",
+        }
+        for column, definition in shared_additions.items():
+            if column not in shared_columns:
+                self._conn.execute(f"ALTER TABLE shared_memory ADD COLUMN {column} {definition}")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id ON memory_events(memory_id)")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_registry (
+                runtime_id TEXT PRIMARY KEY,
+                runtime_type TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                command_json TEXT NOT NULL DEFAULT '[]',
+                working_dir TEXT NOT NULL DEFAULT '',
+                timeout INTEGER NOT NULL DEFAULT 90,
+                cost_profile TEXT NOT NULL DEFAULT 'medium',
+                supported_modes_json TEXT NOT NULL DEFAULT '[]',
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_packs (
+                workspace_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                rooms_json TEXT NOT NULL DEFAULT '[]',
+                agents_json TEXT NOT NULL DEFAULT '[]',
+                memory_json TEXT NOT NULL DEFAULT '[]',
+                skills_json TEXT NOT NULL DEFAULT '[]',
+                goals_json TEXT NOT NULL DEFAULT '[]',
+                repos_json TEXT NOT NULL DEFAULT '[]',
+                governance_json TEXT NOT NULL DEFAULT '{}',
+                runtime_refs_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
@@ -375,6 +586,152 @@ class Storage:
             ).fetchall()
         return {"dead_letters": [dict(row) for row in rows]}
 
+    # ── flight summary ───────────────────────────────────────────────────
+
+    def count_dead_letters(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS count FROM dead_letters").fetchone()
+        return int(row["count"] if row else 0)
+
+    def count_shared_memory(self, status: str | None = None) -> int:
+        sql = "SELECT COUNT(*) AS count FROM shared_memory"
+        params: tuple = ()
+        if status:
+            sql += " WHERE status = ?"
+            params = (status,)
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+        return int(row["count"] if row else 0)
+
+    # ── runtime registry ─────────────────────────────────────────────────
+
+    def _runtime_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["command"] = json.loads(data.pop("command_json") or "[]")
+        data["supported_modes"] = json.loads(data.pop("supported_modes_json") or "[]")
+        data["capabilities"] = json.loads(data.pop("capabilities_json") or "[]")
+        data["enabled"] = bool(data.get("enabled"))
+        return data
+
+    def upsert_runtime(self, runtime: dict, updated_at: str | None = None) -> dict:
+        runtime_id = str(runtime.get("runtime_id") or runtime.get("adapter_id") or "").strip()
+        if not runtime_id:
+            raise ValueError("runtime_id required")
+        runtime_type = str(runtime.get("runtime_type") or runtime.get("type") or "unknown").strip() or "unknown"
+        command = runtime.get("command") or []
+        if isinstance(command, str):
+            command = [command]
+        supported_modes = runtime.get("supported_modes") or []
+        capabilities = runtime.get("capabilities") or []
+        now = updated_at or utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO runtime_registry (
+                    runtime_id, runtime_type, version, command_json, working_dir,
+                    timeout, cost_profile, supported_modes_json, capabilities_json,
+                    enabled, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(runtime_id) DO UPDATE SET
+                    runtime_type = excluded.runtime_type,
+                    version = excluded.version,
+                    command_json = excluded.command_json,
+                    working_dir = excluded.working_dir,
+                    timeout = excluded.timeout,
+                    cost_profile = excluded.cost_profile,
+                    supported_modes_json = excluded.supported_modes_json,
+                    capabilities_json = excluded.capabilities_json,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    runtime_id,
+                    runtime_type,
+                    str(runtime.get("version") or ""),
+                    json.dumps([str(item) for item in command], ensure_ascii=False),
+                    str(runtime.get("working_dir") or runtime.get("cwd") or ""),
+                    int(runtime.get("timeout") or runtime.get("timeout_seconds") or 90),
+                    str(runtime.get("cost_profile") or runtime.get("cost_tier") or "medium"),
+                    json.dumps([str(item) for item in supported_modes], ensure_ascii=False),
+                    json.dumps([str(item) for item in capabilities], ensure_ascii=False),
+                    1 if runtime.get("enabled", True) else 0,
+                    now,
+                ),
+            )
+        item = self.get_runtime(runtime_id)
+        assert item is not None
+        return item
+
+    def get_runtime(self, runtime_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM runtime_registry WHERE runtime_id = ?", (runtime_id,)).fetchone()
+        return self._runtime_from_row(row) if row else None
+
+    def list_runtimes(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM runtime_registry ORDER BY runtime_id ASC").fetchall()
+        return [self._runtime_from_row(row) for row in rows]
+
+    # ── workspace packs ──────────────────────────────────────────────────
+
+    def _workspace_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        for key in ("rooms", "agents", "memory", "skills", "goals", "repos", "runtime_refs"):
+            data[key] = json.loads(data.pop(f"{key}_json") or "[]")
+        data["governance"] = json.loads(data.pop("governance_json") or "{}")
+        return data
+
+    def upsert_workspace_pack(self, name: str, pack: dict | None = None, *, workspace_id: str | None = None) -> dict:
+        now = utc_now_iso()
+        pack = pack or {}
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO workspace_packs (
+                    workspace_id, name, rooms_json, agents_json, memory_json,
+                    skills_json, goals_json, repos_json, governance_json,
+                    runtime_refs_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    rooms_json = excluded.rooms_json,
+                    agents_json = excluded.agents_json,
+                    memory_json = excluded.memory_json,
+                    skills_json = excluded.skills_json,
+                    goals_json = excluded.goals_json,
+                    repos_json = excluded.repos_json,
+                    governance_json = excluded.governance_json,
+                    runtime_refs_json = excluded.runtime_refs_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    workspace_id or str(uuid.uuid4()),
+                    name,
+                    json.dumps(pack.get("rooms") or [], ensure_ascii=False),
+                    json.dumps(pack.get("agents") or [], ensure_ascii=False),
+                    json.dumps(pack.get("memory") or [], ensure_ascii=False),
+                    json.dumps(pack.get("skills") or [], ensure_ascii=False),
+                    json.dumps(pack.get("goals") or [], ensure_ascii=False),
+                    json.dumps(pack.get("repos") or [], ensure_ascii=False),
+                    json.dumps(pack.get("governance") or {}, ensure_ascii=False),
+                    json.dumps(pack.get("runtime_refs") or [], ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        item = self.get_workspace_pack(name)
+        assert item is not None
+        return item
+
+    def get_workspace_pack(self, name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM workspace_packs WHERE name = ?", (name,)).fetchone()
+        return self._workspace_from_row(row) if row else None
+
+    def list_workspace_packs(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM workspace_packs ORDER BY updated_at DESC, name ASC").fetchall()
+        return [self._workspace_from_row(row) for row in rows]
+
     # ── rooms ──────────────────────────────────────────────────────────────
 
     def _empty_room_memory(self, room_name: str) -> dict:
@@ -476,6 +833,360 @@ class Storage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # ── shared memory ─────────────────────────────────────────────────────
+
+    def _memory_from_row(self, row: sqlite3.Row) -> dict:
+        return dict(row)
+
+    def _record_memory_event_locked(
+        self,
+        memory_id: str,
+        event_type: str,
+        actor: str | None,
+        details: dict | str | None,
+        created_at: str,
+    ) -> None:
+        if isinstance(details, dict):
+            detail_text = json.dumps(details, ensure_ascii=False)
+        else:
+            detail_text = details
+        self._conn.execute(
+            """
+            INSERT INTO memory_events (
+                event_id, room_name, memory_id, event_type, actor,
+                field_changed, old_value, new_value, details, created_at
+            )
+            SELECT ?, room_name, ?, ?, ?, NULL, NULL, NULL, ?, ?
+            FROM shared_memory
+            WHERE memory_id = ?
+            """,
+            (str(uuid.uuid4()), memory_id, event_type, actor or "system", detail_text, created_at, memory_id),
+        )
+
+    def record_shared_memory_event(
+        self,
+        memory_id: str,
+        event_type: str,
+        *,
+        actor: str | None = None,
+        details: dict | str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        with self._lock, self._conn:
+            if self._conn.execute("SELECT 1 FROM shared_memory WHERE memory_id = ?", (memory_id,)).fetchone() is None:
+                return
+            self._record_memory_event_locked(memory_id, event_type, actor, details, created_at or utc_now_iso())
+
+    def find_duplicate_memory(self, content: str, *, room_name: str | None = None, workspace: str | None = None) -> dict | None:
+        normalized = " ".join(str(content or "").split()).lower()
+        if not normalized:
+            return None
+        like = f"%{normalized}%"
+        clauses = ["LOWER(content) = ? OR LOWER(content) LIKE ?"]
+        params: list[object] = [normalized, like]
+        if room_name is not None:
+            clauses.append("(room_name = ? OR room_name IS NULL)")
+            params.append(room_name)
+        if workspace is not None:
+            clauses.append("(workspace = ? OR workspace IS NULL)")
+            params.append(workspace)
+        sql = f"""
+            SELECT *
+            FROM shared_memory
+            WHERE status != 'archived' AND ({') AND ('.join(clauses)})
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+        return self._memory_from_row(row) if row else None
+
+    def create_shared_memory(
+        self,
+        *,
+        memory_id: str,
+        room_name: str | None,
+        workspace: str | None,
+        memory_type: str,
+        content: str,
+        status: str,
+        confidence: int,
+        created_by: str | None,
+        created_at: str,
+        source_team_run_id: str | None = None,
+        source_task_id: str | None = None,
+        source_message_id: str | None = None,
+    ) -> dict:
+        if memory_type not in SHARED_MEMORY_TYPES:
+            raise ValueError(f"invalid memory_type: {memory_type}")
+        if status not in SHARED_MEMORY_STATUSES:
+            raise ValueError(f"invalid memory status: {status}")
+        token_cost = max(1, len(content) // 4) if content else 0
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO shared_memory (
+                    memory_id, room_name, workspace, memory_type, content, status,
+                    confidence, created_by, created_at, source_team_run_id,
+                    source_task_id, source_message_id, token_cost_estimate,
+                    use_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    memory_id,
+                    room_name,
+                    workspace,
+                    memory_type,
+                    content,
+                    status,
+                    int(confidence),
+                    created_by,
+                    created_at,
+                    source_team_run_id,
+                    source_task_id,
+                    source_message_id,
+                    token_cost,
+                ),
+            )
+            self._record_memory_event_locked(
+                memory_id,
+                "memory_proposed",
+                created_by,
+                {"memory_type": memory_type, "status": status, "confidence": int(confidence)},
+                created_at,
+            )
+        memory = self.get_shared_memory(memory_id)
+        assert memory is not None
+        return memory
+
+    def get_shared_memory(self, memory_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM shared_memory WHERE memory_id = ?", (memory_id,)).fetchone()
+        return self._memory_from_row(row) if row else None
+
+    def list_shared_memory(
+        self,
+        *,
+        status: str | None = None,
+        room_name: str | None = None,
+        workspace: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses = []
+        params: list[object] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if room_name is not None:
+            clauses.append("room_name = ?")
+            params.append(room_name)
+        if workspace is not None:
+            clauses.append("workspace = ?")
+            params.append(workspace)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM shared_memory
+                {where}
+                ORDER BY created_at DESC, memory_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    def search_shared_memory(self, query: str, *, limit: int = 50) -> list[dict]:
+        term = f"%{str(query or '').strip().lower()}%"
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM shared_memory
+                WHERE LOWER(content) LIKE ?
+                   OR LOWER(memory_type) LIKE ?
+                   OR LOWER(COALESCE(room_name, '')) LIKE ?
+                   OR LOWER(COALESCE(workspace, '')) LIKE ?
+                ORDER BY
+                  CASE status WHEN 'peer_approved' THEN 0 WHEN 'proposed' THEN 1 ELSE 2 END,
+                  created_at DESC
+                LIMIT ?
+                """,
+                (term, term, term, term, limit),
+            ).fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    def update_shared_memory(self, memory_id: str, fields: dict, *, actor: str, event_type: str) -> dict | None:
+        if not fields:
+            return self.get_shared_memory(memory_id)
+        allowed = {
+            "room_name", "workspace", "memory_type", "content", "status", "confidence",
+            "reviewed_by", "review_result", "review_reason", "reviewed_at",
+            "approved_by", "approved_at", "source_team_run_id", "source_task_id",
+            "source_message_id", "token_cost_estimate", "use_count", "last_used_at",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if "memory_type" in clean and clean["memory_type"] not in SHARED_MEMORY_TYPES:
+            raise ValueError(f"invalid memory_type: {clean['memory_type']}")
+        if "status" in clean and clean["status"] not in SHARED_MEMORY_STATUSES:
+            raise ValueError(f"invalid memory status: {clean['status']}")
+        if "content" in clean:
+            clean["token_cost_estimate"] = max(1, len(str(clean["content"])) // 4) if clean["content"] else 0
+        if not clean:
+            return self.get_shared_memory(memory_id)
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE shared_memory SET {assignments} WHERE memory_id = ?",
+                [*clean.values(), memory_id],
+            )
+            if cur.rowcount == 0:
+                return None
+            self._record_memory_event_locked(memory_id, event_type, actor, clean, utc_now_iso())
+        return self.get_shared_memory(memory_id)
+
+    def list_shared_memory_events(self, memory_id: str | None = None, limit: int = 100) -> list[dict] | None:
+        if memory_id and self.get_shared_memory(memory_id) is None:
+            return None
+        params: list[object] = []
+        where = "WHERE memory_id IS NOT NULL"
+        if memory_id:
+            where += " AND memory_id = ?"
+            params.append(memory_id)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT event_id, memory_id, event_type, actor, details, created_at
+                FROM memory_events
+                {where}
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def select_shared_memory_for_injection(
+        self,
+        *,
+        room_name: str | None,
+        workspace: str | None,
+        max_items: int,
+        max_chars: int,
+        min_confidence: int,
+    ) -> list[dict]:
+        clauses = ["status = 'peer_approved'", "confidence >= ?"]
+        params: list[object] = [int(min_confidence)]
+        if room_name:
+            clauses.append("(room_name = ? OR room_name IS NULL)")
+            params.append(room_name)
+        else:
+            clauses.append("room_name IS NULL")
+        if workspace:
+            clauses.append("(workspace = ? OR workspace IS NULL)")
+            params.append(workspace)
+        else:
+            clauses.append("workspace IS NULL")
+        params.append(max(max_items * 4, max_items))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *,
+                  CASE WHEN room_name = ? THEN 0 WHEN workspace = ? THEN 1 ELSE 2 END AS scope_rank
+                FROM shared_memory
+                WHERE {' AND '.join(clauses)}
+                ORDER BY scope_rank ASC, COALESCE(last_used_at, approved_at, created_at) DESC, created_at DESC
+                LIMIT ?
+                """,
+                [room_name, workspace, *params],
+            ).fetchall()
+        selected: list[dict] = []
+        used_chars = 0
+        for row in rows:
+            memory = self._memory_from_row(row)
+            line_len = len(f"- {memory.get('memory_type')}: {memory.get('content')}")
+            if selected and used_chars + line_len > max_chars:
+                continue
+            if line_len > max_chars:
+                continue
+            selected.append(memory)
+            used_chars += line_len
+            if len(selected) >= max_items:
+                break
+        return selected
+
+    def mark_shared_memory_used(self, memory_ids: list[str], *, actor: str = "synkraken") -> None:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            for memory_id in memory_ids:
+                cur = self._conn.execute(
+                    """
+                    UPDATE shared_memory
+                    SET use_count = COALESCE(use_count, 0) + 1,
+                        last_used_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (now, memory_id),
+                )
+                if cur.rowcount:
+                    self._record_memory_event_locked(memory_id, "memory_used", actor, None, now)
+
+    def _normalize_agent_profile(self, fields: dict) -> dict:
+        clean: dict[str, object] = {}
+        if "cost_tier" in fields:
+            cost_tier = str(fields.get("cost_tier") or "medium").strip().lower()
+            if cost_tier not in AGENT_COST_TIERS:
+                raise ValueError(f"invalid cost_tier: {cost_tier}")
+            clean["cost_tier"] = cost_tier
+        if "preferred_roles" in fields:
+            roles = fields.get("preferred_roles") or []
+            if not isinstance(roles, list):
+                raise ValueError("preferred_roles must be a list")
+            normalized_roles = []
+            for role in roles:
+                role_text = str(role).strip().lower()
+                if not role_text:
+                    continue
+                if role_text not in AGENT_PROFILE_ROLES:
+                    raise ValueError(f"invalid preferred role: {role_text}")
+                if role_text not in normalized_roles:
+                    normalized_roles.append(role_text)
+            clean["preferred_roles_json"] = json.dumps(normalized_roles, ensure_ascii=False)
+        if "capabilities" in fields:
+            capabilities = fields.get("capabilities") or []
+            if not isinstance(capabilities, list):
+                raise ValueError("capabilities must be a list")
+            normalized_caps = []
+            for capability in capabilities:
+                cap_text = " ".join(str(capability).strip().lower().split())
+                if cap_text and cap_text not in normalized_caps:
+                    normalized_caps.append(cap_text)
+            clean["capabilities_json"] = json.dumps(normalized_caps, ensure_ascii=False)
+        for key in ("speed", "trust"):
+            if key in fields:
+                value = int(fields.get(key))
+                if value < 1 or value > 10:
+                    raise ValueError(f"{key} must be between 1 and 10")
+                clean[key] = value
+        return clean
+
+    def _agent_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        try:
+            data["preferred_roles"] = json.loads(data.pop("preferred_roles_json") or "[]")
+        except Exception:
+            data["preferred_roles"] = []
+        try:
+            data["capabilities"] = json.loads(data.pop("capabilities_json") or "[]")
+        except Exception:
+            data["capabilities"] = []
+        data["speed"] = int(data.get("speed") or 5)
+        data["trust"] = int(data.get("trust") or 5)
+        return data
+
     def sync_agents(self, agents: list[dict]) -> None:
         seen = {str(agent["adapter_id"]) for agent in agents}
         now = utc_now_iso()
@@ -491,12 +1202,18 @@ class Storage:
                 target_status = "online" if enabled else "disabled"
                 current = existing.get(adapter_id)
                 if current is None:
+                    profile = self._normalize_agent_profile({
+                        key: agent[key]
+                        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust")
+                        if key in agent
+                    })
                     self._conn.execute(
                         """
                         INSERT INTO agents (
                             adapter_id, runtime_name, adapter_type, enabled,
-                            status, last_seen_at, runtime
-                        ) VALUES (?, ?, ?, ?, 'configured', NULL, ?)
+                            status, last_seen_at, runtime, cost_tier,
+                            preferred_roles_json, capabilities_json, speed, trust
+                        ) VALUES (?, ?, ?, ?, 'configured', NULL, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             adapter_id,
@@ -504,23 +1221,38 @@ class Storage:
                             agent.get("type") or "unknown",
                             1 if enabled else 0,
                             runtime,
+                            profile.get("cost_tier", "medium"),
+                            profile.get("preferred_roles_json", "[]"),
+                            profile.get("capabilities_json", "[]"),
+                            profile.get("speed", 5),
+                            profile.get("trust", 5),
                         ),
                     )
                     current = {"status": "configured"}
                 else:
+                    profile = self._normalize_agent_profile({
+                        key: agent[key]
+                        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust")
+                        if key in agent
+                    })
+                    assignments = ["runtime_name = ?", "adapter_type = ?", "enabled = ?", "runtime = ?"]
+                    values: list[object] = [
+                        agent.get("runtime_name") or adapter_id,
+                        agent.get("type") or "unknown",
+                        1 if enabled else 0,
+                        runtime,
+                    ]
+                    for key, value in profile.items():
+                        assignments.append(f"{key} = ?")
+                        values.append(value)
+                    values.append(adapter_id)
                     self._conn.execute(
                         """
-                        UPDATE agents
-                        SET runtime_name = ?, adapter_type = ?, enabled = ?, runtime = ?
+                        UPDATE agents SET
+                        """ + ", ".join(assignments) + """
                         WHERE adapter_id = ?
                         """,
-                        (
-                            agent.get("runtime_name") or adapter_id,
-                            agent.get("type") or "unknown",
-                            1 if enabled else 0,
-                            runtime,
-                            adapter_id,
-                        ),
+                        values,
                     )
                 if current.get("status") != target_status:
                     self._conn.execute(
@@ -549,12 +1281,13 @@ class Storage:
                 """
                 SELECT adapter_id, adapter_id AS agent_id, runtime_name, adapter_type AS type, enabled,
                        status, last_seen_at, runtime, current_task_id,
-                       current_room, last_message_at
+                       current_room, last_message_at, cost_tier, preferred_roles_json,
+                       capabilities_json, speed, trust
                 FROM agents
                 ORDER BY adapter_id ASC
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._agent_from_row(row) for row in rows]
 
     def get_agent(self, adapter_id: str) -> dict | None:
         with self._lock:
@@ -562,13 +1295,38 @@ class Storage:
                 """
                 SELECT adapter_id, adapter_id AS agent_id, runtime_name, adapter_type AS type, enabled,
                        status, last_seen_at, runtime, current_task_id,
-                       current_room, last_message_at
+                       current_room, last_message_at, cost_tier, preferred_roles_json,
+                       capabilities_json, speed, trust
                 FROM agents
                 WHERE adapter_id = ?
                 """,
                 (adapter_id,),
             ).fetchone()
-        return dict(row) if row else None
+        return self._agent_from_row(row) if row else None
+
+    def update_agent_profile(self, adapter_id: str, fields: dict, actor: str = "operator") -> dict | None:
+        clean = self._normalize_agent_profile(fields)
+        if not clean:
+            return self.get_agent(adapter_id)
+        with self._lock, self._conn:
+            before = self._conn.execute("SELECT * FROM agents WHERE adapter_id = ?", (adapter_id,)).fetchone()
+            if before is None:
+                return None
+            assignments = ", ".join(f"{key} = ?" for key in clean)
+            cur = self._conn.execute(
+                f"UPDATE agents SET {assignments}, last_seen_at = ? WHERE adapter_id = ?",
+                [*clean.values(), utc_now_iso(), adapter_id],
+            )
+            if cur.rowcount == 0:
+                return None
+            self._save_agent_event(
+                adapter_id,
+                "profile_updated",
+                json.dumps(self._agent_from_row(before), ensure_ascii=False),
+                json.dumps(fields, ensure_ascii=False),
+                utc_now_iso(),
+            )
+        return self.get_agent(adapter_id)
 
     def list_agent_events(self, adapter_id: str, limit: int = 50) -> list[dict] | None:
         if self.get_agent(adapter_id) is None:
@@ -1121,6 +1879,154 @@ class Storage:
                 LIMIT ?
                 """,
                 (team_run_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ── goal mode ─────────────────────────────────────────────────────────
+
+    def _goal_run_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["reviewers"] = json.loads(data.get("reviewers") or "[]")
+        data["participants"] = json.loads(data.get("participants") or "[]")
+        data["linked_team_run_ids"] = json.loads(data.get("linked_team_run_ids") or "[]")
+        return data
+
+    def create_goal_run(
+        self,
+        *,
+        goal_run_id: str,
+        room_name: str,
+        source_goal: str,
+        status: str,
+        threshold: int,
+        max_rounds: int,
+        current_round: int,
+        participants: list[str],
+        token_budget_chars: int,
+        linked_task_id: str | None,
+        started_at: str,
+        created_by: str,
+    ) -> dict:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO goal_runs (
+                    goal_run_id, room_name, source_goal, status, threshold,
+                    max_rounds, current_round, owner_agent, reviewers,
+                    participants, token_police_agent, guardrail_agent,
+                    success_criteria, latest_score, final_report,
+                    token_budget_chars, estimated_context_chars,
+                    guardrail_status, linked_task_id, linked_team_run_ids,
+                    started_at, completed_at, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', ?, NULL, NULL, '', 0, '', ?, 0, '', ?, '[]', ?, NULL, ?)
+                """,
+                (
+                    goal_run_id,
+                    room_name,
+                    source_goal,
+                    status,
+                    threshold,
+                    max_rounds,
+                    current_round,
+                    json.dumps(participants, ensure_ascii=False),
+                    token_budget_chars,
+                    linked_task_id,
+                    started_at,
+                    created_by,
+                ),
+            )
+        run = self.get_goal_run(goal_run_id)
+        assert run is not None
+        return run
+
+    def update_goal_run(self, goal_run_id: str, fields: dict) -> dict | None:
+        if not fields:
+            return self.get_goal_run(goal_run_id)
+        clean: dict[str, object] = {}
+        allowed = {
+            "room_name", "source_goal", "status", "threshold", "max_rounds",
+            "current_round", "owner_agent", "reviewers", "participants",
+            "token_police_agent", "guardrail_agent", "success_criteria",
+            "latest_score", "final_report", "token_budget_chars",
+            "estimated_context_chars", "guardrail_status", "linked_task_id",
+            "linked_team_run_ids", "started_at", "completed_at", "created_by",
+        }
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key in {"reviewers", "participants", "linked_team_run_ids"}:
+                clean[key] = json.dumps(value or [], ensure_ascii=False)
+            else:
+                clean[key] = value
+        if not clean:
+            return self.get_goal_run(goal_run_id)
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE goal_runs SET {assignments} WHERE goal_run_id = ?",
+                [*clean.values(), goal_run_id],
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_goal_run(goal_run_id)
+
+    def get_goal_run(self, goal_run_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM goal_runs WHERE goal_run_id = ?",
+                (goal_run_id,),
+            ).fetchone()
+        return self._goal_run_from_row(row) if row else None
+
+    def list_goal_runs(self, room_name: str | None = None, limit: int = 25) -> list[dict]:
+        sql = "SELECT * FROM goal_runs"
+        params: list[object] = []
+        if room_name:
+            sql += " WHERE room_name = ?"
+            params.append(room_name)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._goal_run_from_row(row) for row in rows]
+
+    def record_goal_event(
+        self,
+        goal_run_id: str,
+        event_type: str,
+        *,
+        actor: str | None = None,
+        details: str | dict | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        if isinstance(details, dict):
+            detail_text = json.dumps(details, ensure_ascii=False)
+        else:
+            detail_text = details
+        with self._lock, self._conn:
+            if self._conn.execute("SELECT 1 FROM goal_runs WHERE goal_run_id = ?", (goal_run_id,)).fetchone() is None:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO goal_events (event_id, goal_run_id, event_type, actor, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), goal_run_id, event_type, actor, detail_text, created_at or utc_now_iso()),
+            )
+
+    def list_goal_events(self, goal_run_id: str, limit: int = 200) -> list[dict] | None:
+        if self.get_goal_run(goal_run_id) is None:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT event_id, goal_run_id, event_type, actor, details, created_at
+                FROM goal_events
+                WHERE goal_run_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?
+                """,
+                (goal_run_id, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

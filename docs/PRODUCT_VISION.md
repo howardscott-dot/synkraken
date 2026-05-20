@@ -2,14 +2,16 @@
 
 ## SynKraken in one sentence
 
-SynKraken is the **local command deck for AI agents**: a human-controlled place
-to see, direct, and coordinate heterogeneous agent runtimes from one machine.
+SynKraken is the **open-source control plane for AI workforces**: a
+local-first, runtime-neutral place to see, direct, govern, coordinate, and
+recover work across heterogeneous AI runtimes.
 
 ## Release posture
 
-SynKraken is not trying to become "an autonomous company in a box." It is
-trying to become the best local operator surface for people who deliberately
-use multiple agents and want the work to remain visible, steerable, and theirs.
+SynKraken is not trying to become another coding agent, orchestration LLM,
+chatbot, CrewAI clone, or hidden autonomous swarm. It is trying to become the
+best local control plane for people who deliberately use multiple agents and
+want the work to remain visible, steerable, and theirs.
 
 ## Product thesis
 
@@ -17,12 +19,15 @@ AI agents are becoming useful in plural. The problem is no longer only how to
 run one assistant, but how to understand and steer several of them without
 handing control to a remote orchestration platform.
 
-SynKraken should make local multi-agent work feel legible:
+SynKraken should make local AI workforce operation legible:
 
 - the human remains the operator
 - agents remain distinct runtimes with their own strengths
 - coordination is explicit, inspectable, and durable
 - the system stays small enough to trust
+
+Users own subscriptions, API keys, costs, and runtimes. SynKraken owns
+visibility, governance, coordination, and recovery.
 
 ## Product principles
 
@@ -32,7 +37,7 @@ The default operating model is one local machine, local storage, and loopback
 networking. SynKraken should work without SaaS infrastructure and should keep
 conversation history under the operator's control.
 
-### Human-controlled orchestration
+### Human-controlled coordination
 
 SynKraken coordinates agents; it does not replace operator judgment. The human
 chooses the room, message, task, and next action. Automation may grow later,
@@ -94,25 +99,31 @@ first-class interface for people who live in terminals.
 The Web GUI is the visual command deck: easier to scan, easier to share on one
 screen, and a better foundation for richer work objects over time.
 
-### Agent bridge
+### Runtime communication
 
-The bridge skill lets participating agents call back into SynKraken so the
-system is not only a human broadcast console; it is a shared local fabric.
+The runtime communication skill lets participating agents call back into
+SynKraken so the system is not only a human broadcast console; it is a shared
+local fabric under operator-visible governance.
 
 ## Product boundaries
 
 SynKraken **is**:
 
-- a local coordination surface
+- a local-first control plane
+- a runtime-neutral management harness
+- a governance layer
+- a memory layer
+- a coordination system
+- an observability layer
 - a durable record of multi-agent work
-- a bridge across heterogeneous runtimes
 
 SynKraken is **not**:
 
-- a model provider
-- a remote team chat service
-- a black-box autonomous planner
-- a reason to collapse every agent into one vendor stack
+- another coding agent
+- an orchestration LLM
+- a chatbot
+- a CrewAI clone
+- a hidden autonomous swarm
 
 ## Near-term product direction
 
@@ -135,6 +146,9 @@ Version 0.2 succeeds if:
 
 ## Later integrations
 
-Studio:Blueprint integration belongs later, after the local command deck has a
-stable product shape and durable object model. It should integrate with
+External product integrations belong later, after the local command deck has a
+stable product shape and durable object model. They should integrate with
 SynKraken's concepts rather than define them prematurely.
+
+The product stack is OSS, then Packs, then Vertical products. The OSS layer
+defines generic durable concepts; packs and vertical products extend them.

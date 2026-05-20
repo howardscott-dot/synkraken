@@ -32,7 +32,7 @@ class OpenClawAdapter(BaseAdapter):
         except Exception:
             pass
         if agent_id == "main":
-            return "Stanley"
+            return "OpenClaw main"
         return agent_id
 
     def _extract_text(self, parsed: Any) -> str | None:

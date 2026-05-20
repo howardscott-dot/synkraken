@@ -28,11 +28,11 @@ def main() -> None:
     assert not _is_unknown_slash_command("/status")
     assert not _is_unknown_slash_command("@goose hello")
     assert not _is_unknown_slash_command("#ops hello")
-    aliases = {"claude": "claude", "goose": "goose", "hermes": "hermes", "stanley": "openclaw-main"}
+    aliases = {"claude": "claude", "goose": "goose", "hermes": "hermes", "openclaw": "openclaw-main"}
     assert _parse_leading_mentions('@claude send a message to "@goose" and ask him to reply', aliases) == (
         ["claude"], 'send a message to "@goose" and ask him to reply'
     )
-    assert _parse_leading_mentions('@hermes @stanley please confer', aliases) == (
+    assert _parse_leading_mentions('@hermes @openclaw please confer', aliases) == (
         ["hermes", "openclaw-main"], 'please confer'
     )
 

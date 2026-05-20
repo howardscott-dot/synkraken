@@ -7,6 +7,7 @@ import shlex
 import signal
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
@@ -69,11 +70,13 @@ COMMANDS = [
     '/dashboard', '/events', '/conversations', '/deadletters', '/adapters',
     '/rooms', '/room', '/tasks', '/compose', '/send', '/broadcast', '/history',
     '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject',
+    '/goal', '/goals', '/goal-run', '/cancel-goal',
+    '/runtimes', '/runtime', '/workspace', '/flight',
     '/filter', '/help', '/status', '/health', '/agents', '/tail', '/transcript',
     '/save-transcript',
-    '/presence', '/agent', '/memory', '/clear', '/refresh', '/quit',
+    '/presence', '/agent', '/profiles', '/memory', '/clear', '/refresh', '/quit',
 ]
-ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'list']
+ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'members', 'kick', 'list']
 EVENT_FILTERS = {
     'all', 'message.accepted', 'delivery.recorded', 'dead-letter.recorded',
     'delivery.queued', 'delivery.sent', 'typing.started', 'typing.stopped',
@@ -340,6 +343,10 @@ def _fetch_dashboard(base: str) -> dict:
         out['tasks'] = _get_json(f'{base}/v1/tasks')
     except Exception:
         out['tasks'] = {'tasks': []}
+    try:
+        out['flight'] = _get_json(f'{base}/v1/flight')
+    except Exception:
+        out['flight'] = {}
     return out
 
 
@@ -403,7 +410,6 @@ def _mention_alias_map(data: dict) -> dict[str, str]:
         if rn:
             aliases[rn.lower()] = aid
         if aid == 'openclaw-main':
-            aliases.setdefault('stanley', aid)
             aliases.setdefault('openclaw', aid)
             aliases.setdefault('main', aid)
     return aliases
@@ -412,7 +418,7 @@ def _mention_alias_map(data: dict) -> dict[str, str]:
 def _resolve_target(target: str) -> str:
     lowered = target.strip().lower()
     aliases = {
-        'stanley': 'openclaw-main', 'openclaw': 'openclaw-main', 'main': 'openclaw-main',
+        'openclaw': 'openclaw-main', 'main': 'openclaw-main',
         'hermes': 'hermes', 'goose': 'goose', 'broadcast': 'broadcast',
     }
     return aliases.get(lowered, target)
@@ -616,6 +622,16 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
         mention = f"@{rn.lower()}"
         target_lines.append((f"  {mention:<14}→  {rn}", d, 0))
     target_lines.append((f"  {'@everyone':<14}→  broadcast", C_BRIGHT, curses.A_BOLD))
+    flight = data.get('flight') or {}
+    if flight:
+        target_lines.append(('', None, 0))
+        target_lines.append(('flight', C_MUTED, curses.A_BOLD))
+        target_lines.append((f"  agents online   {flight.get('agents_online', 0)}/{flight.get('agents_total', 0)}", C_BRIGHT, 0))
+        target_lines.append((f"  active goals    {flight.get('active_goals', 0)}", C_BRIGHT, 0))
+        target_lines.append((f"  blocked goals   {flight.get('blocked_goals', 0)}", C_RED if flight.get('blocked_goals') else C_MUTED, 0))
+        target_lines.append((f"  token risk      {flight.get('token_risk', 'low')}", C_WARN if flight.get('token_risk') != 'low' else C_OK, 0))
+        target_lines.append((f"  dead letters    {flight.get('dead_letters', 0)}", C_RED if flight.get('dead_letters') else C_MUTED, 0))
+        target_lines.append((f"  pending reviews {flight.get('pending_reviews', 0)}", C_WARN if flight.get('pending_reviews') else C_MUTED, 0))
     rooms = data.get('rooms', {}).get('rooms', [])
     if rooms:
         target_lines.append(('', None, 0))
@@ -1122,7 +1138,7 @@ def _view_help(stdscr, top, h, w):
         ('', None, 0),
         ('CHAT', C_TEAL, curses.A_BOLD),
         ('  @goose hello                    direct message goose', None, 0),
-        ('  @hermes @stanley please confer  send to multiple agents', None, 0),
+        ('  @hermes @openclaw please confer send to multiple agents', None, 0),
         ('  @everyone status?               current room if entered; otherwise global', None, 0),
         ('  @everyone --global status?      explicit global broadcast', None, 0),
         ('  #room hi all                    send to a specific room', None, 0),
@@ -1131,6 +1147,11 @@ def _view_help(stdscr, top, h, w):
         ('  /discuss --turns 4 --room ops goose hermes "topic"', None, 0),
         ('  /team "task"                    room team task mode', None, 0),
         ('  /team --turns 4 "task"          bounded room team task mode', None, 0),
+        ('  /goal "goal"                    bounded room goal mode', None, 0),
+        ('  /goal --threshold 80 --rounds 3 "goal"', None, 0),
+        ('  /goals                          recent goal runs', None, 0),
+        ('  /goal-run <id>                  inspect one goal run', None, 0),
+        ('  /cancel-goal <id>               cancel a running goal', None, 0),
         ('  /team-runs                      recent team runs', None, 0),
         ('  /team-run <id>                  inspect one team run', None, 0),
         ('  /approve <id>                   approve a pending team run', None, 0),
@@ -1147,10 +1168,12 @@ def _view_help(stdscr, top, h, w):
         ('  /room leave                     exit the current room', None, 0),
         ('  /room add <name> <adapter>      add a member', None, 0),
         ('  /room remove <name> <adapter>   remove a member', None, 0),
-        ('  /memory                         show current room memory', None, 0),
-        ('  /memory set purpose "..."       update room purpose', None, 0),
-        ('  /memory set objective "..."     update current objective', None, 0),
-        ('  /memory set focus "..."         update active focus', None, 0),
+        ('  /memory                         list shared memory', None, 0),
+        ('  /memory pending                 proposed shared memories', None, 0),
+        ('  /memory approved                approved shared memories', None, 0),
+        ('  /memory propose fact "..."      propose peer-reviewed memory', None, 0),
+        ('  /memory budget                  show injection budget', None, 0),
+        ('  /memory edit                    legacy current room memory editor', None, 0),
         ('', None, 0),
         ('VIEWS', C_TEAL, curses.A_BOLD),
         ('  /status                         daemon URL, health, agents, view/filter', None, 0),
@@ -1158,6 +1181,14 @@ def _view_help(stdscr, top, h, w):
         ('  /agents                         configured / registered agents', None, 0),
         ('  /presence                       agent operational presence', None, 0),
         ('  /agent <id>                     agent status and recent events', None, 0),
+        ('  /agent profile <id>             agent profile fields', None, 0),
+        ('  /profiles                       list agent profiles', None, 0),
+        ('  /runtimes                       list runtime registry', None, 0),
+        ('  /runtime doctor                 runtime registry diagnostics', None, 0),
+        ('  /runtime <id>                   inspect runtime', None, 0),
+        ('  /workspace init|load|export     manage workspace pack', None, 0),
+        ('  /workspace list                 list workspace packs', None, 0),
+        ('  /flight                         live control-plane status', None, 0),
         ('  /tasks                          recent / open tasks', None, 0),
         ('  /dashboard                      overview (default)', None, 0),
         ('  /events                         live event stream', None, 0),
@@ -1207,10 +1238,125 @@ def _format_memory_lines(memory: dict) -> list[str]:
     return [f"{label:<11} {value or '(empty)'}" for label, value in fields]
 
 
+def _format_shared_memory_summary(memory: dict) -> str:
+    room = f" room=#{memory.get('room_name')}" if memory.get('room_name') else ""
+    confidence = memory.get('confidence')
+    return (
+        f"{memory.get('memory_id')}  {memory.get('status')}  {memory.get('memory_type')}  "
+        f"conf={confidence}{room}  {str(memory.get('content') or '')[:100]}"
+    )
+
+
+def _format_shared_memory_lines(memory: dict) -> list[str]:
+    fields = [
+        ("memory", memory.get("memory_id")),
+        ("status", memory.get("status")),
+        ("type", memory.get("memory_type")),
+        ("confidence", memory.get("confidence")),
+        ("room", memory.get("room_name") or "(global)"),
+        ("workspace", memory.get("workspace") or "(global)"),
+        ("created by", memory.get("created_by")),
+        ("reviewed by", memory.get("reviewed_by")),
+        ("review", memory.get("review_result")),
+        ("reason", memory.get("review_reason")),
+        ("approved by", memory.get("approved_by")),
+        ("use count", memory.get("use_count")),
+        ("last used", memory.get("last_used_at")),
+    ]
+    lines = [f"{label:<12} {value if value not in (None, '') else '(empty)'}" for label, value in fields]
+    lines.extend(["", "content", str(memory.get("content") or "")])
+    events = memory.get("events") or []
+    if events:
+        lines.extend(["", "events"])
+        for event in events[-12:]:
+            lines.append(f"  {event.get('created_at')}  {event.get('event_type')}  {event.get('actor') or ''}")
+    return lines
+
+
 def _memory_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]]:
+    def room_suffix() -> str:
+        return f"&room={state['current_room']}" if state.get('current_room') else ""
+
+    if cmd in {'/memory', '/memory pending', '/memory approved', '/memory rejected'}:
+        status_map = {
+            '/memory pending': 'proposed',
+            '/memory approved': 'peer_approved',
+            '/memory rejected': 'rejected',
+        }
+        status = status_map.get(cmd)
+        query = f"?limit=50{room_suffix()}"
+        if status:
+            query = f"?status={status}&limit=50{room_suffix()}"
+        memories = _get_json(f"{base}/v1/memory{query}").get("memories", [])
+        label = "shared memory" if not status else f"shared memory {status}"
+        return (label, [_format_shared_memory_summary(item) for item in memories] or ["(no memories)"])
+    if cmd.startswith('/memory propose '):
+        try:
+            parts = shlex.split(cmd[len('/memory propose '):])
+        except ValueError as exc:
+            return ('memory', [f'parse error: {exc}'])
+        if len(parts) < 2:
+            return ('memory', ['usage: /memory propose <type> "content"'])
+        memory_type = parts[0]
+        content = ' '.join(parts[1:])
+        payload = {
+            "memory_type": memory_type,
+            "content": content,
+            "created_by": "synkraken-tui",
+        }
+        if state.get('current_room'):
+            payload["room_name"] = state['current_room']
+        result = _post_json(f"{base}/v1/memory/propose", payload)
+        memory = result.get("memory") or {}
+        return ('memory proposed', _format_shared_memory_lines(memory))
+    if cmd.startswith('/memory review '):
+        parts = cmd.split(' ', 2)
+        if len(parts) < 3 or not parts[2].strip():
+            return ('memory review', ['usage: /memory review <id>'])
+        result = _post_json(f"{base}/v1/memory/{parts[2].strip()}/review", {'actor': 'synkraken-tui'})
+        return ('memory review', _format_shared_memory_lines(result.get("memory") or {}))
+    if cmd.startswith('/memory approve ') or cmd.startswith('/memory reject ') or cmd.startswith('/memory archive '):
+        parts = cmd.split()
+        if len(parts) < 3:
+            return ('memory', [f'usage: {parts[0]} {parts[1]} <id>'])
+        action = parts[1]
+        result = _post_json(f"{base}/v1/memory/{parts[2]}/{action}", {'actor': 'synkraken-tui'})
+        return (f'memory {action}', _format_shared_memory_lines(result.get("memory") or {}))
+    if cmd.startswith('/memory search '):
+        try:
+            parts = shlex.split(cmd[len('/memory search '):])
+        except ValueError as exc:
+            return ('memory search', [f'parse error: {exc}'])
+        query = ' '.join(parts).strip()
+        if not query:
+            return ('memory search', ['usage: /memory search "query"'])
+        memories = _get_json(f"{base}/v1/memory/search?q={urllib.parse.quote(query)}").get("memories", [])
+        return ('memory search', [_format_shared_memory_summary(item) for item in memories] or ["(no matches)"])
+    if cmd == '/memory budget':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        budget = _get_json(f"{base}/v1/memory/budget{suffix}")
+        lines = [
+            f"approved memories       {budget.get('approved_memories')}",
+            f"injected max items      {budget.get('injected_max_items')}",
+            f"injected max chars      {budget.get('injected_max_chars')}",
+            f"max memory chars        {budget.get('max_memory_chars')}",
+            f"min confidence          {budget.get('min_confidence')}",
+            f"estimated chars         {budget.get('estimated_chars')}",
+            f"estimated tokens        {budget.get('estimated_tokens')}",
+            "",
+            "selected",
+        ]
+        lines.extend(_format_shared_memory_summary(item) for item in budget.get("selected", []))
+        return ('memory budget', lines)
+    if cmd.startswith('/memory show '):
+        memory_id = cmd.split(' ', 2)[2].strip()
+        if not memory_id:
+            return ('memory show', ['usage: /memory show <id>'])
+        return ('memory show', _format_shared_memory_lines(_get_json(f"{base}/v1/memory/{memory_id}")))
+
     room = state.get('current_room')
     if not room:
-        return ('memory', ['not in a room'])
+        return ('memory', ['usage: /memory [pending|approved|rejected|propose|review|approve|reject|archive|search|budget|show]'])
     path = f"{base}/v1/rooms/{room}/memory"
     if cmd == '/memory':
         return (f'#{room} memory', _format_memory_lines(_get_json(path)))
@@ -1309,6 +1455,70 @@ def _team_governance_command_lines(cmd: str, base: str, state: dict) -> tuple[st
     return None
 
 
+def _format_goal_run_lines(run: dict) -> list[str]:
+    lines = [
+        f"goal run       {run.get('goal_run_id')}",
+        f"room           {run.get('room_name')}",
+        f"status         {run.get('status')}",
+        f"round          {run.get('current_round')}/{run.get('max_rounds')}",
+        f"score          {run.get('latest_score')}/{run.get('threshold')}",
+        f"owner          {run.get('owner_agent') or '(none)'}",
+        f"reviewers      {', '.join(run.get('reviewers') or []) or '(none)'}",
+        f"token police   {run.get('token_police_agent') or '(none)'}",
+        f"guardrail      {run.get('guardrail_agent') or '(none)'}",
+        f"context chars   {run.get('estimated_context_chars')}/{run.get('token_budget_chars')}",
+        f"guardrail stat {run.get('guardrail_status') or '(none)'}",
+        f"task           {run.get('linked_task_id') or '(none)'}",
+        f"started        {run.get('started_at')}",
+        f"completed      {run.get('completed_at') or '(pending)'}",
+        f"goal           {run.get('source_goal') or ''}",
+    ]
+    if run.get('success_criteria'):
+        lines.extend(['', 'success criteria'])
+        lines.extend(str(run.get('success_criteria')).splitlines()[:20])
+    if run.get('final_report'):
+        lines.extend(['', 'final report'])
+        lines.extend(str(run.get('final_report')).splitlines())
+    events = run.get('events') or []
+    if events:
+        lines.extend(['', 'events'])
+        for event in events[-16:]:
+            detail = f"  {event.get('details')}" if event.get('details') else ''
+            lines.append(f"  {event.get('created_at')}  {event.get('event_type')}  {event.get('actor') or ''}{detail}")
+    return lines
+
+
+def _goal_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]] | None:
+    if cmd == '/goals':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        runs = _get_json(f'{base}/v1/goal-runs{suffix}').get('goal_runs', [])
+        if not runs:
+            return ('goal runs', ['(no goal runs)'])
+        return ('goal runs', [
+            f"{run.get('goal_run_id')}  {run.get('status')}  "
+            f"round={run.get('current_round')}/{run.get('max_rounds')}  "
+            f"score={run.get('latest_score')}/{run.get('threshold')}  "
+            f"owner={run.get('owner_agent') or '(none)'}  room=#{run.get('room_name')}"
+            for run in runs
+        ])
+    if cmd.startswith('/goal-run '):
+        goal_run_id = cmd.split(' ', 1)[1].strip()
+        if not goal_run_id:
+            return ('goal run', ['usage: /goal-run <id>'])
+        return ('goal run', _format_goal_run_lines(_get_json(f'{base}/v1/goal-runs/{goal_run_id}')))
+    if cmd == '/goal-run':
+        return ('goal run', ['usage: /goal-run <id>'])
+    if cmd.startswith('/cancel-goal '):
+        goal_run_id = cmd.split(' ', 1)[1].strip()
+        if not goal_run_id:
+            return ('cancel goal', ['usage: /cancel-goal <id>'])
+        result = _post_json(f'{base}/v1/goal-runs/{goal_run_id}/cancel', {'actor': 'synkraken-tui'})
+        return ('cancel goal', _format_goal_run_lines(result.get('goal_run') or {}))
+    if cmd == '/cancel-goal':
+        return ('cancel goal', ['usage: /cancel-goal <id>'])
+    return None
+
+
 def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
     """Return local-only slash command output without touching the router."""
     health = data.get('health', {})
@@ -1325,6 +1535,53 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
         ])
     if cmd == '/health':
         return ('health', json.dumps(health, indent=2, ensure_ascii=False).splitlines())
+    if cmd == '/flight':
+        flight = _get_json(f'{base}/v1/flight')
+        return ('flight', [
+            f"agents online   {flight.get('agents_online')}/{flight.get('agents_total')}",
+            f"active goals    {flight.get('active_goals')}",
+            f"blocked goals   {flight.get('blocked_goals')}",
+            f"token risk      {flight.get('token_risk')}",
+            f"failures        {flight.get('failures')}",
+            f"dead letters    {flight.get('dead_letters')}",
+            f"cost complexity {flight.get('cost_complexity')}",
+            f"memory count    {flight.get('memory_count')}",
+            f"pending reviews {flight.get('pending_reviews')}",
+        ])
+    if cmd == '/runtimes':
+        runtimes = _get_json(f'{base}/v1/runtimes').get('runtimes', [])
+        return ('runtimes', [
+            f"{item.get('runtime_id')}  type={item.get('runtime_type')}  cost={item.get('cost_profile')}  timeout={item.get('timeout')}  modes={','.join(item.get('supported_modes') or []) or '-'}"
+            for item in runtimes
+        ] or ['(no runtimes)'])
+    if cmd == '/runtime doctor':
+        doctor = _get_json(f'{base}/v1/runtimes/doctor').get('runtimes', [])
+        return ('runtime doctor', [
+            f"{item.get('runtime_id')}  {'ok' if item.get('ok') else 'check'}  registered={item.get('registered')}  warnings={','.join(item.get('warnings') or []) or '-'}"
+            for item in doctor
+        ] or ['(no runtimes)'])
+    if cmd.startswith('/runtime '):
+        runtime_id = cmd.split(' ', 1)[1].strip()
+        runtime = _get_json(f'{base}/v1/runtimes/{runtime_id}')
+        return ('runtime', json.dumps(runtime, indent=2, ensure_ascii=False).splitlines())
+    if cmd == '/runtime':
+        return ('runtime', ['usage: /runtime <id> | /runtime doctor'])
+    if cmd.startswith('/workspace'):
+        parts = cmd.split()
+        if len(parts) < 2:
+            return ('workspace', ['usage: /workspace init|load|export|list [name]'])
+        action = parts[1]
+        name = parts[2] if len(parts) > 2 else None
+        if action == 'list':
+            workspaces = _get_json(f'{base}/v1/workspaces').get('workspaces', [])
+            return ('workspaces', [
+                f"{item.get('name')}  rooms={len(item.get('rooms') or [])} agents={len(item.get('agents') or [])} runtimes={len(item.get('runtime_refs') or [])}"
+                for item in workspaces
+            ] or ['(no workspaces)'])
+        if action in {'init', 'load', 'export'}:
+            result = _post_json(f'{base}/v1/workspaces/{action}', {'name': name} if name else {})
+            return ('workspace', json.dumps(result.get('workspace', {}), indent=2, ensure_ascii=False).splitlines())
+        return ('workspace', [f'unknown workspace command: {action}'])
     if cmd == '/agents':
         if not agents:
             return ('agents', ['(no agents configured)'])
@@ -1340,6 +1597,34 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
         if not agents:
             return ('presence', ['(no agents configured)'])
         return ('presence', [_agent_presence_line(agent) for agent in agents])
+    if cmd == '/profiles':
+        if not agents:
+            return ('profiles', ['(no agents configured)'])
+        return ('profiles', [
+            f"{agent.get('adapter_id')}  cost={agent.get('cost_tier', 'medium')}  "
+            f"speed={agent.get('speed', 5)} trust={agent.get('trust', 5)}  "
+            f"roles={','.join(agent.get('preferred_roles') or []) or '-'}  "
+            f"caps={','.join(agent.get('capabilities') or []) or '-'}"
+            for agent in agents
+        ])
+    if cmd.startswith('/agent profile '):
+        agent_id = cmd.split(' ', 2)[2].strip()
+        if not agent_id:
+            return ('agent profile', ['usage: /agent profile <adapter_id>'])
+        try:
+            profile = _get_json(f"{base}/v1/agents/{agent_id}/profile").get('profile', {})
+        except Exception as exc:  # noqa: BLE001
+            return ('agent profile', [f'unavailable: {exc}'])
+        if not profile:
+            return ('agent profile', [f'unknown agent: {agent_id}'])
+        return ('agent profile', [
+            f"agent          {profile.get('adapter_id')}",
+            f"cost tier      {profile.get('cost_tier', 'medium')}",
+            f"preferred      {', '.join(profile.get('preferred_roles') or []) or '(none)'}",
+            f"capabilities   {', '.join(profile.get('capabilities') or []) or '(none)'}",
+            f"speed          {profile.get('speed', 5)}/10",
+            f"trust          {profile.get('trust', 5)}/10",
+        ])
     if cmd.startswith('/agent '):
         agent_id = cmd.split(' ', 1)[1].strip()
         agent = next((item for item in agents if item.get('adapter_id') == agent_id), None)
@@ -1731,6 +2016,48 @@ def _handle_team_task(base: str, params: dict[str, Any]) -> dict:
     })
 
 
+def _parse_goal_args(rest: str, current_room: str | None) -> dict[str, Any]:
+    if not current_room:
+        raise ValueError('Goal mode needs a room. Create or select a room first.')
+    try:
+        parts = shlex.split(rest)
+    except ValueError as exc:
+        raise ValueError(f'invalid /goal syntax: {exc}') from None
+    threshold = 80
+    rounds = 3
+    values: list[str] = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == '--threshold':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /goal [--threshold N] [--rounds N] "goal text"')
+            threshold = int(parts[i])
+        elif part == '--rounds':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /goal [--threshold N] [--rounds N] "goal text"')
+            rounds = int(parts[i])
+        else:
+            values.append(part)
+        i += 1
+    goal = ' '.join(values).strip()
+    if not goal:
+        raise ValueError('usage: /goal [--threshold N] [--rounds N] "goal text"')
+    return {'room_name': current_room, 'goal': goal, 'threshold': threshold, 'max_rounds': rounds}
+
+
+def _handle_goal_run(base: str, params: dict[str, Any]) -> dict:
+    return _post_json(f'{base}/v1/goal-runs', {
+        'source': 'synkraken-tui',
+        'room_name': params['room_name'],
+        'goal': params['goal'],
+        'threshold': params['threshold'],
+        'max_rounds': params['max_rounds'],
+    })
+
+
 def _start_async_discussion(state: dict, base: str, params: dict[str, Any]) -> None:
     agents = params['agents']
     topic = params['topic']
@@ -1820,6 +2147,50 @@ def _start_async_team_task(state: dict, base: str, params: dict[str, Any]) -> No
     threading.Thread(target=run, daemon=True).start()
 
 
+def _start_async_goal_run(state: dict, base: str, params: dict[str, Any]) -> None:
+    room_name = params['room_name']
+    goal = params['goal']
+    label = f"goal #{room_name}"
+    pending = {
+        'label': label,
+        'target': f"room:{room_name}",
+        'body': goal,
+        'started_at': time.time(),
+        'done': False,
+        'result': None,
+        'error': None,
+        'return_view': 'chat',
+        'goal_run': True,
+        'room_name': room_name,
+    }
+    state['pending'] = pending
+    state['command_result'] = (f'#{room_name}', {
+        'conversation_id': '',
+        'messages': [{
+            'message_id': f"pending-goal:{time.time()}",
+            'conversation_id': '',
+            'source': 'synkraken-tui',
+            'target': pending['target'],
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'body': f"Goal: {goal}",
+        }],
+        'deliveries': [],
+        'dead_letters': [],
+    })
+    state['chat_target'] = pending['target']
+    state['view'] = 'chat'
+
+    def run():
+        try:
+            pending['result'] = _handle_goal_run(base, params)
+        except Exception as exc:  # noqa: BLE001
+            pending['error'] = str(exc)
+        finally:
+            pending['done'] = True
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _normalize_command(cmd: str) -> str:
     cmd = cmd.strip()
     if not cmd or cmd.startswith(('@', '/', '#')):
@@ -1866,7 +2237,7 @@ def _autocomplete(command: str, data: dict) -> tuple[str, str]:
     head, rest = command.split(' ', 1)
     parts = rest.split(' ')
     if head in ('/send', '/compose') and len(parts) == 1 and parts[0]:
-        ids = _agent_ids(data) + ['broadcast', 'stanley', 'openclaw', 'main']
+        ids = _agent_ids(data) + ['broadcast', 'openclaw', 'main']
         matches = [a for a in ids if a.startswith(parts[0])]
         if len(matches) == 1:
             return f'{head} {matches[0]} ', ''
@@ -1992,7 +2363,7 @@ def _init_colors() -> None:
 def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[str, dict | None, str]:
     """Returns (label, command_result_for_view, hint)."""
     if not rest:
-        return ('rooms', None, 'usage: /room <create|delete|enter|leave|add|remove|list> …')
+        return ('rooms', None, 'usage: /room <create|delete|enter|leave|add|remove|members|kick|list> …')
     parts = rest.split()
     sub = parts[0]
     args = parts[1:]
@@ -2061,16 +2432,30 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
                     {'message': {}, 'deliveries': [],
                      'dead_letters': [{'adapter_id': adapter, 'reason': str(exc)}]},
                     '')
-    if sub == 'remove':
+    if sub == 'members':
+        if not args:
+            return ('rooms', None, 'usage: /room members <name>')
+        name = args[0].lstrip('#').lower()
+        try:
+            room = _get_json(f'{base}/v1/rooms/{name}')
+            members = [member.get('adapter_id') for member in room.get('members', [])]
+            return ('room members', None, f"#{name}: {', '.join(members) if members else '(none)'}")
+        except Exception as exc:  # noqa: BLE001
+            return ('members error',
+                    {'message': {}, 'deliveries': [],
+                     'dead_letters': [{'adapter_id': f'room:{name}', 'reason': str(exc)}]},
+                    '')
+    if sub in {'remove', 'kick'}:
         if len(args) < 2:
-            return ('rooms', None, 'usage: /room remove <name> <adapter_id>')
+            return ('rooms', None, f'usage: /room {sub} <name> <adapter_id>')
         name = args[0].lstrip('#').lower()
         adapter = _resolve_target(args[1].lstrip('@'))
         try:
             _delete(f'{base}/v1/rooms/{name}/members/{adapter}')
-            return ('rooms', None, f'removed {adapter} from #{name}')
+            verb = 'kicked' if sub == 'kick' else 'removed'
+            return ('rooms', None, f'{verb} {adapter} from #{name}')
         except Exception as exc:  # noqa: BLE001
-            return ('remove error',
+            return (f'{sub} error',
                     {'message': {}, 'deliveries': [],
                      'dead_letters': [{'adapter_id': adapter, 'reason': str(exc)}]},
                     '')
@@ -2094,6 +2479,7 @@ def _main(stdscr):
         'last_chat_total_lines': 0,
         'last_chat_viewport_h': 1,
         'last_team_run_id': None,
+        'last_goal_run_id': None,
     }
     _init_colors()
     curses.curs_set(1)
@@ -2141,22 +2527,27 @@ def _main(stdscr):
             if state.get('pending') and state['pending'].get('done'):
                 p = state.pop('pending')
                 if p.get('error'):
-                    if p.get('team_task') and p.get('room_name'):
+                    if (p.get('team_task') or p.get('goal_run')) and p.get('room_name'):
                         room_name = p['room_name']
+                        run_kind = 'Goal' if p.get('goal_run') else 'Team'
+                        endpoint = 'goal-runs' if p.get('goal_run') else 'team-runs'
+                        inspect_cmd = '/goal-run' if p.get('goal_run') else '/team-run'
                         try:
                             transcript = _handle_room_transcript(base, room_name)
-                            runs = _get_json(f'{base}/v1/team-runs?room={room_name}&limit=1').get('team_runs', [])
+                            key = 'goal_runs' if p.get('goal_run') else 'team_runs'
+                            runs = _get_json(f'{base}/v1/{endpoint}?room={room_name}&limit=1').get(key, [])
+                            id_key = 'goal_run_id' if p.get('goal_run') else 'team_run_id'
                             summary = {
-                                'message_id': f"team-timeout:{time.time()}",
+                                'message_id': f"{endpoint}-timeout:{time.time()}",
                                 'conversation_id': '',
-                                'source': 'synkraken-team',
+                                'source': 'synkraken-goal' if p.get('goal_run') else 'synkraken-team',
                                 'target': f"room:{room_name}",
                                 'timestamp': datetime.now(timezone.utc).isoformat(),
                                 'body': (
-                                    "Team run request timed out in the TUI.\n"
+                                    f"{run_kind} run request timed out in the TUI.\n"
                                     f"Room transcript is still visible for #{room_name}.\n"
-                                    f"Latest run: {runs[0].get('team_run_id') if runs else '(pending)'}\n"
-                                    f"Inspect: /team-run {runs[0].get('team_run_id') if runs else '<id>'}\n"
+                                    f"Latest run: {runs[0].get(id_key) if runs else '(pending)'}\n"
+                                    f"Inspect: {inspect_cmd} {runs[0].get(id_key) if runs else '<id>'}\n"
                                     f"Client error: {p['error']}"
                                 ),
                             }
@@ -2181,7 +2572,13 @@ def _main(stdscr):
                         run_id = run.get('team_run_id') or result.get('team_run_id')
                         if run_id:
                             state['last_team_run_id'] = run_id
-                    if (p.get('discussion') or p.get('team_task')) and p.get('room_name'):
+                    if p.get('goal_run'):
+                        result = p.get('result') or {}
+                        run = result.get('goal_run') or {}
+                        run_id = run.get('goal_run_id') or result.get('goal_run_id')
+                        if run_id:
+                            state['last_goal_run_id'] = run_id
+                    if (p.get('discussion') or p.get('team_task') or p.get('goal_run')) and p.get('room_name'):
                         room_name = p['room_name']
                         state['command_result'] = (
                             f'#{room_name}',
@@ -2221,6 +2618,9 @@ def _main(stdscr):
                 if p.get('team_task') and state.get('last_team_run_id'):
                     run_id = state['last_team_run_id']
                     hint = f"team done  ·  view/review: /team-run {run_id}  ·  export: /save-transcript"
+                if p.get('goal_run') and state.get('last_goal_run_id'):
+                    run_id = state['last_goal_run_id']
+                    hint = f"goal done  ·  inspect: /goal-run {run_id}  ·  export: /save-transcript"
                 last_refresh = 0  # immediate refetch of the dashboard data
 
             events = list(stream.events)
@@ -2358,6 +2758,13 @@ def _main(stdscr):
                 team_output = _team_governance_command_lines(cmd, base, state)
                 if team_output is not None:
                     state['local_output'] = team_output
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                goal_output = _goal_command_lines(cmd, base, state)
+                if goal_output is not None:
+                    state['local_output'] = goal_output
                     state['view'] = 'local-output'
                     hint = ''
                     continue
@@ -2565,6 +2972,16 @@ def _main(stdscr):
                         _start_async_team_task(state, base, params)
                     except Exception as exc:  # noqa: BLE001
                         state['local_output'] = ('team', [str(exc)])
+                        state['view'] = 'local-output'
+                        hint = ''
+                    continue
+
+                if cmd == '/goal' or cmd.startswith('/goal '):
+                    try:
+                        params = _parse_goal_args(cmd[len('/goal'):].strip(), state.get('current_room'))
+                        _start_async_goal_run(state, base, params)
+                    except Exception as exc:  # noqa: BLE001
+                        state['local_output'] = ('goal', [str(exc)])
                         state['view'] = 'local-output'
                         hint = ''
                     continue

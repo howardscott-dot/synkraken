@@ -7,6 +7,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Documentation Lock Batch v0.1: category and architecture lock docs for the
+  open-source control plane positioning, control-plane doctrine, cost/runtime
+  ownership, workforce model, identity/role boundaries, and OSS → Packs →
+  Vertical products architecture.
 - Friendly daemon lifecycle commands: `synkraken start|stop|restart|status`
   with optional `daemon` target, user-service detection, install guidance, and
   combined service/health reporting in `synkraken status`.
@@ -23,7 +27,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   details in the Web Command Deck.
 - Agent Model Doctrine v0.1 documenting durable agent identity, lifecycle,
   authority, roles, capabilities, and the sequence toward presence, memory,
-  decisions, handoffs, workspace packs, and Studio:Blueprint agent teams.
+  decisions, handoffs, workspace packs, and external product integrations.
 - Agent Presence v0.1: durable agent status, last-seen metadata, current
   room/task fields, append-only agent events, richer agent APIs, TUI
   `/presence` and `/agent` inspection, Web Command Deck status cards, and smoke
@@ -52,6 +56,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `timeout`, `failed_phase`, and `run_blocked` events, and expose the failure
   summary through `/team-run` and the Web Command Deck instead of relying on
   dead letters as the primary UX.
+- Shared Memory Skill v0.1: peer-reviewed workspace knowledge in
+  `shared_memory`, shared audit events in `memory_events`, daemon memory APIs,
+  TUI `/memory ...` commands, token-budgeted prompt injection for room
+  messages, discussions, and team tasks, and smoke coverage. Shared Memory is
+  inspectable and bounded; it is not hidden memory, vector search, RAG,
+  personal profiling, cloud sync, or autonomous background memory mining.
+- Goal Mode v0.1: bounded room goal execution with durable `goal_runs` and
+  `goal_events`, TUI `/goal`, `/goals`, `/goal-run`, and `/cancel-goal`
+  commands, Web Command Deck Goal Runs controls, goal run APIs, linked tasks,
+  criteria definition, owner/reviewer assignment, Token Police and Guardrail
+  Agent control roles, compact revision rounds, threshold scoring, and smoke
+  coverage. Goal Mode is not infinite autonomy, hidden work, background
+  scheduling, permissionless execution, unbounded token use, or hardcoded
+  project context.
+- Configuration Doctrine: shipped defaults, docs, tests, prompts, and examples
+  stay generic; installation-specific identity and project context belong in
+  local config, workspace config, room memory, shared memory, skills, runtime
+  context, or user prompts. Added `scripts/context_audit.py`.
 - TUI transcript navigation: chat and room history now support Up/Down,
   PgUp/PgDn, Home/End scrollback, history-position indicators, preserved
   review position while new messages arrive, `/tail`, transcript search with
@@ -149,5 +171,5 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - All paths default to standard locations under `$HOME` and `$PATH`; nothing
   is hardcoded to a specific user.
 
-[Unreleased]: https://github.com/howardscott-dot/synkraken/compare/v0.1.0...HEAD
-[0.1.0]:      https://github.com/howardscott-dot/synkraken/releases/tag/v0.1.0
+[Unreleased]: https://github.com/example/synkraken/compare/v0.1.0...HEAD
+[0.1.0]:      https://github.com/example/synkraken/releases/tag/v0.1.0

@@ -27,9 +27,13 @@ class BaseAdapter(ABC):
         return self.config.get("type", "unknown")
 
     def health(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "adapter_id": self.adapter_id,
             "type": self.runtime_kind(),
             "runtime_name": self.runtime_name(),
             "enabled": bool(self.config.get("enabled", True)),
         }
+        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust"):
+            if key in self.config:
+                data[key] = self.config[key]
+        return data

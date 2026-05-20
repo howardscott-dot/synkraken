@@ -13,7 +13,7 @@ import time
 from .adapters import build_adapter
 from .models import AdapterReply, FabricMessage, new_id, utc_now_iso
 from .router import resolve_targets
-from .storage import Storage
+from .storage import SHARED_MEMORY_TYPES, Storage
 
 
 class EventBus:
@@ -66,10 +66,39 @@ class AgentFabric:
                     "enabled": False,
                 })
         self.storage.sync_agents(agent_records)
+        self._sync_runtime_registry()
         routing = config.get("routing", {})
         self.max_hops = int(routing.get("max_hops", 4))
         self.retry_limit = int(routing.get("retry_limit", 1))
         self.retry_backoff_seconds = int(routing.get("retry_backoff_seconds", 1))
+        memory = config.get("memory", {})
+        self.memory_max_items_injected = int(memory.get("max_items_injected", 5))
+        self.memory_max_chars_injected = int(memory.get("max_chars_injected", 1200))
+        self.memory_max_memory_chars = int(memory.get("max_memory_chars", 500))
+        self.memory_min_confidence = int(memory.get("min_confidence", 70))
+        goal = config.get("goal", {})
+        self.goal_default_max_rounds = int(goal.get("max_rounds", 3))
+        self.goal_default_threshold = int(goal.get("threshold", 80))
+        self.goal_max_reviewers = int(goal.get("max_reviewers", 3))
+        self.goal_max_context_chars = int(goal.get("max_context_chars", 4000))
+        self.goal_max_revision_chars = int(goal.get("max_revision_chars", 1500))
+        self.goal_max_agents = int(goal.get("max_agents", 4))
+        instance = config.get("instance", {}) if isinstance(config.get("instance"), dict) else {}
+        self.instance_name = str(instance.get("instance_name") or config.get("instance_name") or "").strip() or None
+        self.organisation_name = (
+            str(
+                instance.get("organisation_name")
+                or instance.get("organization_name")
+                or config.get("organisation_name")
+                or config.get("organization_name")
+                or ""
+            ).strip()
+            or None
+        )
+        self.workspace = (
+            str(instance.get("default_workspace") or config.get("default_workspace") or config.get("workspace") or "").strip()
+            or None
+        )
         self.started_at = utc_now_iso()
 
     def health(self) -> dict[str, Any]:
@@ -77,11 +106,153 @@ class AgentFabric:
             "ok": True,
             "timestamp": utc_now_iso(),
             "started_at": self.started_at,
+            "instance_name": self.instance_name,
+            "organisation_name": self.organisation_name,
+            "default_workspace": self.workspace,
             "adapters": {adapter_id: adapter.health() for adapter_id, adapter in self.adapters.items()},
         }
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self.storage.list_agents()
+
+    def update_agent_profile(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        actor = str(payload.get("actor", "operator")).strip() or "operator"
+        fields = {
+            key: payload[key]
+            for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust")
+            if key in payload
+        }
+        updated = self.storage.update_agent_profile(agent_id, fields, actor=actor)
+        if updated is None:
+            raise ValueError(f"agent not found: {agent_id}")
+        self.event_bus.publish("agent.profile_updated", {"agent_id": agent_id})
+        return updated
+
+    def _sync_runtime_registry(self) -> None:
+        for adapter_id, adapter_config in self.config.get("adapters", {}).items():
+            command = adapter_config.get("command") or []
+            capabilities = adapter_config.get("capabilities") or []
+            supported_modes = adapter_config.get("supported_modes") or [
+                "direct", "broadcast", "room", "team", "goal", "memory"
+            ]
+            self.storage.upsert_runtime({
+                "runtime_id": adapter_id,
+                "runtime_type": adapter_config.get("runtime_type") or adapter_config.get("type") or "unknown",
+                "version": adapter_config.get("version") or "",
+                "command": command,
+                "working_dir": adapter_config.get("working_dir") or adapter_config.get("cwd") or "",
+                "timeout": adapter_config.get("timeout_seconds") or self.config.get("routing", {}).get("default_timeout_seconds", 90),
+                "cost_profile": adapter_config.get("cost_profile") or adapter_config.get("cost_tier") or "medium",
+                "supported_modes": supported_modes,
+                "capabilities": capabilities,
+                "enabled": adapter_config.get("enabled", True),
+            })
+
+    def list_runtimes(self) -> list[dict[str, Any]]:
+        self._sync_runtime_registry()
+        return self.storage.list_runtimes()
+
+    def runtime_doctor(self) -> dict[str, Any]:
+        runtimes = self.list_runtimes()
+        results = []
+        for runtime in runtimes:
+            runtime_id = runtime["runtime_id"]
+            adapter = self.adapters.get(runtime_id)
+            health = adapter.health() if adapter else {"enabled": False, "ok": False}
+            command = runtime.get("command") or []
+            results.append({
+                "runtime_id": runtime_id,
+                "runtime_type": runtime.get("runtime_type"),
+                "enabled": runtime.get("enabled"),
+                "registered": runtime_id in self.adapters,
+                "command": command,
+                "ok": bool(adapter and health.get("enabled", True)),
+                "health": health,
+                "warnings": [] if command else ["no command recorded"],
+            })
+        return {"runtimes": results}
+
+    def add_room_member(self, room_name: str, adapter_id: str, actor: str = "operator") -> dict:
+        if adapter_id not in self.adapters:
+            raise ValueError(f"unknown agent: {adapter_id}")
+        if not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        self.storage.add_room_member(room_name, adapter_id, utc_now_iso())
+        self._save_visible_message(
+            "synkraken-room",
+            f"room:{room_name}",
+            f"Room member added: {adapter_id}",
+            conversation_id=f"room:{room_name}",
+            metadata={"room_event": True, "event": "member_added", "agent_id": adapter_id, "actor": actor},
+        )
+        self.event_bus.publish("room.member_added", {"room_name": room_name, "agent_id": adapter_id, "actor": actor})
+        room = self.storage.get_room(room_name)
+        assert room is not None
+        return room
+
+    def remove_room_member(self, room_name: str, adapter_id: str, actor: str = "operator") -> dict:
+        if not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        self.storage.remove_room_member(room_name, adapter_id)
+        self._save_visible_message(
+            "synkraken-room",
+            f"room:{room_name}",
+            f"Room member removed: {adapter_id}",
+            conversation_id=f"room:{room_name}",
+            metadata={"room_event": True, "event": "member_removed", "agent_id": adapter_id, "actor": actor},
+        )
+        self.event_bus.publish("room.member_removed", {"room_name": room_name, "agent_id": adapter_id, "actor": actor})
+        return self.storage.get_room(room_name) or {"name": room_name, "members": []}
+
+    def flight_summary(self) -> dict[str, Any]:
+        agents = self.list_agents()
+        goals = self.storage.list_goal_runs(limit=100)
+        active_goals = [goal for goal in goals if goal.get("status") in {"planning", "running", "reviewing"}]
+        blocked_goals = [goal for goal in goals if goal.get("status") in {"blocked", "failed", "cancelled"}]
+        dead_letters = self.storage.list_dead_letters(limit=10).get("dead_letters", [])
+        runtimes = self.list_runtimes()
+        premium = sum(1 for item in agents if item.get("cost_tier") == "premium")
+        cost_complexity = "high" if premium >= 2 or len(runtimes) >= 5 else "medium" if premium or len(runtimes) >= 3 else "low"
+        token_risk = "high" if len(active_goals) > 2 else "medium" if active_goals else "low"
+        pending_reviews = len([run for run in self.storage.list_team_runs(limit=100) if run.get("status") == "awaiting_approval"])
+        pending_reviews += self.storage.count_shared_memory("proposed")
+        return {
+            "agents_online": len([agent for agent in agents if agent.get("enabled") and agent.get("status") in {"online", "idle", "working"}]),
+            "agents_total": len(agents),
+            "active_goals": len(active_goals),
+            "blocked_goals": len(blocked_goals),
+            "token_risk": token_risk,
+            "failures": len([goal for goal in goals if goal.get("status") == "failed"]),
+            "dead_letters": self.storage.count_dead_letters(),
+            "recent_dead_letters": dead_letters,
+            "cost_complexity": cost_complexity,
+            "memory_count": self.storage.count_shared_memory(),
+            "pending_reviews": pending_reviews,
+        }
+
+    def init_workspace(self, name: str | None = None) -> dict[str, Any]:
+        workspace_name = (name or self.workspace or "default").strip() or "default"
+        pack = {
+            "rooms": self.storage.list_rooms(),
+            "agents": self.list_agents(),
+            "memory": self.storage.list_shared_memory(limit=1000),
+            "skills": ["synkraken-bridge"],
+            "goals": self.storage.list_goal_runs(limit=100),
+            "repos": [],
+            "governance": {"team_runs": self.storage.list_team_runs(limit=100)},
+            "runtime_refs": [runtime["runtime_id"] for runtime in self.list_runtimes()],
+        }
+        return {"workspace": self.storage.upsert_workspace_pack(workspace_name, pack)}
+
+    def load_workspace(self, name: str | None = None) -> dict[str, Any]:
+        workspace_name = (name or self.workspace or "default").strip() or "default"
+        pack = self.storage.get_workspace_pack(workspace_name)
+        if not pack:
+            raise ValueError(f"workspace not found: {workspace_name}")
+        return {"workspace": pack}
+
+    def export_workspace(self, name: str | None = None) -> dict[str, Any]:
+        return self.load_workspace(name)
 
     def _presence_room(self, reply_context: str | None) -> str | None:
         if reply_context and reply_context.startswith("room:"):
@@ -116,6 +287,47 @@ class AgentFabric:
         if not memory_context:
             return body
         return f"Room context:\n{memory_context}\n\nMessage:\n{body}"
+
+    def _shared_memory_context(self, room_name: str | None, *, mark_used: bool = True) -> tuple[str, list[dict[str, Any]]]:
+        memories = self.storage.select_shared_memory_for_injection(
+            room_name=room_name,
+            workspace=self.workspace,
+            max_items=self.memory_max_items_injected,
+            max_chars=self.memory_max_chars_injected,
+            min_confidence=self.memory_min_confidence,
+        )
+        if not memories:
+            return "", []
+        lines = ["[SynKraken approved memory]"]
+        used_chars = len(lines[0])
+        included: list[dict[str, Any]] = []
+        for memory in memories:
+            line = f"- {memory.get('memory_type')}: {str(memory.get('content') or '').strip()}"
+            if included and used_chars + 1 + len(line) > self.memory_max_chars_injected:
+                continue
+            if len(line) > self.memory_max_chars_injected:
+                continue
+            lines.append(line)
+            used_chars += 1 + len(line)
+            included.append(memory)
+        if mark_used and included:
+            self.storage.mark_shared_memory_used([memory["memory_id"] for memory in included])
+        return "\n".join(lines), included
+
+    def _prompt_memory_context(self, room_name: str | None, *, mark_used: bool = True) -> tuple[str, list[dict[str, Any]]]:
+        parts = []
+        room_context = self._room_memory_context(room_name)
+        if room_context:
+            parts.append(f"Room context:\n{room_context}")
+        shared_context, memories = self._shared_memory_context(room_name, mark_used=mark_used)
+        if shared_context:
+            parts.append(shared_context)
+        return "\n\n".join(parts), memories
+
+    def _with_memory_context(self, body: str, memory_context: str) -> str:
+        if not memory_context:
+            return body
+        return f"{memory_context}\n\nMessage:\n{body}"
 
     def _set_agent_working(self, adapter_id: str, message: FabricMessage, *,
                            reply_context: str | None, event_type: str = "message_received") -> None:
@@ -366,6 +578,75 @@ class AgentFabric:
             if str(member.get("adapter_id")) in self.adapters
         ]
 
+    def _agent_profile(self, agent_id: str) -> dict[str, Any]:
+        agent = self.storage.get_agent(agent_id) or {}
+        config = self.config.get("adapters", {}).get(agent_id, {})
+        preferred_roles = list(agent.get("preferred_roles") or config.get("preferred_roles") or [])
+        capabilities = list(agent.get("capabilities") or config.get("capabilities") or [])
+        return {
+            "cost_tier": str(agent.get("cost_tier") or config.get("cost_tier") or "medium").lower(),
+            "preferred_roles": [str(item).lower() for item in preferred_roles],
+            "capabilities": [str(item).lower() for item in capabilities],
+            "speed": int(agent.get("speed") or config.get("speed") or 5),
+            "trust": int(agent.get("trust") or config.get("trust") or 5),
+            "config_role": str(config.get("role", "")).lower(),
+        }
+
+    def _profile_text(self, agent_id: str) -> str:
+        profile = self._agent_profile(agent_id)
+        return " ".join([
+            profile["config_role"],
+            " ".join(profile["preferred_roles"]),
+            " ".join(profile["capabilities"]),
+            profile["cost_tier"],
+        ]).lower()
+
+    def _profile_score(self, agent_id: str, role: str, topic: str = "") -> int:
+        profile = self._agent_profile(agent_id)
+        roles = set(profile["preferred_roles"])
+        caps = set(profile["capabilities"])
+        cost_tier = profile["cost_tier"]
+        score = 0
+        if role in roles:
+            score += 40
+        if role == "owner":
+            if cost_tier == "premium":
+                score += 25
+            if "architecture" in caps:
+                score += 15
+            if any(term in str(topic).lower() for term in ("architecture", "design", "system", "plan")) and "architecture" in caps:
+                score += 20
+            if cost_tier in {"cheap", "local"}:
+                score -= 6
+        elif role == "reviewer":
+            if "reviewer" in roles:
+                score += 20
+            if {"review", "architecture", "quality", "risk"} & caps:
+                score += 12
+        elif role == "token_police":
+            if cost_tier in {"cheap", "local"}:
+                score += 30
+            if "summary" in roles:
+                score += 18
+            if {"summary", "summaries", "tokens", "cost", "ops"} & caps:
+                score += 15
+        elif role == "guardrail":
+            if "guardrail" in roles:
+                score += 30
+            if cost_tier == "premium":
+                score += 8
+            if {"architecture", "security", "risk", "governance"} & caps:
+                score += 18
+        elif role == "summary":
+            if cost_tier in {"cheap", "local"}:
+                score += 25
+            if "summary" in roles or {"summary", "summaries"} & caps:
+                score += 25
+        score += profile["trust"] * 2
+        if role in {"token_police", "summary"}:
+            score += profile["speed"]
+        return score
+
     def _team_prompt(
         self,
         phase: str,
@@ -380,7 +661,7 @@ class AgentFabric:
         return FabricMessage(
             source="synkraken-team",
             target=agent_id,
-            body=self._with_room_memory(body, memory_context),
+            body=self._with_memory_context(body, memory_context),
             conversation_id=conversation_id,
             message_id=progress_id,
             reply_to=progress_id,
@@ -615,9 +896,9 @@ class AgentFabric:
     def _team_role_score(self, agent_id: str, question: str) -> int:
         adapter_config = self.config.get("adapters", {}).get(agent_id, {})
         capabilities = " ".join(str(item) for item in (adapter_config.get("capabilities", []) or []))
-        haystack = f"{adapter_config.get('role', '')} {capabilities}".lower()
+        haystack = f"{adapter_config.get('role', '')} {capabilities} {self._profile_text(agent_id)}".lower()
         terms = {term for term in re.findall(r"[a-z0-9_]+", question.lower()) if len(term) > 3}
-        return sum(1 for term in terms if term in haystack)
+        return sum(1 for term in terms if term in haystack) + self._profile_score(agent_id, "owner", question)
 
     def _choose_team_owner(
         self,
@@ -644,14 +925,90 @@ class AgentFabric:
         )
         reviewers = [
             agent for agent, _count in sorted(
-                reviewer_votes.items(),
-                key=lambda item: (-item[1], order.get(item[0], 999)),
+                {agent: reviewer_votes[agent] for agent in agents if agent != owner}.items(),
+                key=lambda item: (-item[1], -self._profile_score(item[0], "reviewer", question), order.get(item[0], 999)),
             )
             if agent != owner
         ]
         if not reviewers:
             reviewers = [agent for agent in agents if agent != owner][:1]
         return owner, reviewers[: max(1, min(2, len(reviewers)))], dict(owner_votes), dict(reviewer_votes)
+
+    def _parse_team_memory_proposal(self, body: str) -> tuple[str, str] | None:
+        text = str(body or "").strip()
+        if not text or "NO_MEMORY" in text.upper():
+            return None
+        memory_type = "lesson"
+        type_match = re.search(r"^\s*type\s*[:=-]\s*([a-z_]+)", text, flags=re.IGNORECASE | re.MULTILINE)
+        if type_match and type_match.group(1).lower() in SHARED_MEMORY_TYPES:
+            memory_type = type_match.group(1).lower()
+        memory_match = re.search(r"^\s*memory\s*[:=-]\s*(.+)", text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        content = memory_match.group(1).strip() if memory_match else text
+        content = content.splitlines()[0].strip() if "\n" in content else content
+        if not content:
+            return None
+        return memory_type, content
+
+    def _collect_team_memory_proposals(
+        self,
+        *,
+        agents: list[str],
+        room_name: str,
+        question: str,
+        final_report: str,
+        conversation_id: str,
+        transcript_target: str,
+        memory_context: str,
+        task_id: str,
+        team_run_id: str,
+    ) -> list[dict[str, Any]]:
+        proposals: list[dict[str, Any]] = []
+        prompt = (
+            "Team Task Mode - Shared Memory Proposal\n\n"
+            f"Original task:\n{question}\n\n"
+            f"Final report:\n{final_report}\n\n"
+            "If this run produced a useful, durable, safe-to-reuse memory for future work, propose exactly one. "
+            "Otherwise reply exactly NO_MEMORY.\n\n"
+            "Use this format when proposing:\nType: fact|decision|preference|rule|lesson|technical_note|project_context\nMemory: <one concise memory under the configured limit>\n"
+            "Do not include transient details from the current message."
+        )
+        for agent in agents:
+            result = self._send_team_prompt(
+                agent,
+                "memory",
+                prompt,
+                conversation_id=conversation_id,
+                transcript_target=transcript_target,
+                room_name=room_name,
+                memory_context=memory_context,
+                task_id=task_id,
+            )
+            parsed = self._parse_team_memory_proposal(result.get("body") or "")
+            if not result.get("ok") or not parsed:
+                proposals.append({"agent_id": agent, "status": "none", "delivery": result.get("delivery")})
+                continue
+            memory_type, content = parsed
+            proposed = self.propose_memory({
+                "created_by": agent,
+                "room_name": room_name,
+                "workspace": self.workspace,
+                "memory_type": memory_type,
+                "content": content,
+                "source_team_run_id": team_run_id,
+                "source_task_id": task_id,
+                "auto_review": True,
+            })
+            proposals.append({"agent_id": agent, "status": proposed.get("status"), "memory": proposed.get("memory")})
+        self.storage.record_team_event(
+            team_run_id,
+            "memory_proposals_collected",
+            actor="synkraken-team",
+            detail=json.dumps([
+                {"agent_id": item.get("agent_id"), "status": item.get("status"), "memory_id": (item.get("memory") or {}).get("memory_id")}
+                for item in proposals
+            ], ensure_ascii=False),
+        )
+        return proposals
 
     def team_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = str(payload.get("source", "operator")).strip() or "operator"
@@ -675,7 +1032,7 @@ class AgentFabric:
             raise ValueError(f"room has no available agents: {room_name}")
 
         transcript_target = f"room:{room_name}"
-        memory_context = self._room_memory_context(room_name)
+        memory_context, memory_items = self._prompt_memory_context(room_name)
         prompt_message = FabricMessage(
             source=source,
             target=transcript_target,
@@ -740,6 +1097,8 @@ class AgentFabric:
             "deliveries": [],
             "dead_letters": [],
             "memory_context": memory_context,
+            "memory_items": memory_items,
+            "memory_proposals": [],
             "conversation_id": conversation_id,
         }
 
@@ -1049,6 +1408,19 @@ class AgentFabric:
                 self.storage.record_task_event(task_id, "synkraken-team", "team_completed", owner, "final_failed", completed_at)
                 self.event_bus.publish("task.updated", {"task_id": task_id})
 
+        if result.get("final_report"):
+            result["memory_proposals"] = self._collect_team_memory_proposals(
+                agents=available,
+                room_name=room_name,
+                question=question,
+                final_report=result["final_report"],
+                conversation_id=conversation_id,
+                transcript_target=transcript_target,
+                memory_context=memory_context,
+                task_id=task_id,
+                team_run_id=team_run_id,
+            )
+
         self.event_bus.publish("team.completed", {
             "team_run_id": team_run_id,
             "task_id": task_id,
@@ -1118,6 +1490,777 @@ class AgentFabric:
         updated = self.storage.get_team_run(team_run_id)
         return {"team_run": updated, "message": message.to_dict(), "events": self.storage.list_team_events(team_run_id) or []}
 
+    def _memory_review_prompt(self, memory: dict[str, Any]) -> str:
+        return (
+            "Shared Memory peer review v0.1\n\n"
+            "Review the proposed memory below. Answer these questions:\n"
+            "- Is this useful?\n"
+            "- Is this durable beyond the current message?\n"
+            "- Is it safe to reuse?\n"
+            "- Is it too vague?\n"
+            "- Should it be shortened?\n"
+            "- What memory_type is best?\n"
+            "- Confidence 0-100\n\n"
+            "Return a concise result with:\n"
+            "Decision: approve or reject\n"
+            "Confidence: <0-100>\n"
+            "Memory type: fact|decision|preference|rule|lesson|technical_note|project_context\n"
+            "Reason: <short reason>\n\n"
+            f"Proposed memory type: {memory.get('memory_type')}\n"
+            f"Content:\n{memory.get('content')}"
+        )
+
+    def _parse_memory_review(self, body: str, default_type: str) -> dict[str, Any]:
+        text = str(body or "")
+        lowered = text.lower()
+        reject = "reject" in lowered and "approve" not in lowered
+        approve = "approve" in lowered and not reject
+        if not approve and not reject:
+            approve = any(word in lowered for word in ("useful", "safe to reuse", "durable"))
+        match = re.search(r"(?:confidence|score)\s*[:=-]?\s*(\d{1,3})", lowered)
+        confidence = int(match.group(1)) if match else 0
+        confidence = max(0, min(100, confidence))
+        type_match = re.search(r"(fact|decision|preference|rule|lesson|technical_note|project_context)", lowered)
+        memory_type = type_match.group(1) if type_match else default_type
+        reason_match = re.search(r"reason\s*[:=-]\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+        reason = reason_match.group(1).strip() if reason_match else text.strip()
+        return {
+            "decision": "approve" if approve else "reject",
+            "confidence": confidence,
+            "memory_type": memory_type,
+            "reason": reason[:1000],
+        }
+
+    def _memory_visible(self, room_name: str | None, body: str, *, memory_id: str,
+                        actor: str, event: str) -> FabricMessage | None:
+        if not room_name or not self.storage.room_exists(room_name):
+            return None
+        return self._save_visible_message(
+            actor,
+            f"room:{room_name}",
+            body,
+            conversation_id=memory_id,
+            metadata={"shared_memory": True, "memory_id": memory_id, "event": event},
+        )
+
+    def _memory_reviewer(self, created_by: str | None, room_name: str | None) -> str | None:
+        candidates = self._room_agents(room_name) if room_name else list(self.adapters.keys())
+        if not candidates:
+            candidates = list(self.adapters.keys())
+        for agent_id in candidates:
+            if agent_id != created_by and agent_id in self.adapters:
+                return agent_id
+        return None
+
+    def memory_budget(self, *, room_name: str | None = None) -> dict[str, Any]:
+        memories = self.storage.select_shared_memory_for_injection(
+            room_name=room_name,
+            workspace=self.workspace,
+            max_items=self.memory_max_items_injected,
+            max_chars=self.memory_max_chars_injected,
+            min_confidence=self.memory_min_confidence,
+        )
+        text = "\n".join(f"- {item['memory_type']}: {item['content']}" for item in memories)
+        return {
+            "approved_memories": len(self.storage.list_shared_memory(status="peer_approved", limit=1000)),
+            "injected_max_items": self.memory_max_items_injected,
+            "injected_max_chars": self.memory_max_chars_injected,
+            "max_memory_chars": self.memory_max_memory_chars,
+            "min_confidence": self.memory_min_confidence,
+            "estimated_chars": len(text),
+            "estimated_tokens": max(1, len(text) // 4) if text else 0,
+            "selected": memories,
+        }
+
+    def propose_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        content = " ".join(str(payload.get("content", "")).split())
+        if not content:
+            raise ValueError("content required")
+        memory_type = str(payload.get("memory_type", "fact")).strip() or "fact"
+        if memory_type not in SHARED_MEMORY_TYPES:
+            raise ValueError(f"invalid memory_type: {memory_type}")
+        room_name = payload.get("room_name")
+        room_name = str(room_name).strip() if room_name is not None else None
+        room_name = room_name or None
+        if room_name and not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        workspace = str(payload.get("workspace") or self.workspace or "").strip() or None
+        actor = str(payload.get("created_by") or payload.get("actor") or "operator").strip() or "operator"
+        now = utc_now_iso()
+        memory_id = str(payload.get("memory_id") or "").strip() or new_id()
+        duplicate = self.storage.find_duplicate_memory(content, room_name=room_name, workspace=workspace)
+        too_long = len(content) > self.memory_max_memory_chars
+        initial_status = "rejected" if duplicate or too_long else "proposed"
+        confidence = int(payload.get("confidence", 0) or 0)
+        memory = self.storage.create_shared_memory(
+            memory_id=memory_id,
+            room_name=room_name,
+            workspace=workspace,
+            memory_type=memory_type,
+            content=content,
+            status=initial_status,
+            confidence=confidence,
+            created_by=actor,
+            created_at=now,
+            source_team_run_id=payload.get("source_team_run_id"),
+            source_task_id=payload.get("source_task_id"),
+            source_message_id=payload.get("source_message_id"),
+        )
+        self._memory_visible(
+            room_name,
+            f"Shared memory proposed: {memory_id}\nType: {memory_type}\nContent: {content}",
+            memory_id=memory_id,
+            actor=actor,
+            event="memory_proposed",
+        )
+        if duplicate or too_long:
+            reason = "duplicate memory" if duplicate else f"content too long ({len(content)} > {self.memory_max_memory_chars})"
+            memory = self.storage.update_shared_memory(
+                memory_id,
+                {
+                    "status": "rejected",
+                    "review_result": "reject",
+                    "review_reason": reason,
+                    "reviewed_by": "synkraken",
+                    "reviewed_at": now,
+                },
+                actor="synkraken",
+                event_type="peer_rejected",
+            ) or memory
+            self._memory_visible(
+                room_name,
+                f"Shared memory rejected: {memory_id}\nReason: {reason}",
+                memory_id=memory_id,
+                actor="synkraken",
+                event="peer_rejected",
+            )
+            return {"memory": memory, "review": None, "status": memory["status"], "duplicate": duplicate}
+        reviewer = self._memory_reviewer(actor, room_name)
+        if reviewer:
+            self.storage.record_shared_memory_event(
+                memory_id,
+                "peer_review_requested",
+                actor="synkraken",
+                details={"reviewer": reviewer},
+            )
+            self._memory_visible(
+                room_name,
+                f"Peer review requested for shared memory: {memory_id}\nReviewer: {reviewer}",
+                memory_id=memory_id,
+                actor="synkraken",
+                event="peer_review_requested",
+            )
+            if payload.get("auto_review", True):
+                return self.review_memory(memory_id, {"actor": reviewer, "reviewer": reviewer, "auto": True})
+        return {"memory": memory, "reviewer": reviewer, "status": memory["status"]}
+
+    def review_memory(self, memory_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        memory = self.storage.get_shared_memory(memory_id)
+        if not memory:
+            raise ValueError(f"memory not found: {memory_id}")
+        reviewer = str(payload.get("reviewer") or payload.get("actor") or "operator").strip() or "operator"
+        review_body = str(payload.get("review") or "").strip()
+        if not review_body and reviewer not in self.adapters:
+            reviewer = self._memory_reviewer(memory.get("created_by"), memory.get("room_name")) or reviewer
+        if reviewer == memory.get("created_by"):
+            raise ValueError("memory reviewer must differ from creator")
+        delivery = None
+        if not review_body and reviewer in self.adapters:
+            prompt = self._memory_review_prompt(memory)
+            delivery_message = FabricMessage(
+                source="synkraken-memory",
+                target=reviewer,
+                body=prompt,
+                conversation_id=memory_id,
+                metadata={"shared_memory": True, "memory_id": memory_id, "phase": "review"},
+            ).normalized()
+            self.storage.save_message(delivery_message)
+            self._set_agent_working(reviewer, delivery_message, reply_context=f"room:{memory['room_name']}" if memory.get("room_name") else None)
+            try:
+                reply = self.adapters[reviewer].send(delivery_message)
+                status = self._reply_status(reply)
+            except Exception as exc:  # noqa: BLE001
+                reply, status = self._adapter_exception_reply(reviewer, exc)
+            delivery = self._record_delivery(
+                delivery_message,
+                reply,
+                attempt=1,
+                original_target=reviewer,
+                delivery_target=reviewer,
+                reply_context=f"room:{memory['room_name']}" if memory.get("room_name") else None,
+                status=status,
+            )
+            self._set_agent_result(reviewer, delivery_message, reply, status, reply_context=f"room:{memory['room_name']}" if memory.get("room_name") else None)
+            if not reply.ok:
+                review_body = f"Decision: reject\nConfidence: 0\nReason: {reply.error or 'review failed'}"
+            else:
+                review_body = reply.body or ""
+        parsed = self._parse_memory_review(review_body, str(memory.get("memory_type") or "fact"))
+        confidence = int(payload.get("confidence", parsed["confidence"]) or parsed["confidence"])
+        decision = str(payload.get("decision", parsed["decision"])).lower()
+        memory_type = str(payload.get("memory_type", parsed["memory_type"]))
+        reason = str(payload.get("reason", parsed["reason"])).strip()
+        now = utc_now_iso()
+        duplicate = self.storage.find_duplicate_memory(
+            str(memory.get("content") or ""),
+            room_name=memory.get("room_name"),
+            workspace=memory.get("workspace"),
+        )
+        duplicate_detected = bool(duplicate and duplicate.get("memory_id") != memory_id)
+        too_long = len(str(memory.get("content") or "")) > self.memory_max_memory_chars
+        approve = decision == "approve" and confidence >= self.memory_min_confidence and not duplicate_detected and not too_long
+        status = "peer_approved" if approve else "rejected"
+        if duplicate_detected:
+            reason = reason or "duplicate memory"
+        if too_long:
+            reason = reason or f"content too long ({len(str(memory.get('content') or ''))} > {self.memory_max_memory_chars})"
+        if confidence < self.memory_min_confidence:
+            reason = reason or f"confidence below {self.memory_min_confidence}"
+        fields: dict[str, Any] = {
+            "status": status,
+            "confidence": confidence,
+            "memory_type": memory_type,
+            "reviewed_by": reviewer,
+            "review_result": "approve" if approve else "reject",
+            "review_reason": reason,
+            "reviewed_at": now,
+        }
+        if approve:
+            fields["approved_by"] = reviewer
+            fields["approved_at"] = now
+        updated = self.storage.update_shared_memory(
+            memory_id,
+            fields,
+            actor=reviewer,
+            event_type="peer_approved" if approve else "peer_rejected",
+        )
+        self._memory_visible(
+            memory.get("room_name"),
+            f"Shared memory peer {'approved' if approve else 'rejected'}: {memory_id}\nReviewer: {reviewer}\nConfidence: {confidence}\nReason: {reason or '(none)'}",
+            memory_id=memory_id,
+            actor=reviewer,
+            event="peer_approved" if approve else "peer_rejected",
+        )
+        self.event_bus.publish("memory.reviewed", {"memory_id": memory_id, "status": status, "reviewer": reviewer})
+        return {"memory": updated, "review": parsed, "delivery": delivery, "status": status}
+
+    def approve_memory(self, memory_id: str, actor: str = "operator") -> dict[str, Any]:
+        memory = self.storage.get_shared_memory(memory_id)
+        if not memory:
+            raise ValueError(f"memory not found: {memory_id}")
+        now = utc_now_iso()
+        updated = self.storage.update_shared_memory(
+            memory_id,
+            {"status": "peer_approved", "approved_by": actor, "approved_at": now},
+            actor=actor,
+            event_type="human_overridden",
+        )
+        self._memory_visible(memory.get("room_name"), f"Shared memory approved by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        return {"memory": updated}
+
+    def reject_memory(self, memory_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
+        memory = self.storage.get_shared_memory(memory_id)
+        if not memory:
+            raise ValueError(f"memory not found: {memory_id}")
+        updated = self.storage.update_shared_memory(
+            memory_id,
+            {"status": "rejected", "review_result": "reject", "review_reason": reason or "human override"},
+            actor=actor,
+            event_type="human_overridden",
+        )
+        self._memory_visible(memory.get("room_name"), f"Shared memory rejected by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        return {"memory": updated}
+
+    def archive_memory(self, memory_id: str, actor: str = "operator") -> dict[str, Any]:
+        memory = self.storage.get_shared_memory(memory_id)
+        if not memory:
+            raise ValueError(f"memory not found: {memory_id}")
+        updated = self.storage.update_shared_memory(
+            memory_id,
+            {"status": "archived"},
+            actor=actor,
+            event_type="memory_archived",
+        )
+        self._memory_visible(memory.get("room_name"), f"Shared memory archived: {memory_id}", memory_id=memory_id, actor=actor, event="memory_archived")
+        return {"memory": updated}
+
+    # ── Goal Mode ────────────────────────────────────────────────────────
+
+    def _compact_text(self, text: str, limit: int) -> str:
+        compact = "\n".join(line.strip() for line in str(text or "").splitlines() if line.strip())
+        compact = re.sub(r"\n{3,}", "\n\n", compact)
+        return compact[: max(0, limit - 3)] + "..." if len(compact) > limit else compact
+
+    def _goal_score(self, text: str) -> int:
+        match = re.search(r"(?:score|rating)\s*[:=-]?\s*(\d{1,3})", str(text or ""), flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b(\d{1,3})\s*/\s*100\b", str(text or ""))
+        if not match:
+            return 0
+        return max(0, min(100, int(match.group(1))))
+
+    def _choose_control_roles(self, agents: list[str], owner: str, reviewers: list[str], goal: str) -> tuple[str | None, str | None]:
+        others = [agent for agent in agents if agent != owner]
+        if not others:
+            return None, None
+
+        def role_score(agent_id: str, terms: set[str]) -> int:
+            adapter_config = self.config.get("adapters", {}).get(agent_id, {})
+            haystack = " ".join([
+                str(adapter_config.get("role", "")),
+                " ".join(str(item) for item in adapter_config.get("capabilities", []) or []),
+                self._profile_text(agent_id),
+            ]).lower()
+            return sum(1 for term in terms if term in haystack)
+
+        order = {agent: index for index, agent in enumerate(agents)}
+        token_terms = {"concise", "local", "low_cost", "low-cost", "reviewer", "coordinator"}
+        guard_terms = {"reviewer", "coordinator", "security", "architecture", "risk", "governance"}
+        token_police = max(
+            others,
+            key=lambda agent: (
+                self._profile_score(agent, "token_police", goal),
+                role_score(agent, token_terms),
+                -order[agent],
+            ),
+        )
+        guard_candidates = others if len(agents) < 3 else [agent for agent in others if agent != token_police] or others
+        guardrail = max(
+            guard_candidates,
+            key=lambda agent: (
+                self._profile_score(agent, "guardrail", goal),
+                role_score(agent, guard_terms),
+                agent in reviewers,
+                -order[agent],
+            ),
+        )
+        return token_police, guardrail
+
+    def _goal_visible(self, room_name: str, body: str, *, goal_run_id: str, actor: str = "synkraken-goal",
+                      conversation_id: str | None = None) -> FabricMessage:
+        return self._save_visible_message(
+            actor,
+            f"room:{room_name}",
+            body,
+            conversation_id=conversation_id or goal_run_id,
+            metadata={"goal_mode": True, "goal_run_id": goal_run_id},
+        )
+
+    def _send_goal_prompt(
+        self,
+        agent_id: str,
+        phase: str,
+        prompt: str,
+        *,
+        goal_run_id: str,
+        room_name: str,
+        conversation_id: str,
+        memory_context: str,
+        task_id: str | None,
+    ) -> dict[str, Any]:
+        transcript_target = f"room:{room_name}"
+        marker = self._goal_visible(
+            room_name,
+            f"Goal {phase}: {agent_id}",
+            goal_run_id=goal_run_id,
+            conversation_id=conversation_id,
+        )
+        runtime_name = self.adapters[agent_id].health().get("runtime_name", agent_id)
+        delivery_message = FabricMessage(
+            source="synkraken-goal",
+            target=agent_id,
+            body=self._with_memory_context(prompt, memory_context),
+            conversation_id=conversation_id,
+            message_id=marker.message_id,
+            reply_to=marker.message_id,
+            metadata={
+                "goal_mode": True,
+                "goal_run_id": goal_run_id,
+                "phase": phase,
+                "task_id": task_id,
+                "room_memory_injected": bool(memory_context),
+            },
+        ).normalized()
+        self._publish_delivery_queued(delivery_message, agent_id, runtime_name, agent_id, transcript_target)
+        self._publish_delivery_sent(delivery_message, agent_id, runtime_name, agent_id, transcript_target, 1)
+        self._publish_typing_started(delivery_message, agent_id, runtime_name, agent_id, transcript_target)
+        self._set_agent_working(agent_id, delivery_message, reply_context=transcript_target, event_type="message_received")
+        started = time.monotonic()
+        try:
+            reply = self.adapters[agent_id].send(delivery_message)
+            status = self._reply_status(reply)
+        except Exception as exc:  # noqa: BLE001
+            reply, status = self._adapter_exception_reply(agent_id, exc)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if reply.duration_ms is None:
+            reply.duration_ms = elapsed_ms
+        self._publish_typing_stopped(delivery_message, agent_id, runtime_name, agent_id, transcript_target, reply, status)
+        delivery = self._record_delivery(
+            delivery_message,
+            reply,
+            attempt=1,
+            original_target=agent_id,
+            delivery_target=agent_id,
+            reply_context=transcript_target,
+            status=status,
+        )
+        self._set_agent_result(agent_id, delivery_message, reply, status, reply_context=transcript_target)
+        if reply.ok:
+            reply_message = self._goal_visible(
+                room_name,
+                reply.body or "",
+                goal_run_id=goal_run_id,
+                actor=agent_id,
+                conversation_id=conversation_id,
+            )
+            delivery["reply_message_id"] = reply_message.message_id
+        else:
+            self._record_dead_letter(delivery_message, agent_id, reply, original_target=agent_id, reply_context=transcript_target, status=status)
+            failure = self._goal_visible(
+                room_name,
+                f"{agent_id} {status}: {reply.error or 'delivery_failed'}",
+                goal_run_id=goal_run_id,
+                conversation_id=conversation_id,
+            )
+            delivery["reply_message_id"] = failure.message_id
+        return {
+            "agent_id": agent_id,
+            "phase": phase,
+            "ok": reply.ok,
+            "status": status,
+            "body": reply.body or "",
+            "error": reply.error,
+            "elapsed_ms": elapsed_ms,
+            "delivery": delivery,
+        }
+
+    def goal_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = str(payload.get("source", "operator")).strip() or "operator"
+        room_name = str(payload.get("room_name", "")).strip()
+        goal = str(payload.get("goal") or payload.get("source_goal") or "").strip()
+        threshold = int(payload.get("threshold", self.goal_default_threshold))
+        max_rounds = int(payload.get("max_rounds", payload.get("rounds", self.goal_default_max_rounds)))
+        if not room_name:
+            raise ValueError("Goal mode needs a room. Create or select a room first.")
+        if not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        if not goal:
+            raise ValueError("goal required")
+        if threshold < 1 or threshold > 100:
+            raise ValueError("threshold must be between 1 and 100")
+        if max_rounds < 1 or max_rounds > self.goal_default_max_rounds:
+            raise ValueError(f"rounds must be between 1 and {self.goal_default_max_rounds}")
+        agents = self._room_agents(room_name)[: self.goal_max_agents]
+        if not agents:
+            raise ValueError(f"room has no available agents: {room_name}")
+
+        now = utc_now_iso()
+        goal_run_id = new_id()
+        conversation_id = goal_run_id
+        memory_context, memory_items = self._prompt_memory_context(room_name)
+        prompt_message = self._goal_visible(
+            room_name,
+            f"Goal started: {goal}",
+            goal_run_id=goal_run_id,
+            actor=source,
+            conversation_id=conversation_id,
+        )
+        task = self.storage.create_task(
+            task_id=new_id(),
+            title=self._task_title(goal),
+            description=f"Goal Mode v0.1\n\n{goal}",
+            status="open",
+            priority="normal",
+            room_name=room_name,
+            assigned_agent_id=None,
+            source_message_id=prompt_message.message_id,
+            actor=source,
+            created_at=now,
+        )
+        task_id = task["task_id"]
+        run = self.storage.create_goal_run(
+            goal_run_id=goal_run_id,
+            room_name=room_name,
+            source_goal=goal,
+            status="planning",
+            threshold=threshold,
+            max_rounds=max_rounds,
+            current_round=0,
+            participants=agents,
+            token_budget_chars=self.goal_max_context_chars,
+            linked_task_id=task_id,
+            started_at=now,
+            created_by=source,
+        )
+        self.storage.record_goal_event(goal_run_id, "goal_started", actor=source, details={"goal": goal, "participants": agents}, created_at=now)
+        self.storage.record_task_event(task_id, "synkraken-goal", "goal_started", None, goal, now)
+        self.event_bus.publish("goal.started", {"goal_run_id": goal_run_id, "room_name": room_name, "task_id": task_id})
+
+        criteria_prompt = (
+            "Goal Mode - Criteria\n\n"
+            f"Goal:\n{goal}\n\n"
+            "Define success criteria for this goal. Include what done means, what must be true, "
+            "what should not happen, and key risks. Keep it concise and generic to this room context."
+        )
+        criteria_results = [
+            self._send_goal_prompt(agent, "criteria", criteria_prompt, goal_run_id=goal_run_id, room_name=room_name,
+                                   conversation_id=conversation_id, memory_context=memory_context, task_id=task_id)
+            for agent in agents
+        ]
+        criteria_text = "\n".join(f"- {item['agent_id']}: {self._compact_text(item['body'], 350)}" for item in criteria_results if item["ok"])
+        if not criteria_text:
+            criteria_text = "- The goal must be completed safely, visibly, and within the configured round limit."
+        checklist = self._compact_text(criteria_text, 1200)
+        self.storage.update_goal_run(goal_run_id, {"success_criteria": checklist})
+        self.storage.record_goal_event(goal_run_id, "criteria_defined", actor="synkraken-goal", details=checklist)
+        self._goal_visible(room_name, f"Goal success criteria:\n{checklist}", goal_run_id=goal_run_id, conversation_id=conversation_id)
+
+        nomination_prompt = (
+            "Goal Mode - Assignment\n\n"
+            f"Goal:\n{goal}\n\nSuccess criteria:\n{checklist}\n\n"
+            f"Available agents: {', '.join(agents)}\n\n"
+            "Nominate exactly one owner and one or more reviewers. Use:\n"
+            "Owner: <agent_id>\nReviewer: <agent_id>\nSupport: <agent_id or none>"
+        )
+        nomination_results = [
+            self._send_goal_prompt(agent, "assignment", nomination_prompt, goal_run_id=goal_run_id, room_name=room_name,
+                                   conversation_id=conversation_id, memory_context=memory_context, task_id=task_id)
+            for agent in agents
+        ]
+        owner, reviewers, owner_votes, reviewer_votes = self._choose_team_owner(agents, nomination_results, goal)
+        reviewers = [agent for agent in reviewers if agent != owner][: self.goal_max_reviewers]
+        if not reviewers:
+            reviewers = [agent for agent in agents if agent != owner][:1]
+        token_police, guardrail_agent = self._choose_control_roles(agents, owner, reviewers, goal)
+        self.storage.update_goal_run(goal_run_id, {
+            "status": "running",
+            "owner_agent": owner,
+            "reviewers": reviewers,
+            "token_police_agent": token_police,
+            "guardrail_agent": guardrail_agent,
+        })
+        self.storage.update_task(task_id, {"status": "in_progress", "assigned_agent_id": owner}, "synkraken-goal", utc_now_iso())
+        self.storage.record_goal_event(goal_run_id, "owner_selected", actor="synkraken-goal", details={"owner": owner, "owner_votes": owner_votes, "reviewer_votes": reviewer_votes})
+        self.storage.record_goal_event(goal_run_id, "control_roles_selected", actor="synkraken-goal", details={"token_police": token_police, "guardrail_agent": guardrail_agent})
+        self._goal_visible(
+            room_name,
+            f"Goal owner selected: {owner}\nReviewers: {', '.join(reviewers) or '(none)'}\nToken Police: {token_police or '(none)'}\nGuardrail Agent: {guardrail_agent or '(none)'}",
+            goal_run_id=goal_run_id,
+            conversation_id=conversation_id,
+        )
+
+        latest_output = ""
+        reviewer_feedback = ""
+        token_notes = ""
+        guardrail_notes = ""
+        latest_score = 0
+        guardrail_status = "clear"
+        status = "running"
+        attempted_fallback = False
+        current_owner = owner
+        for round_number in range(1, max_rounds + 1):
+            self.storage.update_goal_run(goal_run_id, {"current_round": round_number, "status": "running"})
+            self.storage.record_goal_event(goal_run_id, "round_started", actor="synkraken-goal", details={"round": round_number})
+            self.storage.record_task_event(task_id, "synkraken-goal", "goal_round", str(round_number - 1), str(round_number))
+            revision_brief = self._compact_text(
+                "\n\n".join(part for part in [
+                    f"Previous owner output summary:\n{self._compact_text(latest_output, 600)}" if latest_output else "",
+                    f"Reviewer gaps:\n{self._compact_text(reviewer_feedback, 600)}" if reviewer_feedback else "",
+                    f"Previous score: {latest_score}" if latest_score else "",
+                    f"Token police notes:\n{self._compact_text(token_notes, 300)}" if token_notes else "",
+                    f"Guardrail notes:\n{self._compact_text(guardrail_notes, 300)}" if guardrail_notes else "",
+                ] if part),
+                self.goal_max_revision_chars,
+            )
+            estimated_context = len(goal) + len(checklist) + len(revision_brief) + len(memory_context)
+            self.storage.update_goal_run(goal_run_id, {"estimated_context_chars": estimated_context})
+            self._goal_visible(
+                room_name,
+                f"Goal context budget:\nround {round_number}/{max_rounds}\nestimated context chars: {estimated_context}\nlimit: {self.goal_max_context_chars}",
+                goal_run_id=goal_run_id,
+                conversation_id=conversation_id,
+            )
+            owner_prompt = (
+                "Goal Mode - Execute Round\n\n"
+                f"Goal:\n{goal}\n\nSuccess criteria:\n{checklist}\n\n"
+                f"Round: {round_number}/{max_rounds}\n\n"
+                f"Revision brief:\n{revision_brief or '(first round)'}\n\n"
+                "Produce the best current work toward the goal. Do not message other agents. "
+                "Keep output concise enough for review."
+            )
+            owner_result = self._send_goal_prompt(current_owner, f"round {round_number} execute", owner_prompt,
+                                                  goal_run_id=goal_run_id, room_name=room_name,
+                                                  conversation_id=conversation_id, memory_context=memory_context,
+                                                  task_id=task_id)
+            if not owner_result["ok"] and not attempted_fallback:
+                fallback = next((agent for agent in agents if agent != current_owner), None)
+                attempted_fallback = True
+                if fallback:
+                    self.storage.record_goal_event(goal_run_id, "revision_requested", actor="synkraken-goal", details=f"owner fallback {current_owner} -> {fallback}")
+                    current_owner = fallback
+                    self.storage.update_goal_run(goal_run_id, {"owner_agent": current_owner})
+                    self.storage.update_task(task_id, {"assigned_agent_id": current_owner}, "synkraken-goal", utc_now_iso())
+                    owner_result = self._send_goal_prompt(current_owner, f"round {round_number} execute", owner_prompt,
+                                                          goal_run_id=goal_run_id, room_name=room_name,
+                                                          conversation_id=conversation_id, memory_context=memory_context,
+                                                          task_id=task_id)
+            if not owner_result["ok"]:
+                status = "failed"
+                self.storage.record_goal_event(goal_run_id, "goal_failed", actor=current_owner, details=owner_result.get("error"))
+                break
+            latest_output = owner_result["body"]
+            self.storage.record_goal_event(goal_run_id, "owner_work_completed", actor=current_owner, details={"round": round_number, "chars": len(latest_output)})
+
+            if token_police:
+                token_prompt = (
+                    "Goal Mode - Token Review\n\n"
+                    f"Goal:\n{goal}\nRound: {round_number}/{max_rounds}\n"
+                    f"Estimated context chars: {estimated_context}\nLimit: {self.goal_max_context_chars}\n\n"
+                    f"Owner output summary:\n{self._compact_text(latest_output, 900)}\n\n"
+                    "Review context size, repeated prompt bloat, summary compaction, and whether another round is worth the cost. "
+                    "Return concise notes and include WARNING if budget risk is high."
+                )
+                token_result = self._send_goal_prompt(token_police, f"round {round_number} token", token_prompt,
+                                                      goal_run_id=goal_run_id, room_name=room_name,
+                                                      conversation_id=conversation_id, memory_context="", task_id=task_id)
+                token_notes = token_result["body"] if token_result["ok"] else f"Token review failed: {token_result.get('error') or token_result.get('status')}"
+                self.storage.record_goal_event(goal_run_id, "token_budget_checked", actor=token_police, details=token_notes)
+                if estimated_context > self.goal_max_context_chars or "warning" in token_notes.lower():
+                    self.storage.record_goal_event(goal_run_id, "token_warning", actor=token_police, details=token_notes)
+
+            if guardrail_agent:
+                guard_prompt = (
+                    "Goal Mode - Guardrail Review\n\n"
+                    f"Goal:\n{goal}\n\nSuccess criteria:\n{checklist}\n\n"
+                    f"Owner output summary:\n{self._compact_text(latest_output, 900)}\n\n"
+                    "Check scope, security, architecture, project boundaries, goal drift, and overengineering. "
+                    "Return CLEAR or BLOCK with a concise reason."
+                )
+                guard_result = self._send_goal_prompt(guardrail_agent, f"round {round_number} guardrail", guard_prompt,
+                                                      goal_run_id=goal_run_id, room_name=room_name,
+                                                      conversation_id=conversation_id, memory_context="", task_id=task_id)
+                guardrail_notes = guard_result["body"] if guard_result["ok"] else f"Guardrail review failed: {guard_result.get('error') or guard_result.get('status')}"
+                guard_l = guardrail_notes.lower()
+                blocked = "block" in guard_l and "not block" not in guard_l and "clear" not in guard_l
+                guardrail_status = "blocked" if blocked else "clear"
+                self.storage.update_goal_run(goal_run_id, {"guardrail_status": guardrail_status})
+                self.storage.record_goal_event(goal_run_id, "guardrail_checked", actor=guardrail_agent, details=guardrail_notes)
+                if blocked:
+                    status = "blocked"
+                    self.storage.record_goal_event(goal_run_id, "guardrail_blocked", actor=guardrail_agent, details=guardrail_notes)
+                    self._goal_visible(room_name, f"Goal blocked by guardrail:\n{guardrail_notes}", goal_run_id=goal_run_id, conversation_id=conversation_id)
+                    break
+                if "warning" in guard_l or "risk" in guard_l:
+                    self.storage.record_goal_event(goal_run_id, "guardrail_warning", actor=guardrail_agent, details=guardrail_notes)
+
+            self.storage.update_goal_run(goal_run_id, {"status": "reviewing"})
+            self.storage.record_goal_event(goal_run_id, "review_started", actor="synkraken-goal", details={"round": round_number, "reviewers": reviewers})
+            review_results = []
+            for reviewer in reviewers:
+                review_prompt = (
+                    "Goal Mode - Quality Review\n\n"
+                    f"Goal:\n{goal}\n\nSuccess criteria:\n{checklist}\n\n"
+                    f"Owner output:\n{self._compact_text(latest_output, 1200)}\n\n"
+                    "Score the output against criteria. Include:\n"
+                    "Score: <0-100>\nPass: yes/no\nMissing items:\nRisks:\nSuggested revision:"
+                )
+                review = self._send_goal_prompt(reviewer, f"round {round_number} review", review_prompt,
+                                                goal_run_id=goal_run_id, room_name=room_name,
+                                                conversation_id=conversation_id, memory_context="", task_id=task_id)
+                if review["ok"]:
+                    review["score"] = self._goal_score(review["body"])
+                    review_results.append(review)
+            if review_results:
+                latest_score = int(sum(item["score"] for item in review_results) / len(review_results))
+                reviewer_feedback = self._compact_text("\n\n".join(f"{item['agent_id']} ({item['score']}): {item['body']}" for item in review_results), 1200)
+            else:
+                latest_score = 0
+                reviewer_feedback = "No reviewer completed successfully."
+            self.storage.update_goal_run(goal_run_id, {"latest_score": latest_score, "status": "running"})
+            self.storage.record_goal_event(goal_run_id, "review_completed", actor="synkraken-goal", details=reviewer_feedback)
+            self.storage.record_goal_event(goal_run_id, "score_recorded", actor="synkraken-goal", details={"round": round_number, "score": latest_score})
+            self.storage.record_task_event(task_id, "synkraken-goal", "goal_score", None, str(latest_score))
+            self._goal_visible(room_name, f"Goal review score: {latest_score}/{threshold}\n{self._compact_text(reviewer_feedback, 900)}", goal_run_id=goal_run_id, conversation_id=conversation_id)
+            if latest_score >= threshold and guardrail_status != "blocked":
+                status = "achieved"
+                self.storage.record_goal_event(goal_run_id, "threshold_met", actor="synkraken-goal", details={"score": latest_score, "threshold": threshold})
+                break
+            if round_number < max_rounds:
+                self.storage.record_goal_event(goal_run_id, "revision_requested", actor="synkraken-goal", details={"round": round_number, "score": latest_score})
+            else:
+                status = "partially_achieved"
+                self.storage.record_goal_event(goal_run_id, "max_rounds_reached", actor="synkraken-goal", details={"score": latest_score, "threshold": threshold})
+
+        completed_at = utc_now_iso()
+        if status == "running":
+            status = "partially_achieved"
+        if status == "failed":
+            task_status = "blocked"
+            event_type = "goal_failed"
+            self.storage.record_goal_event(goal_run_id, "goal_failed", actor="synkraken-goal", details="goal ended failed")
+        elif status == "blocked":
+            task_status = "blocked"
+            event_type = "goal_blocked"
+            self.storage.record_goal_event(goal_run_id, "goal_blocked", actor="synkraken-goal", details=guardrail_notes or "goal blocked")
+        elif status == "achieved":
+            task_status = "done"
+            event_type = "goal_completed"
+        else:
+            task_status = "done"
+            event_type = "goal_completed"
+        final_report = (
+            "Goal Mode final report\n"
+            f"Goal: {goal}\n"
+            f"Status: {status}\n"
+            f"Score: {latest_score}/{threshold}\n"
+            f"Rounds: {self.storage.get_goal_run(goal_run_id)['current_round']}/{max_rounds}\n"
+            f"Owner: {current_owner}\n"
+            f"Reviewers: {', '.join(reviewers) or '(none)'}\n"
+            f"Token Police: {token_police or '(none)'}\n"
+            f"Guardrail Agent: {guardrail_agent or '(none)'}\n"
+            f"Estimated context chars: {self.storage.get_goal_run(goal_run_id)['estimated_context_chars']}/{self.goal_max_context_chars}\n"
+            f"Guardrail status: {guardrail_status}\n\n"
+            f"Token notes:\n{self._compact_text(token_notes, 700) or '(none)'}\n\n"
+            f"Guardrail notes:\n{self._compact_text(guardrail_notes, 700) or '(none)'}\n\n"
+            f"Remaining gaps:\n{self._compact_text(reviewer_feedback, 1000) or '(none)'}"
+        )
+        self.storage.update_goal_run(goal_run_id, {
+            "status": status,
+            "latest_score": latest_score,
+            "final_report": final_report,
+            "completed_at": completed_at,
+            "guardrail_status": guardrail_status,
+        })
+        self.storage.update_task(task_id, {"status": task_status}, "synkraken-goal", completed_at)
+        self.storage.record_task_event(task_id, "synkraken-goal", event_type, None, status, completed_at)
+        self._goal_visible(room_name, final_report, goal_run_id=goal_run_id, conversation_id=conversation_id)
+        self.event_bus.publish("goal.completed", {"goal_run_id": goal_run_id, "room_name": room_name, "status": status, "score": latest_score})
+        run = self.storage.get_goal_run(goal_run_id)
+        assert run is not None
+        return {
+            "goal_run": run,
+            "events": self.storage.list_goal_events(goal_run_id) or [],
+            "messages": self.storage.get_room_messages(room_name, limit=200),
+            "memory_context": memory_context,
+            "memory_items": memory_items,
+            "task": self.storage.get_task(task_id),
+        }
+
+    def cancel_goal_run(self, goal_run_id: str, actor: str = "operator") -> dict[str, Any]:
+        run = self.storage.get_goal_run(goal_run_id)
+        if not run:
+            raise ValueError(f"goal run not found: {goal_run_id}")
+        if run["status"] in {"achieved", "partially_achieved", "blocked", "failed", "cancelled"}:
+            raise ValueError(f"goal run is already terminal: {goal_run_id}")
+        now = utc_now_iso()
+        updated = self.storage.update_goal_run(goal_run_id, {"status": "cancelled", "completed_at": now})
+        self.storage.record_goal_event(goal_run_id, "goal_cancelled", actor=actor, details="cancelled by request", created_at=now)
+        if run.get("linked_task_id"):
+            self.storage.update_task(run["linked_task_id"], {"status": "blocked"}, actor, now)
+            self.storage.record_task_event(run["linked_task_id"], actor, "goal_cancelled", None, "cancelled", now)
+        self._goal_visible(run["room_name"], f"Goal cancelled: {goal_run_id}", goal_run_id=goal_run_id, actor=actor, conversation_id=goal_run_id)
+        return {"goal_run": updated, "events": self.storage.list_goal_events(goal_run_id) or []}
+
     def discuss(self, payload: dict[str, Any]) -> dict[str, Any]:
         source = str(payload.get('source', 'operator')).strip() or 'operator'
         agents = [str(agent).strip() for agent in payload.get('agents', []) if str(agent).strip()]
@@ -1142,7 +2285,9 @@ class AgentFabric:
                 raise ValueError(f'room not found: {room_name}')
             transcript_target = f'room:{room_name}'
             reply_context = transcript_target
-            memory_context = self._room_memory_context(room_name)
+            memory_context, memory_items = self._prompt_memory_context(room_name)
+        else:
+            memory_items = []
 
         topic_message = FabricMessage(
             source=source,
@@ -1220,7 +2365,7 @@ class AgentFabric:
             delivery_message = FabricMessage(
                 source='synkraken-discussion',
                 target=agent_id,
-                body=self._with_room_memory(prompt, memory_context),
+                body=self._with_memory_context(prompt, memory_context),
                 conversation_id=conversation_id,
                 message_id=progress.message_id,
                 reply_to=progress.message_id,
@@ -1307,6 +2452,7 @@ class AgentFabric:
             )
         result['messages'] = self.storage.get_conversation(conversation_id)['messages']
         result['memory_context'] = memory_context
+        result['memory_items'] = memory_items
         return result
 
     def dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1365,7 +2511,7 @@ class AgentFabric:
         )
         reply_context = room_context or (original_target if original_target.startswith("room:") else None)
         memory_room = self._presence_room(reply_context)
-        memory_context = self._room_memory_context(memory_room)
+        memory_context, memory_items = self._prompt_memory_context(memory_room)
         transcript_target = reply_context or ("broadcast" if original_target == "broadcast" else None)
         deliveries: list[dict[str, Any]] = []
         dead_letters: list[dict[str, Any]] = []
@@ -1379,7 +2525,7 @@ class AgentFabric:
             runtime_name = adapter.health().get('runtime_name', delivery_target)
             delivery_message = self._delivery_message_for_target(message, delivery_target)
             if memory_context:
-                delivery_message.body = self._with_room_memory(delivery_message.body, memory_context)
+                delivery_message.body = self._with_memory_context(delivery_message.body, memory_context)
                 delivery_message.metadata = dict(delivery_message.metadata) | {"room_memory_injected": True}
             target_deliveries: list[dict[str, Any]] = []
             target_dead_letters: list[dict[str, Any]] = []
@@ -1460,6 +2606,7 @@ class AgentFabric:
                 "reply_context": reply_context,
                 "transcript_target": transcript_target,
                 "memory_context": memory_context,
+                "memory_items": memory_items,
             },
             "deliveries": deliveries,
             "dead_letters": dead_letters,
