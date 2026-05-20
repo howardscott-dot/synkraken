@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
-from .discovery import discover_local_runtimes
+from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes
 from .setup_mode import run_install_skills, run_setup, run_uninstall
 from .tui import run_tui
 from .web import serve as serve_web
@@ -96,6 +98,192 @@ def print_discovery(data: dict, *, verbose: bool = False) -> None:
         print(f"  version: {version}")
         print(f"  detection: {detection}")
         print(f"  capabilities: {capabilities}")
+
+
+def _runtime_definitions() -> dict[str, object]:
+    return {definition.runtime_id: definition for definition in RUNTIME_REGISTRY}
+
+
+def _runtime_definition(runtime_id: str, runtime_type: str = "") -> object | None:
+    definitions = _runtime_definitions()
+    if runtime_id in definitions:
+        return definitions[runtime_id]
+    for definition in RUNTIME_REGISTRY:
+        if definition.runtime_type == runtime_type:
+            return definition
+    return None
+
+
+def _normalize_command(command: object) -> list[str]:
+    if isinstance(command, str):
+        return [command] if command else []
+    if isinstance(command, list):
+        return [str(item) for item in command if str(item)]
+    return []
+
+
+def _normalize_runtime(runtime_id: str, item: dict, *, source: str = "config") -> dict:
+    runtime_type = str(item.get("runtime_type") or item.get("type") or item.get("runtime") or runtime_id)
+    definition = _runtime_definition(runtime_id, runtime_type)
+    label = str(
+        item.get("runtime_name")
+        or item.get("label")
+        or getattr(definition, "label", "")
+        or runtime_id
+    )
+    adapter_type = str(item.get("adapter_type") or item.get("type") or getattr(definition, "adapter_type", runtime_type))
+    command = _normalize_command(item.get("command"))
+    if not command and definition is not None:
+        command = [getattr(definition, "command_names")[0]]
+    capabilities = item.get("capabilities") or getattr(definition, "capabilities", ())
+    supported_modes = item.get("supported_modes") or item.get("modes") or getattr(definition, "supported_modes", ())
+    enabled = item.get("enabled", True)
+    skill_path = item.get("skill_path")
+    if not skill_path and definition is not None and getattr(definition, "skill_path_template", None):
+        skill_path = getattr(definition, "skill_path_template").format(home=str(Path.home()))
+    return {
+        "runtime_id": runtime_id,
+        "display_name": label,
+        "runtime_type": runtime_type,
+        "adapter_type": adapter_type,
+        "command": command,
+        "capabilities": [str(value) for value in capabilities],
+        "cost_tier": item.get("cost_tier") or item.get("cost_profile") or getattr(definition, "cost_tier", "medium"),
+        "supported_modes": [str(value) for value in supported_modes],
+        "enabled": bool(enabled),
+        "adapter_supported": adapter_type in SUPPORTED_ADAPTER_TYPES,
+        "skill_path": str(skill_path or ""),
+        "skill_format": str(item.get("skill_format") or getattr(definition, "skill_format", "")),
+        "source": source,
+        "version": item.get("version") or "",
+        "status": item.get("status") or "",
+    }
+
+
+def _load_runtime_config(config_path: Path | None = None) -> dict:
+    path = config_path or (Path.cwd() / "config.local.json")
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {"runtimes": [], "source": str(path), "missing": True}
+    if not isinstance(data, dict):
+        return {"runtimes": [], "source": str(path), "missing": False}
+
+    runtimes: dict[str, dict] = {}
+    for runtime_id, item in (data.get("adapters") or {}).items():
+        if isinstance(item, dict):
+            runtimes[str(runtime_id)] = _normalize_runtime(str(runtime_id), item, source="config")
+    for runtime_id, item in (data.get("runtime_registry") or {}).items():
+        if isinstance(item, dict) and str(runtime_id) not in runtimes:
+            runtimes[str(runtime_id)] = _normalize_runtime(str(runtime_id), item, source="config")
+    return {"runtimes": [runtimes[key] for key in sorted(runtimes)], "source": str(path), "missing": False}
+
+
+def _normalize_runtime_payload(data: dict) -> dict:
+    runtimes = []
+    for item in data.get("runtimes") or []:
+        if isinstance(item, dict):
+            runtime_id = str(item.get("runtime_id") or item.get("id") or item.get("adapter_id") or "")
+            if runtime_id:
+                runtimes.append(_normalize_runtime(runtime_id, item, source="daemon"))
+    return {"runtimes": runtimes, "source": "daemon", "missing": False}
+
+
+def _runtime_data(base: str) -> dict:
+    try:
+        return _normalize_runtime_payload(get_json(f"{base}/v1/runtimes"))
+    except Exception:  # noqa: BLE001
+        return _load_runtime_config()
+
+
+def _runtime_detail_data(base: str, runtime_id: str) -> dict | None:
+    try:
+        return _normalize_runtime(runtime_id, get_json(f"{base}/v1/runtimes/{runtime_id}"), source="daemon")
+    except Exception:  # noqa: BLE001
+        for runtime in _load_runtime_config().get("runtimes", []):
+            if runtime.get("runtime_id") == runtime_id:
+                return runtime
+    return None
+
+
+def _command_exists(command: list[str]) -> bool:
+    if not command:
+        return False
+    executable = command[0]
+    if os.path.isabs(executable) or os.sep in executable:
+        return Path(executable).exists()
+    return shutil.which(executable) is not None
+
+
+def _discovered_command_exists(runtime: dict) -> bool:
+    definition = _runtime_definition(runtime["runtime_id"], runtime.get("runtime_type", ""))
+    if definition is None:
+        return _command_exists(runtime.get("command") or [])
+    return any(shutil.which(command) is not None for command in getattr(definition, "command_names"))
+
+
+def _bridge_skill_status(runtime: dict) -> str:
+    if not runtime.get("adapter_supported"):
+        return "not applicable"
+    path = runtime.get("skill_path")
+    if not path:
+        return "no install path"
+    target = Path(path).expanduser()
+    expected = target / "synkraken-bridge.md" if runtime.get("skill_format") == "single_file" else target / "SKILL.md"
+    return "installed" if expected.exists() else "missing"
+
+
+def print_runtimes(data: dict) -> None:
+    runtimes = data.get("runtimes", [])
+    print("Runtime registry:")
+    if not runtimes:
+        print()
+        print("(no runtimes)")
+        return
+    for runtime in runtimes:
+        adapter_supported = bool(runtime.get("adapter_supported"))
+        status = "adapter" if adapter_supported else "registry-only"
+        if runtime.get("status"):
+            status = str(runtime["status"])
+        print()
+        print(f"{marker(True)} {runtime.get('display_name') or runtime.get('runtime_id')}")
+        print(f"  id: {runtime.get('runtime_id')}")
+        print(f"  type: {runtime.get('runtime_type')}")
+        print(f"  status: {status}")
+        print(f"  enabled: {str(bool(runtime.get('enabled'))).lower()}")
+        if not adapter_supported:
+            print("  note: adapter not implemented yet")
+
+
+def print_runtime_detail(runtime: dict) -> None:
+    print(f"id: {runtime.get('runtime_id')}")
+    print(f"display name: {runtime.get('display_name')}")
+    print(f"runtime type: {runtime.get('runtime_type')}")
+    print(f"adapter type: {runtime.get('adapter_type')}")
+    print(f"command: {' '.join(runtime.get('command') or []) or '(none)'}")
+    print(f"capabilities: {', '.join(runtime.get('capabilities') or []) or '(none)'}")
+    print(f"cost tier: {runtime.get('cost_tier') or 'unknown'}")
+    print(f"enabled: {str(bool(runtime.get('enabled'))).lower()}")
+    print(f"adapter-supported: {'yes' if runtime.get('adapter_supported') else 'no'}")
+
+
+def print_runtime_doctor(data: dict) -> None:
+    runtimes = data.get("runtimes", [])
+    print("Runtime doctor:")
+    if not runtimes:
+        print()
+        print("(no runtimes)")
+        return
+    for runtime in runtimes:
+        adapter_supported = bool(runtime.get("adapter_supported"))
+        print()
+        print(runtime.get("display_name") or runtime.get("runtime_id"))
+        print(f"  id: {runtime.get('runtime_id')}")
+        print(f"  discovered command exists: {'yes' if _discovered_command_exists(runtime) else 'no'}")
+        print(f"  configured command exists: {'yes' if _command_exists(runtime.get('command') or []) else 'no'}")
+        print(f"  adapter: {'implemented' if adapter_supported else 'registry-only'}")
+        print(f"  bridge skill: {_bridge_skill_status(runtime)}")
 
 
 def print_recent(data: dict) -> None:
@@ -259,6 +447,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  synkraken status\n"
             "  synkraken health\n"
             "  synkraken agents\n"
+            "  synkraken runtimes\n"
+            "  synkraken runtime doctor\n"
             "  synkraken send hermes \"Reply with exactly: HELLO\"\n"
             "  synkraken config"
         ),
@@ -274,6 +464,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_agents = sub.add_parser("agents", help="List registered adapters")
     add_base_url_arg(p_agents)
+
+    p_runtimes = sub.add_parser("runtimes", help="List runtime registry entries")
+    add_base_url_arg(p_runtimes)
+
+    p_runtime = sub.add_parser("runtime", help="Inspect one runtime or run runtime diagnostics")
+    p_runtime.add_argument("runtime_id", help="Runtime id or 'doctor'")
+    add_base_url_arg(p_runtime)
 
     p_send = sub.add_parser("send", help="Send a message through the bridge")
     p_send.add_argument("target", help="Target adapter id or 'broadcast'")
@@ -331,6 +528,8 @@ def _print_no_command() -> None:
     print("  synkraken web               # open the local web command deck")
     print("  synkraken health            # is the daemon ok?")
     print("  synkraken agents            # which adapters are configured?")
+    print("  synkraken runtimes          # show runtime registry")
+    print("  synkraken runtime doctor    # runtime diagnostics")
     print("  synkraken send hermes 'hi'  # message a single agent\n")
     print("Tear-down:")
     print("  synkraken uninstall         # remove bridge skills + clean up\n")
@@ -390,6 +589,29 @@ def main() -> None:
                 print(json.dumps(data, indent=2, ensure_ascii=False))
             else:
                 print_agents(data)
+            return
+        if args.command == "runtimes":
+            data = _runtime_data(base)
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print_runtimes(data)
+            return
+        if args.command == "runtime":
+            if args.runtime_id == "doctor":
+                data = _runtime_data(base)
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print_runtime_doctor(data)
+                return
+            runtime = _runtime_detail_data(base, args.runtime_id)
+            if not runtime:
+                raise ValueError(f"runtime not found: {args.runtime_id}")
+            if args.json:
+                print(json.dumps(runtime, indent=2, ensure_ascii=False))
+            else:
+                print_runtime_detail(runtime)
             return
         if args.command == "history":
             data = get_json(f"{base}/v1/conversations/{args.conversation_id}")
