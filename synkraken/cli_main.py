@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
+from .discovery import discover_local_runtimes
 from .setup_mode import run_setup, run_uninstall
 from .tui import run_tui
 from .web import serve as serve_web
@@ -66,6 +68,87 @@ def print_health(data: dict) -> None:
             enabled = bool(adapter.get("enabled", False))
             adapter_type = adapter.get("type", "unknown")
             print(f"{marker(enabled)} {runtime_name:<10} [{adapter_id}]  type={adapter_type}  enabled={str(enabled).lower()}")
+
+
+def _truncate_middle(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return "." * width
+    left = max(1, (width - 3) // 2)
+    right = max(1, width - 3 - left)
+    return f"{value[:left]}...{value[-right:]}"
+
+
+def _clip_right(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return "." * width
+    return f"{value[:width - 3]}..."
+
+
+def _discovery_columns(width: int) -> tuple[int, int, int, int, int]:
+    spacing = 8
+    minimum_command = 14
+    preferred = (20, 22, 20, 9)
+    compact = (16, 16, 14, 8)
+    runtime_w, id_w, type_w, status_w = preferred
+    command_w = width - sum(preferred) - spacing
+    if command_w >= minimum_command:
+        return runtime_w, id_w, type_w, status_w, command_w
+    runtime_w, id_w, type_w, status_w = compact
+    command_w = max(minimum_command, width - sum(compact) - spacing)
+    return runtime_w, id_w, type_w, status_w, command_w
+
+
+def print_discovery(data: dict, *, verbose: bool = False) -> None:
+    runtimes = data.get("runtimes", [])
+    if not runtimes:
+        print("No runtimes detected.")
+        return
+    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    width = max(72, terminal_width)
+    runtime_w, id_w, type_w, status_w, command_w = _discovery_columns(width)
+    header = (
+        f"{'Runtime':<{runtime_w}}  "
+        f"{'ID':<{id_w}}  "
+        f"{'Type':<{type_w}}  "
+        f"{'Status':<{status_w}}  "
+        "Command"
+    )
+    print(header.rstrip())
+    print("─" * min(width, len(header) + max(command_w - len("Command"), 0)))
+    for runtime in runtimes:
+        runtime_id = runtime.get("runtime_id") or runtime.get("id")
+        label = runtime.get("label") or runtime_id
+        runtime_type = runtime.get("runtime_type") or runtime.get("type")
+        support = "adapter" if runtime.get("adapter_supported") else "registry"
+        command = " ".join(str(item) for item in runtime.get("command") or [])
+        version = runtime.get("version") or ""
+        display_command = command if verbose else _truncate_middle(command, command_w)
+        print(
+            f"{_clip_right(str(label), runtime_w):<{runtime_w}}  "
+            f"{_clip_right(str(runtime_id), id_w):<{id_w}}  "
+            f"{_clip_right(str(runtime_type), type_w):<{type_w}}  "
+            f"{support:<{status_w}}  "
+            f"{display_command}"
+        )
+        if version:
+            version_text = str(version)
+            if not verbose:
+                version_text = _clip_right(version_text, max(12, width - len("  version: ")))
+            print(f"  version: {version_text}")
+        if verbose:
+            outputs = runtime.get("probe_output") or []
+            for output in outputs:
+                for line in str(output).splitlines():
+                    print(f"   probe: {line}")
+        print()
 
 
 def print_recent(data: dict) -> None:
@@ -278,7 +361,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--port", type=int, default=9461, help="Port for the local web UI")
     p_web.add_argument("--daemon-url", default=DEFAULT_BASE, help="Existing synkraken daemon base URL")
 
-    sub.add_parser("config",    help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
+    p_discover = sub.add_parser("discover", help="Discover local AI runtimes without changing config")
+    p_discover.add_argument("--json", action="store_true", help="Print raw JSON output")
+    p_discover.add_argument("--verbose", action="store_true", help="Print full command paths and probe output")
+
+    p_config = sub.add_parser("config", help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
+    p_config.add_argument("--rediscover", action="store_true", help="Rescan runtimes and merge them into config.local.json")
     sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
     return parser
@@ -312,7 +400,14 @@ def main() -> None:
         _print_no_command()
         raise SystemExit(1)
     if args.command == 'config':
-        run_setup()
+        run_setup(rediscover=args.rediscover)
+        return
+    if args.command == 'discover':
+        data = {"runtimes": discover_local_runtimes(include_probe_output=args.verbose and not args.json)}
+        if args.json:
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        else:
+            print_discovery(data, verbose=args.verbose)
         return
     if args.command == 'uninstall':
         run_uninstall()
