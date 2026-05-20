@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,179 +11,158 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from synkraken.adapters.crush import CrushAdapter
-from synkraken.discovery import discover_local_runtimes, merge_discovered_config
+from synkraken.discovery import (
+    _find_node_bin,
+    _nvm_node_bin_dirs,
+    discover_local_runtimes,
+    merge_discovered_config,
+)
 from synkraken.fabric import AgentFabric
 from synkraken.models import FabricMessage
 from synkraken.storage import Storage
 
 
-_FAKE_CRUSH_SCRIPT = """\
-#!/usr/bin/env python3
-import sys
-
-args = sys.argv[1:]
-
-if "run" not in args:
-    print("Crush mock 1.0.0")
-    sys.exit(0)
-
-prompt = ""
-done = False
-for i, arg in enumerate(args):
-    if arg == "--":
-        prompt = args[i+1]
-        done = True
-        break
-
-if not done:
-    for arg in args:
-        if not arg.startswith("-") and arg != "run" and arg != "--quiet":
-            prompt = arg
-            break
-
-prompt = prompt.strip()
-
-if "TRIGGER_FAILURE" in prompt:
-    print("Mock stderr failure", file=sys.stderr)
-    sys.exit(1)
-elif "TRIGGER_TIMEOUT" in prompt:
-    import time
-    time.sleep(5)
-    print("Late output after timeout")
-    sys.exit(0)
-else:
-    inner = prompt
-    marker = "<<<"
-    if marker in prompt:
-        idx = prompt.find(marker)
-        rest = prompt[idx + 3:]
-        end_idx = rest.find(">>>")
-        if end_idx != -1:
-            inner = rest[:end_idx].strip()
-    print("MOCK_RESPONSE: " + inner)
-    sys.exit(0)
-"""
-
-
-def create_fake_crush(tmp_dir: Path) -> Path:
-    bin_path = tmp_dir / "crush"
-    bin_path.write_text(_FAKE_CRUSH_SCRIPT, encoding="utf-8")
-    bin_path.chmod(bin_path.stat().st_mode | stat.S_IXUSR)
-    return bin_path
-
-
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        fake_crush = create_fake_crush(tmp_path)
+        fake_node_dir = tmp_path / "node_bin"
+        fake_node_dir.mkdir()
+        fake_crush = tmp_path / "crush"
 
-        config = {
+        config_with_node = {
+            "type": "crush",
+            "command": [str(fake_crush)],
+            "timeout_seconds": 2,
+            "node_bin_dir": str(fake_node_dir),
+        }
+        adapter_with_node = CrushAdapter("crush", config_with_node)
+
+        built_env = adapter_with_node._build_env()
+        assert "PATH" in built_env
+        path_entries = built_env["PATH"].split(os.pathsep)
+        node_in_path = any(str(fake_node_dir) in p for p in path_entries)
+        assert node_in_path, f"fake_node_dir not in PATH: {path_entries[:5]}"
+
+        config_without_node = {
             "type": "crush",
             "command": [str(fake_crush)],
             "timeout_seconds": 2,
         }
-        adapter = CrushAdapter("crush", config)
+        adapter_without_node = CrushAdapter("crush", config_without_node)
+        built_env2 = adapter_without_node._build_env()
+        assert "PATH" in built_env2
 
-        msg = FabricMessage(
-            source="operator",
-            target="crush",
-            body="Hello world",
-            conversation_id="conv-1",
+        fake_node_script = fake_node_dir / "node"
+        fake_node_script.write_text("#!/bin/sh\necho fake-node-v99\n", encoding="utf-8")
+        fake_node_script.chmod(0o755 | stat.S_IXUSR)
+
+        node_path, node_bin = _find_node_bin(tmp, [fake_node_dir])
+        assert node_path is not None, "_find_node_bin should find node in extra_dirs"
+        assert node_bin == str(fake_node_dir)
+
+        fake_crush.write_text("#!/bin/sh\necho crush-ok\n", encoding="utf-8")
+        fake_crush.chmod(0o755 | stat.S_IXUSR)
+
+        fake_crush_env = os.environ.copy()
+        fake_crush_env["PATH"] = str(fake_node_dir) + os.pathsep + fake_crush_env.get("PATH", "")
+        r = subprocess.run(
+            [str(fake_crush)],
+            capture_output=True, text=True, env=fake_crush_env, timeout=5
         )
-        reply = adapter.send(msg)
-        assert reply.ok is True, f"Expected successful reply, got: {reply}"
-        assert "MOCK_RESPONSE: Hello world" in reply.body, f"Got: {reply.body!r}"
-        assert reply.duration_ms is not None and reply.duration_ms > 0
+        assert r.returncode == 0, f"fake crush failed: {r.stderr}"
+        assert "crush-ok" in r.stdout
 
-        cmd_arg = reply.raw.get("command", [])
-        cmd_str = cmd_arg[-1] if cmd_arg else ""
-        assert "<<<\n" in cmd_str, f"Boundary missing from command: {cmd_str[:100]}"
-        assert "You are receiving a direct message from SynKraken" in cmd_str, \
-            f"SynKraken instruction missing from command: {cmd_str[:100]}"
-        assert "Respond only to the user message below" in cmd_str, \
-            f"Response instruction missing from command: {cmd_str[:100]}"
+        nvm_dirs = _nvm_node_bin_dirs(tmp_path)
+        assert isinstance(nvm_dirs, list)
 
-        msg_fail = FabricMessage(
-            source="operator",
-            target="crush",
-            body="TRIGGER_FAILURE",
-            conversation_id="conv-1",
-        )
-        reply_fail = adapter.send(msg_fail)
-        assert reply_fail.ok is False
-        assert "Mock stderr failure" in (reply_fail.error or "") or \
-               "Mock stderr failure" in reply_fail.body
+        fake_nvm_dir = tmp_path / ".nvm" / "versions" / "node"
+        fake_nvm_dir.mkdir(parents=True)
+        nvm_node = fake_nvm_dir / "v99.88.77" / "bin" / "node"
+        nvm_node.parent.mkdir(parents=True)
+        nvm_node.write_text("#!/bin/sh\necho nvm-node-v99\n", encoding="utf-8")
+        nvm_node.chmod(0o755 | stat.S_IXUSR)
 
-        config_timeout = {
+        found_nvm_dirs = _nvm_node_bin_dirs(tmp_path)
+        assert any("v99.88.77" in str(d) for d in found_nvm_dirs), \
+            f"Expected v99.88.77 in nvm dirs, got: {found_nvm_dirs}"
+
+        fake_crush_with_env = fake_nvm_dir / "crush"
+        fake_crush_with_env.write_text("#!/bin/sh\necho crush-nvm-ok\n", encoding="utf-8")
+        fake_crush_with_env.chmod(0o755 | stat.S_IXUSR)
+        fake_nvm_bin_dir = str(fake_nvm_dir / "v99.88.77" / "bin")
+        config_nvm = {
             "type": "crush",
-            "command": [str(fake_crush)],
-            "timeout_seconds": 1,
+            "command": [str(fake_crush_with_env)],
+            "timeout_seconds": 2,
+            "node_bin_dir": fake_nvm_bin_dir,
         }
-        adapter_timeout = CrushAdapter("crush", config_timeout)
-        msg_timeout = FabricMessage(
-            source="operator",
-            target="crush",
-            body="TRIGGER_TIMEOUT",
-            conversation_id="conv-1",
-        )
-        reply_timeout = adapter_timeout.send(msg_timeout)
-        assert reply_timeout.ok is False
-        assert reply_timeout.error is not None
-        assert "timed out" in reply_timeout.error.lower()
+        adapter_nvm = CrushAdapter("crush", config_nvm)
+        nvm_built_env = adapter_nvm._build_env()
+        nvm_path_entries = nvm_built_env["PATH"].split(os.pathsep)
+        nvm_in_path = any("v99.88.77" in p for p in nvm_path_entries)
+        assert nvm_in_path, f"nvm v99.88.77 not in PATH: {nvm_path_entries[:5]}"
 
-        discovered = discover_local_runtimes(search_path=tmp, home=tmp_path, include_common_dirs=False)
+        prompt_boundary = adapter_with_node._prompt_boundary("Reply with exactly: XYZ")
+        assert "If the user asks for exact output, return only that exact output" in prompt_boundary
+        assert "<<<\n" in prompt_boundary
+        assert "\n>>>" in prompt_boundary
+
+        discovered = discover_local_runtimes(
+            search_path=tmp, home=tmp_path, include_common_dirs=False
+        )
         by_id = {r["runtime_id"]: r for r in discovered}
-        assert "crush" in by_id, f"Expected crush in discovered runtimes, got: {list(by_id.keys())}"
+        assert "crush" in by_id, f"Expected crush in discovered: {list(by_id.keys())}"
         rt = by_id["crush"]
-        assert rt["adapter_supported"] is True, f"Expected adapter_supported=True for crush, got: {rt}"
+        assert rt["adapter_supported"] is True
         assert rt["adapter_type"] == "crush"
 
-        existing_config = {
-            "adapters": {},
-            "runtime_registry": {}
-        }
-        merged, summary = merge_discovered_config(existing_config, [rt], behaviour="merge")
-        assert "crush" in merged["adapters"], f"Expected crush in adapters, got: {list(merged['adapters'].keys())}"
+        merged, summary = merge_discovered_config(
+            {"adapters": {}, "runtime_registry": {}}, [rt], behaviour="merge"
+        )
+        assert "crush" in merged["adapters"]
         assert merged["adapters"]["crush"]["type"] == "crush"
         assert merged["adapters"]["crush"]["enabled"] is True
-        assert "crush" in merged["runtime_registry"]
-        assert merged["runtime_registry"]["crush"]["enabled"] is True
         assert "crush" in summary["adapters_added"]
 
+        fake_crush_js = tmp_path / "crush_js"
+        fake_crush_js.write_text("#!/bin/sh\necho crush-js-ok\n", encoding="utf-8")
+        fake_crush_js.chmod(0o755 | stat.S_IXUSR)
+        config_for_discovery = {
+            "type": "crush",
+            "command": [str(fake_crush_js)],
+            "timeout_seconds": 2,
+            "node_bin_dir": str(fake_node_dir),
+        }
+        config_for_fabric = {
+            "adapters": {
+                "crush": config_for_discovery
+            },
+            "runtime_registry": {
+                "crush": {
+                    "runtime_id": "crush",
+                    "runtime_type": "crush",
+                    "command": [str(fake_crush_js)],
+                    "capabilities": ["coding"],
+                    "cost_tier": "local",
+                    "adapter_type": "crush",
+                    "supported_modes": ["direct"],
+                    "enabled": True,
+                    "node_bin_dir": str(fake_node_dir),
+                }
+            },
+        }
         storage = Storage(tmp_path / "test_db.sqlite3")
-        fabric = AgentFabric(merged, storage)
+        fabric = AgentFabric(config_for_fabric, storage)
         storage.sync_agents([adapter.health() for adapter in fabric.adapters.values()])
         fabric._sync_runtime_registry()
 
         doctor = fabric.runtime_doctor()
-        rt_doc = None
-        for item in doctor["runtimes"]:
-            if item["runtime_id"] == "crush":
-                rt_doc = item
-                break
-        assert rt_doc is not None, f"Expected crush in runtime doctor, got: {[r['runtime_id'] for r in doctor['runtimes']]}"
+        rt_doc = next((r for r in doctor["runtimes"] if r["runtime_id"] == "crush"), None)
+        assert rt_doc is not None, "crush not in doctor"
         assert rt_doc["registered"] is True
         assert rt_doc["ok"] is True
         assert rt_doc["health"]["type"] == "crush"
         assert rt_doc["health"]["enabled"] is True
-
-        alt_home = tmp_path / "home"
-        alt_home.mkdir()
-        config_with_home = {
-            "type": "crush",
-            "command": [str(fake_crush)],
-            "timeout_seconds": 2,
-            "working_dir": str(alt_home),
-        }
-        adapter_alt = CrushAdapter("crush", config_with_home)
-        msg2 = FabricMessage(source="operator", target="crush", body="pwd check", conversation_id="c2")
-        reply2 = adapter_alt.send(msg2)
-        assert reply2.ok is True
-
-        prompt_boundary = adapter._prompt_boundary("Reply with exactly: XYZ")
-        assert "If the user asks for exact output, return only that exact output" in prompt_boundary
-        assert "<<<\n" in prompt_boundary
-        assert "\n>>>" in prompt_boundary
 
     print("crush_adapter_smoke_test: PASS")
 

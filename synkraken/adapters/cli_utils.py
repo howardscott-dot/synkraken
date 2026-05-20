@@ -11,6 +11,7 @@ def run_command(
     *,
     cwd: str | None = None,
     input_text: str | None = None,
+    env: dict | None = None,
 ) -> tuple[int, str, str, int]:
     started = time.perf_counter()
     kwargs: dict = {
@@ -22,6 +23,8 @@ def run_command(
         kwargs["cwd"] = cwd
     if input_text is not None:
         kwargs["input"] = input_text
+    if env is not None:
+        kwargs["env"] = env
     proc = subprocess.run(
         list(command),
         **kwargs,

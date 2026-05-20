@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from pathlib import Path
 
 from .base import BaseAdapter
 from .cli_utils import run_command
@@ -58,6 +59,42 @@ class CrushAdapter(BaseAdapter):
             ">>>"
         )
 
+    def _build_env(self) -> dict:
+        env = os.environ.copy()
+        path_entries: list[str] = []
+
+        cmd = self.config.get("command", ["crush"])
+        if cmd:
+            cmd_dir = str(Path(cmd[0]).parent.resolve())
+            if cmd_dir and cmd_dir not in path_entries:
+                path_entries.append(cmd_dir)
+
+        configured_node_bin = self.config.get("node_bin_dir")
+        if configured_node_bin and str(configured_node_bin) not in path_entries:
+            path_entries.append(str(configured_node_bin))
+
+        discovered_node_bin = self.config.get("node_bin_dir") or self.config.get("node_path")
+        if discovered_node_bin and str(discovered_node_bin) not in path_entries:
+            node_dir = str(Path(discovered_node_bin).parent) if "/" in discovered_node_bin else None
+            if node_dir and node_dir not in path_entries:
+                path_entries.append(node_dir)
+
+        home_node_dir = Path.home() / ".nvm" / "versions" / "node"
+        if home_node_dir.is_dir():
+            try:
+                for version_link in home_node_dir.iterdir():
+                    bin_dir = str(version_link / "bin")
+                    if bin_dir not in path_entries:
+                        path_entries.append(bin_dir)
+            except OSError:
+                pass
+
+        if path_entries:
+            existing_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join(reversed(path_entries)) + (os.pathsep + existing_path if existing_path else "")
+
+        return env
+
     def send(self, message: FabricMessage) -> AdapterReply:
         base_command = self.config.get("command", ["crush"])
         timeout = int(self.config.get("timeout_seconds", 120))
@@ -76,6 +113,7 @@ class CrushAdapter(BaseAdapter):
                 command,
                 timeout,
                 cwd=working_dir,
+                env=self._build_env(),
             )
         except subprocess.TimeoutExpired:
             return AdapterReply(

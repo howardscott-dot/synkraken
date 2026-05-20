@@ -7,7 +7,9 @@ from queue import Queue
 from threading import Lock
 from typing import Any
 import json
+import os
 import re
+import subprocess
 import time
 
 from .adapters import build_adapter
@@ -138,6 +140,7 @@ class AgentFabric:
             self.storage.upsert_runtime({
                 "runtime_id": adapter_id,
                 "runtime_type": adapter_config.get("runtime_type") or adapter_config.get("type") or "unknown",
+                "adapter_type": adapter_config.get("type") or "unknown",
                 "version": adapter_config.get("version") or "",
                 "command": command,
                 "working_dir": adapter_config.get("working_dir") or adapter_config.get("cwd") or "",
@@ -147,6 +150,12 @@ class AgentFabric:
                 "capabilities": capabilities,
                 "enabled": adapter_config.get("enabled", True),
             })
+        for runtime_id, runtime_config in self.config.get("runtime_registry", {}).items():
+            item = dict(runtime_config)
+            item.setdefault("runtime_id", runtime_id)
+            if runtime_id in self.config.get("adapters", {}):
+                continue
+            self.storage.upsert_runtime(item)
 
     def list_runtimes(self) -> list[dict[str, Any]]:
         self._sync_runtime_registry()
@@ -160,7 +169,7 @@ class AgentFabric:
             adapter = self.adapters.get(runtime_id)
             health = adapter.health() if adapter else {"enabled": False, "ok": False}
             command = runtime.get("command") or []
-            results.append({
+            result: dict[str, Any] = {
                 "runtime_id": runtime_id,
                 "runtime_type": runtime.get("runtime_type"),
                 "enabled": runtime.get("enabled"),
@@ -169,8 +178,35 @@ class AgentFabric:
                 "ok": bool(adapter and health.get("enabled", True)),
                 "health": health,
                 "warnings": [] if command else ["no command recorded"],
-            })
+            }
+            if runtime_id == "crush":
+                result["node_bin_dir"] = runtime.get("node_bin_dir")
+                node_available = self._check_node_in_adapter_env(runtime_id)
+                result["node_available"] = node_available
+            results.append(result)
         return {"runtimes": results}
+
+    def _check_node_in_adapter_env(self, runtime_id: str) -> bool:
+        adapter = self.adapters.get(runtime_id)
+        if adapter is None:
+            return False
+        try:
+            import tempfile, os as _os
+            check_cmd = ["sh", "-c", "command -v node > /dev/null 2>&1 && echo OK || echo MISSING"]
+            if hasattr(adapter, "_build_env"):
+                env = adapter._build_env()
+            else:
+                env = None
+            proc = subprocess.run(
+                check_cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=env,
+            )
+            return "OK" in proc.stdout
+        except Exception:
+            return False
 
     def add_room_member(self, room_name: str, adapter_id: str, actor: str = "operator") -> dict:
         if adapter_id not in self.adapters:

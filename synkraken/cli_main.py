@@ -283,6 +283,11 @@ def print_runtime_doctor(data: dict) -> None:
         print(f"  discovered command exists: {'yes' if _discovered_command_exists(runtime) else 'no'}")
         print(f"  configured command exists: {'yes' if _command_exists(runtime.get('command') or []) else 'no'}")
         print(f"  adapter: {'implemented' if adapter_supported else 'registry-only'}")
+        if runtime.get("runtime_id") == "crush":
+            node_ok = bool(runtime.get("node_available"))
+            print(f"  node available to adapter: {'yes' if node_ok else 'no'}")
+            if not node_ok:
+                print("  hint: rerun `synkraken config --rediscover` from a shell where node is available")
         print(f"  bridge skill: {_bridge_skill_status(runtime)}")
 
 

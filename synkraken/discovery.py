@@ -184,6 +184,45 @@ def _common_binary_dirs(home: Path) -> list[Path]:
     ]
 
 
+def _nvm_node_bin_dirs(home: Path) -> list[Path]:
+    versions_dir = home / ".nvm" / "versions" / "node"
+    if not versions_dir.is_dir():
+        return []
+    found: list[tuple[int, Path]] = []
+    try:
+        for version_link in versions_dir.iterdir():
+            bin_dir = version_link / "bin"
+            if bin_dir.is_dir():
+                try:
+                    weight = tuple(int(x) for x in version_link.name.lstrip("v").split(".")[:3])
+                    found.append((weight, bin_dir))
+                except ValueError:
+                    found.append(((0, 0, 0), bin_dir))
+    except OSError:
+        return []
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [path for _, path in found]
+
+
+def _find_node_bin(search_path: str | None, extra_dirs: list[Path]) -> tuple[str | None, str | None]:
+    node_path = shutil.which("node", path=search_path)
+    if node_path:
+        return node_path, str(Path(node_path).parent)
+    for d in extra_dirs:
+        node_candidate = d / "node"
+        if node_candidate.is_file() and os.access(node_candidate, os.X_OK):
+            return str(node_candidate), str(d)
+    return None, None
+    return [
+        home / ".local" / "bin",
+        home / "bin",
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+        Path("/usr/bin"),
+        Path("/bin"),
+    ]
+
+
 def _candidate_path(command_name: str, search_path: str | None, extra_dirs: Iterable[Path]) -> str | None:
     found = shutil.which(command_name, path=search_path)
     if found:
@@ -373,6 +412,20 @@ def discover_local_runtimes(
                 version = _probe_version(probe_outputs)
             else:
                 version = _safe_version(command[0], definition.safe_version_args)
+
+        node_path: str | None = None
+        node_bin_dir: str | None = None
+        if definition.runtime_id == "crush":
+            node_path, node_bin_dir = _find_node_bin(search_path, extra_dirs)
+            if not node_bin_dir:
+                nvm_dirs = _nvm_node_bin_dirs(home)
+                for nb in nvm_dirs:
+                    nb_str = str(nb)
+                    if Path(nb_str, "node").is_file():
+                        node_bin_dir = nb_str
+                        node_path = nb_str + "/node"
+                        break
+
         runtime = {
             "id": definition.runtime_id,
             "runtime_id": definition.runtime_id,
@@ -391,6 +444,10 @@ def discover_local_runtimes(
             "detected_by": detected_by,
             "version": version,
         }
+        if node_bin_dir:
+            runtime["node_bin_dir"] = node_bin_dir
+        if node_path:
+            runtime["node_path"] = node_path
         if definition.skill_path_template:
             runtime["skill_path"] = _format_home_template(definition.skill_path_template, home)
             runtime["skill_format"] = definition.skill_format
@@ -430,6 +487,10 @@ def runtime_to_adapter_config(runtime: dict) -> dict:
         config["system"] = "You are replying through synkraken. Keep replies concise and structured."
     elif adapter_type == "crush":
         config["message_prefix"] = "Keep replies focused and concise."
+        if runtime.get("node_bin_dir"):
+            config["node_bin_dir"] = runtime["node_bin_dir"]
+        if runtime.get("node_path"):
+            config["node_path"] = runtime["node_path"]
     elif adapter_type == "hermes":
         config["system_prefix"] = "You are replying through synkraken. Keep replies concise and structured."
     return config
