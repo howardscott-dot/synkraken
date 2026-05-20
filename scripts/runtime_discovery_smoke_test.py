@@ -79,9 +79,13 @@ def test_selection_parser(runtimes: list[dict]) -> None:
     assert [runtime["runtime_id"] for runtime in selected] == ["claude", "ollama"]
     spaced = parse_runtime_selection(runtimes, "1, 3")
     assert [runtime["runtime_id"] for runtime in spaced] == ["claude", "ollama"]
+    space_only = parse_runtime_selection(runtimes, "1 3")
+    assert [runtime["runtime_id"] for runtime in space_only] == ["claude", "ollama"]
+    mixed = parse_runtime_selection(runtimes, "1 2,3")
+    assert [runtime["runtime_id"] for runtime in mixed] == ["claude", "goose", "ollama"]
     supported = parse_runtime_selection(runtimes, "all", supported_only=True)
     assert {runtime["runtime_id"] for runtime in supported} == {"claude", "goose"}
-    for raw in ("0", "4", "1,4", "goose", "1,,3"):
+    for raw in ("0", "4", "1,4", "goose"):
         try:
             parse_runtime_selection(runtimes, raw)
         except ValueError:

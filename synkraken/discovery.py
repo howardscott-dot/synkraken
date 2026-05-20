@@ -461,9 +461,9 @@ def parse_runtime_selection(runtimes: list[dict], raw: str, *, supported_only: b
     if value == "none":
         return []
 
-    parts = [item.strip() for item in raw.split(",")]
+    parts = raw.replace(",", " ").split()
     if any(not item for item in parts):
-        raise ValueError('use comma-separated numbers, "all", or "none"')
+        raise ValueError('use comma- or space-separated numbers, "all", or "none"')
 
     selected: list[dict] = []
     seen_indexes: set[int] = set()
