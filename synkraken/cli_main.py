@@ -10,7 +10,7 @@ import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
 from .discovery import discover_local_runtimes
-from .setup_mode import run_setup, run_uninstall
+from .setup_mode import run_install_skills, run_setup, run_uninstall
 from .tui import run_tui
 from .web import serve as serve_web
 
@@ -76,7 +76,9 @@ def print_discovery(data: dict, *, verbose: bool = False) -> None:
         print()
         for runtime in runtimes:
             label = runtime.get("label") or runtime.get("runtime_id") or runtime.get("id")
-            print(f"[x] {label}")
+            if runtime.get("runtime_id") == "google-antigravity":
+                label = "Antigravity"
+            print(f"- {label}")
         print()
         print(f"Total found: {len(runtimes)}")
         return
@@ -312,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_config = sub.add_parser("config", help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
     p_config.add_argument("--rediscover", action="store_true", help="Rescan runtimes and merge them into config.local.json")
+    p_config.add_argument("--install-skills", action="store_true", help="Install bridge skills for configured workers")
     sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
     return parser
@@ -345,6 +348,9 @@ def main() -> None:
         _print_no_command()
         raise SystemExit(1)
     if args.command == 'config':
+        if args.install_skills:
+            run_install_skills()
+            return
         run_setup(rediscover=args.rediscover)
         return
     if args.command == 'discover':

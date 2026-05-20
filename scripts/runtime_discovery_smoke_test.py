@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,6 +22,30 @@ from synkraken.discovery import (  # noqa: E402
     merge_discovered_config,
     parse_runtime_selection,
 )
+from synkraken import discovery, setup_mode  # noqa: E402
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _input_returning(value: str):
+    def _fake_input(prompt: str = "") -> str:
+        if prompt:
+            print(prompt, end="")
+        return value
+
+    return _fake_input
+
+
+def _input_sequence(values: list[str]):
+    pending = iter(values)
+
+    def _fake_input(prompt: str = "") -> str:
+        if prompt:
+            print(prompt, end="")
+        return next(pending)
+
+    return _fake_input
 
 
 def _fake_binary(directory: Path, name: str, version: str) -> None:
@@ -44,10 +72,22 @@ def test_fake_path_and_versions(tmp: Path) -> list[dict]:
 
 
 def test_selection_parser(runtimes: list[dict]) -> None:
-    selected = parse_runtime_selection(runtimes, "1,ollama")
+    assert parse_runtime_selection(runtimes, "") == runtimes
+    assert parse_runtime_selection(runtimes, "all") == runtimes
+    assert parse_runtime_selection(runtimes, "none") == []
+    selected = parse_runtime_selection(runtimes, "1,3")
     assert [runtime["runtime_id"] for runtime in selected] == ["claude", "ollama"]
+    spaced = parse_runtime_selection(runtimes, "1, 3")
+    assert [runtime["runtime_id"] for runtime in spaced] == ["claude", "ollama"]
     supported = parse_runtime_selection(runtimes, "all", supported_only=True)
     assert {runtime["runtime_id"] for runtime in supported} == {"claude", "goose"}
+    for raw in ("0", "4", "1,4", "goose", "1,,3"):
+        try:
+            parse_runtime_selection(runtimes, raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid selection to fail: {raw!r}")
 
 
 def test_config_merge(runtimes: list[dict]) -> None:
@@ -163,10 +203,11 @@ def test_cli_formatting_with_long_command(tmp: Path) -> None:
     lines = plain.splitlines()
     assert lines[0] == "Discovered AI workers:", plain
     assert lines[1] == "", plain
-    checklist_lines = [line for line in lines if line.startswith("[x] ")]
-    assert "[x] Goose" in checklist_lines, plain
-    assert "[x] Google Antigravity" in checklist_lines, plain
-    assert lines[-1] == f"Total found: {len(checklist_lines)}", plain
+    worker_lines = [line for line in lines if line.startswith("- ")]
+    assert "- Goose" in worker_lines, plain
+    assert "- Antigravity" in worker_lines, plain
+    assert lines[-1] == f"Total found: {len(worker_lines)}", plain
+    assert not ANSI_ESCAPE_RE.search(plain), plain
     assert str(long_dir / "goose") not in plain, plain
     assert "version" not in plain.lower(), plain
     assert "command:" not in plain, plain
@@ -216,6 +257,237 @@ def test_cli_formatting_with_long_command(tmp: Path) -> None:
     assert "runtime_type" not in verbose
 
 
+def test_config_numbered_prompt() -> None:
+    runtimes = [
+        {"runtime_id": "claude", "label": "Claude Code"},
+        {"runtime_id": "codex", "label": "Codex"},
+        {"runtime_id": "goose", "label": "Goose"},
+        {"runtime_id": "hermes", "label": "Hermes"},
+        {"runtime_id": "openclaw", "label": "OpenClaw"},
+        {"runtime_id": "crush", "label": "Crush"},
+        {"runtime_id": "google-antigravity", "label": "Google Antigravity"},
+        {"runtime_id": "ollama", "label": "Ollama"},
+    ]
+    selected = parse_runtime_selection(runtimes, "1,3,5")
+    assert [runtime["runtime_id"] for runtime in selected] == ["claude", "goose", "openclaw"]
+    expected = (
+        "Discovered AI workers:\n"
+        "\n"
+        "1. Claude Code\n"
+        "2. Codex\n"
+        "3. Goose\n"
+        "4. Hermes\n"
+        "5. OpenClaw\n"
+        "6. Crush\n"
+        "7. Antigravity\n"
+        "8. Ollama\n"
+        "\n"
+        "Enter numbers to enable, or press Enter for all:\n"
+    )
+    assert not hasattr(setup_mode, "_interactive_selection")
+    assert not hasattr(setup_mode, "_render_checklist")
+
+    out = io.StringIO()
+    with patch("builtins.input", _input_returning("")), contextlib.redirect_stdout(out):
+        selected = setup_mode._select_runtimes_for_config(runtimes)
+    rendered = out.getvalue()
+    assert rendered == expected, rendered
+    assert selected == runtimes
+    assert "[ ]" not in rendered
+    assert "[x]" not in rendered
+    assert "(space=toggle" not in rendered
+    assert not ANSI_ESCAPE_RE.search(rendered), rendered
+
+    out = io.StringIO()
+    with patch("builtins.input", _input_sequence(["9", "1, 3, 5"])), contextlib.redirect_stdout(out):
+        selected = setup_mode._select_runtimes_for_config(runtimes)
+    rendered = out.getvalue()
+    assert "Invalid selection: 9 is outside the range 1-8" in rendered
+    assert [runtime["runtime_id"] for runtime in selected] == ["claude", "goose", "openclaw"]
+
+
+def test_selected_bridge_skill_install_and_skips(tmp: Path) -> None:
+    runtimes = [
+        {
+            "runtime_id": "claude",
+            "label": "Claude Code",
+            "adapter_type": "claude",
+            "adapter_supported": True,
+            "skill_path": str(tmp / "claude" / "skills" / "synkraken-bridge"),
+            "skill_format": "folder",
+        },
+        {
+            "runtime_id": "codex",
+            "label": "Codex",
+            "adapter_type": "unsupported",
+            "adapter_supported": False,
+            "skill_path": str(tmp / "codex" / "skills" / "synkraken-bridge"),
+            "skill_format": "folder",
+        },
+        {
+            "runtime_id": "ollama",
+            "label": "Ollama",
+            "adapter_type": "unsupported",
+            "adapter_supported": False,
+            "capabilities": ["local_model", "chat"],
+        },
+    ]
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        results = setup_mode._install_bridge_skills_for_runtimes(runtimes)
+        setup_mode._print_bridge_skill_results(results)
+    rendered = out.getvalue()
+    assert (tmp / "claude" / "skills" / "synkraken-bridge" / "SKILL.md").exists()
+    assert results[0]["status"] == "installed"
+    assert results[1] == {
+        "status": "skipped",
+        "label": "Codex",
+        "detail": "bridge skill installer not implemented for this runtime yet",
+    }
+    assert results[2] == {
+        "status": "skipped",
+        "label": "Ollama",
+        "detail": "local model runtime; bridge skill not applicable",
+    }
+    assert "✓ Claude Code" in rendered
+    assert "- Codex" in rendered
+    assert "skipped: bridge skill installer not implemented for this runtime yet" in rendered
+    assert "- Ollama" in rendered
+    assert "skipped: local model runtime; bridge skill not applicable" in rendered
+
+
+def test_declined_bridge_skill_install_skips_cleanly(tmp: Path) -> None:
+    runtime = {
+        "runtime_id": "claude",
+        "label": "Claude Code",
+        "runtime_type": "claude",
+        "command": [str(tmp / "bin" / "claude")],
+        "capabilities": ["coding"],
+        "cost_tier": "premium",
+        "adapter_type": "claude",
+        "adapter_supported": True,
+        "supported_modes": ["direct"],
+        "timeout_seconds": 120,
+        "skill_path": str(tmp / "claude" / "skills" / "synkraken-bridge"),
+        "skill_format": "folder",
+    }
+    config_path = tmp / "config.local.json"
+    out = io.StringIO()
+    with (
+        patch("synkraken.setup_mode.discover_local_runtimes", return_value=[runtime]),
+        patch("synkraken.setup_mode.DEFAULT_CONFIG_PATH", config_path),
+        patch("builtins.input", _input_sequence(["1", "n"])),
+        contextlib.redirect_stdout(out),
+    ):
+        setup_mode.run_setup(rediscover=False)
+    rendered = out.getvalue()
+    assert "Bridge skill installation skipped." in rendered
+    assert "You can run `synkraken config --install-skills` later." in rendered
+    assert not (tmp / "claude" / "skills" / "synkraken-bridge" / "SKILL.md").exists()
+    assert config_path.exists()
+
+
+def test_install_skills_command_from_existing_config(tmp: Path) -> None:
+    config = {
+        "adapters": {
+            "claude": {
+                "type": "claude",
+                "runtime_type": "claude",
+                "runtime_name": "Claude Code",
+                "enabled": True,
+                "command": ["claude"],
+            }
+        },
+        "runtime_registry": {
+            "codex": {
+                "runtime_id": "codex",
+                "runtime_type": "codex",
+                "adapter_type": "unsupported",
+                "enabled": False,
+            }
+        },
+    }
+    (tmp / "config.local.json").write_text(json.dumps(config), encoding="utf-8")
+    env = os.environ.copy()
+    env["HOME"] = str(tmp)
+    env["PYTHONPATH"] = str(ROOT)
+    output = subprocess.check_output(
+        [sys.executable, "-m", "synkraken.cli_main", "config", "--install-skills"],
+        cwd=tmp,
+        env=env,
+        text=True,
+    )
+    assert (tmp / ".claude" / "skills" / "synkraken-bridge" / "SKILL.md").exists()
+    assert "✓ Claude Code" in output
+    assert "installed at: ~/.claude/skills/synkraken-bridge" in output
+    assert "- Codex" in output
+    assert "skipped: bridge skill installer not implemented for this runtime yet" in output
+
+
+def test_bridge_skill_install_failure_reports_failed(tmp: Path) -> None:
+    runtime = {
+        "runtime_id": "claude",
+        "label": "Claude Code",
+        "adapter_type": "claude",
+        "adapter_supported": True,
+        "skill_path": str(tmp / "claude" / "skills" / "synkraken-bridge"),
+        "skill_format": "folder",
+    }
+    out = io.StringIO()
+    with (
+        patch("synkraken.setup_mode._copy_skill_folder", side_effect=RuntimeError("copy denied")),
+        contextlib.redirect_stdout(out),
+    ):
+        results = setup_mode._install_bridge_skills_for_runtimes([runtime])
+        setup_mode._print_bridge_skill_results(results)
+    assert results == [{"status": "failed", "label": "Claude Code", "detail": "copy denied"}]
+    rendered = out.getvalue()
+    assert "✗ Claude Code" in rendered
+    assert "failed: copy denied" in rendered
+
+
+def test_setup_debug_line_output() -> None:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        setup_mode._debug_setup_line_output()
+    assert out.getvalue() == "A\nB\nC\n"
+
+
+def test_probe_restores_terminal_output_flags() -> None:
+    import pty
+    import termios
+
+    master_fd, slave_fd = pty.openpty()
+    saved_stdin, saved_stdout, saved_stderr = sys.stdin, sys.stdout, sys.stderr
+    slave = os.fdopen(slave_fd, "r", buffering=1)
+    try:
+        sys.stdin = slave
+        sys.stdout = slave
+        sys.stderr = slave
+
+        original_attrs = termios.tcgetattr(slave_fd)
+        original_attrs[1] |= termios.ONLCR
+        termios.tcsetattr(slave_fd, termios.TCSADRAIN, original_attrs)
+
+        def _fake_run(*args, **kwargs):
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            changed = termios.tcgetattr(slave_fd)
+            changed[1] &= ~termios.ONLCR
+            termios.tcsetattr(slave_fd, termios.TCSADRAIN, changed)
+            return subprocess.CompletedProcess(args[0], 0, "ok\n", "")
+
+        with patch("synkraken.discovery.subprocess.run", _fake_run):
+            result = discovery._run_probe_command("fake-runtime", ("--version",), 2.0)
+
+        restored_attrs = termios.tcgetattr(slave_fd)
+        assert result.stdout == "ok\n"
+        assert restored_attrs[1] & termios.ONLCR
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = saved_stdin, saved_stdout, saved_stderr
+        slave.close()
+        os.close(master_fd)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -230,6 +502,17 @@ def main() -> None:
         test_cli_json_output(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_cli_formatting_with_long_command(Path(raw))
+    test_config_numbered_prompt()
+    with tempfile.TemporaryDirectory() as raw:
+        test_selected_bridge_skill_install_and_skips(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_declined_bridge_skill_install_skips_cleanly(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_install_skills_command_from_existing_config(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_bridge_skill_install_failure_reports_failed(Path(raw))
+    test_setup_debug_line_output()
+    test_probe_restores_terminal_output_flags()
     print("runtime discovery smoke test passed")
 
 
