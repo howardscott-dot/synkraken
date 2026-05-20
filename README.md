@@ -22,7 +22,8 @@
 ---
 
 SYNKRAKEN is a local-first, runtime-neutral control plane around multiple AI
-CLI agents on the same machine — **Claude Code, Goose, Hermes, OpenClaw** — so
+CLI agents on the same machine — **Claude Code, Goose, Hermes, OpenClaw, Crush**
+and discovered future runtimes — so
 operators can see, direct, govern, recover, and coordinate work across the
 runtimes they already choose.
 
@@ -145,14 +146,14 @@ git clone https://github.com/example/synkraken.git
 cd synkraken
 pip install -e .
 
-# 2. Run the interactive setup — detects your installed runtimes
-#    (goose, hermes, openclaw, claude), installs the bridge skill into
-#    each one, and creates config.local.json from the example
+# 2. Run the interactive setup — detects your installed runtimes,
+#    installs the bridge skill into adapter-supported runtimes, and
+#    creates or updates config.local.json
 synkraken config
 
-# 3. (Optional) Edit the generated config to match your binary paths
-#    — only needed if the runtimes aren't on $PATH
-$EDITOR config.local.json
+# 3. Optional: inspect discovery without changing config
+synkraken discover
+synkraken discover --json
 
 # 4. Install and start the user service
 ./scripts/install-user-service.sh
@@ -387,6 +388,13 @@ with `report.md`, `raw.json`, and `commands.log`.
 | `hermes`    | `hermes`   | Hermes agent CLI                                         | `python -m hermes_cli.main -z <msg>` |
 | `openclaw`  | `openclaw` | OpenClaw via local gateway                               | `openclaw agent --agent <id> --message <msg> --json` |
 | `claude`    | `claude`   | [Claude Code](https://docs.claude.com/en/docs/claude-code) | `claude -p --no-session-persistence --permission-mode bypassPermissions` |
+| `google-antigravity` | `google_antigravity` | Google Antigravity                                       | `agy --print --dangerously-skip-permissions <msg>` |
+
+`synkraken discover` also recognizes other local runtimes such as Codex,
+Gemini CLI, Crush, Aider, Ollama, LM Studio, and local-server style tooling.
+Runtimes without a SynKraken adapter are written to `runtime_registry` as
+disabled registry-only entries; they are not enabled as workers until an
+adapter exists.
 
 Each adapter is a leaf module under `synkraken/adapters/`, ~50–100 lines.
 Adding a new one is a small focused PR — see
@@ -579,7 +587,7 @@ the TUI.
 Two example configs ship under `examples/`:
 
 - [`examples/config.example.json`](examples/config.example.json) — relies on
-  `goose`, `hermes`, `openclaw`, `claude` being on `$PATH`. **All four
+  `goose`, `hermes`, `openclaw`, `claude`, `crush` being on `$PATH`. **All five
   adapters are pre-wired** with sensible defaults; just enable/disable the
   ones you have.
 - [`examples/config.paths.local.example.json`](examples/config.paths.local.example.json)
@@ -587,6 +595,33 @@ Two example configs ship under `examples/`:
 
 Your active local config goes in `config.local.json` at the repo root.
 That file is gitignored — it's yours, never shared.
+
+Runtime discovery is local and conservative:
+
+- checks `$PATH` plus common binary directories
+- may run short `--version` checks with a timeout
+- may use generic config-directory markers
+- never executes agent work
+- never infers subscriptions, account state, or billing
+- never stores secrets
+
+`synkraken config --rediscover` rescans the machine and offers `merge`,
+`replace`, or `skip`. `merge` preserves existing adapter blocks and fills only
+missing discovery metadata. `replace` rewrites discovered adapter blocks from
+the current scan. `skip` leaves `config.local.json` unchanged.
+
+Discovered runtime entries use this shape in local config:
+
+```json
+{
+  "runtime_id": "goose",
+  "command": ["goose"],
+  "capabilities": ["coding", "review", "files", "shell"],
+  "cost_tier": "medium",
+  "adapter_type": "goose",
+  "supported_modes": ["direct", "broadcast", "room", "discussion", "team", "goal"]
+}
+```
 
 Optional installation context belongs in local config, not shipped defaults:
 

@@ -61,6 +61,8 @@ C_OPERATOR_L = 17
 C_ROOM       = 18
 C_CLAUDE_D   = 19
 C_CLAUDE_L   = 20
+C_CRUSH_D    = 21
+C_CRUSH_L    = 22
 
 # ── box-drawing ────────────────────────────────────────────────────────────
 BOX = dict(tl='╭', tr='╮', bl='╰', br='╯', h='─', v='│')
@@ -360,6 +362,7 @@ _AGENT_COLOR_PAIRS = {
     'hermes':   (C_HERMES_D, C_HERMES_L),
     'openclaw': (C_OPENCLAW_D, C_OPENCLAW_L),
     'claude':   (C_CLAUDE_D, C_CLAUDE_L),
+    'crush':    (C_CRUSH_D, C_CRUSH_L),
 }
 
 
@@ -2310,6 +2313,8 @@ def _init_colors() -> None:
         curses.init_pair(C_ROOM,       141, bg)
         curses.init_pair(C_CLAUDE_D,   173, bg)   # warm tan / Claude brand
         curses.init_pair(C_CLAUDE_L,   215, bg)
+        curses.init_pair(C_CRUSH_D,     93, bg)   # vivid purple
+        curses.init_pair(C_CRUSH_L,    219, bg)   # light magenta
     else:
         curses.init_pair(C_RED,        curses.COLOR_RED, bg)
         curses.init_pair(C_TEAL,       curses.COLOR_CYAN, bg)
@@ -2331,6 +2336,8 @@ def _init_colors() -> None:
         curses.init_pair(C_ROOM,       curses.COLOR_MAGENTA, bg)
         curses.init_pair(C_CLAUDE_D,   curses.COLOR_YELLOW, bg)
         curses.init_pair(C_CLAUDE_L,   curses.COLOR_YELLOW, bg)
+        curses.init_pair(C_CRUSH_D,    curses.COLOR_MAGENTA, bg)
+        curses.init_pair(C_CRUSH_L,    curses.COLOR_MAGENTA, bg)
 
     # SYNKRAKEN wordmark ocean fade (pairs 30..36)
     if curses.COLORS >= 256:

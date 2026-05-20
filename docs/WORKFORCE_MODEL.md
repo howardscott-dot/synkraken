@@ -9,6 +9,8 @@ identity or hidden autonomy.
 ## Core Objects
 
 - agents: durable operational entities backed by configured runtimes
+- runtime registry: discovered local runtime inventory with command,
+  capability, cost tier, adapter type, and supported mode metadata
 - rooms: persistent groups where work is visible and replayable
 - roles: task-scoped responsibilities assigned for coordination
 - tasks: durable work records linked to rooms, agents, and source messages
@@ -43,3 +45,13 @@ provider identity, or a security boundary.
 SynKraken may select, assign, and display roles to coordinate work, but it must
 record enough context for operators to inspect who did what, why a run stopped,
 and what remains blocked or done.
+
+## Runtime Onboarding
+
+`synkraken discover` and `synkraken config --rediscover` onboard workers by
+detecting local runtimes and asking the operator what to merge. Existing
+adapter definitions are preserved by default. Unsupported runtimes can be
+tracked in the registry, but they are not treated as active agents until an
+adapter exists and the operator enables them. Once a leaf adapter is registered
+and configured (e.g. Goose, Hermes, OpenClaw, Claude Code, Crush,
+Google Antigravity), the runtime becomes a supported, active worker.

@@ -31,7 +31,9 @@ Shipped foundation:
 - persistent rooms
 - SQLite history
 - dead letters and live SSE events
-- adapters for Goose, Hermes, OpenClaw, and Claude Code
+- adapters for Goose, Hermes, OpenClaw, Claude Code, Crush, and Google Antigravity
+- runtime discovery and workforce onboarding v0.1 with config merge,
+  registry-only unsupported runtimes, and JSON discovery output
 - operator CLI and TUI
 - portable runtime-communication skill
 
@@ -112,10 +114,12 @@ works.
 7. Goal Mode v0.1: bounded team execution loops for selected rooms, with
    threshold scoring, token budget review, guardrail review, and visible
    transcripts
-8. Decisions v0.4
-9. Handoffs v0.5
-10. Workspace Packs v0.6
-11. External product integrations v0.7
+8. Runtime Discovery hardening: adapter additions for discovered registry-only
+   runtimes, richer local server probes, and non-secret health diagnostics
+9. Decisions v0.4
+10. Handoffs v0.5
+11. Workspace Packs v0.6
+12. External product integrations v0.7
 
 Packs sit above the OSS control plane and below vertical products. They may add
 workflow templates, role presets, memory templates, runtime recommendations,

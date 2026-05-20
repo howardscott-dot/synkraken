@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Crush adapter v0.1: support for running Crush as an active SynKraken worker, including prompt delivery via `crush run --quiet`, isolation boundary, working directory control, discovery integration, runtime diagnostics, and TUI color pair.
+- Google Antigravity adapter v0.1: support for running Google Antigravity as an active SynKraken worker, including prompt delivery, command verification, discovery integration, and runtime diagnostics.
 - Documentation Lock Batch v0.1: category and architecture lock docs for the
   open-source control plane positioning, control-plane doctrine, cost/runtime
   ownership, workforce model, identity/role boundaries, and OSS → Packs →

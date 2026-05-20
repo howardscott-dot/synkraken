@@ -45,11 +45,16 @@ SynKraken is a local message fabric with two operator surfaces:
 └───────────────┬──────────────────────────────────────────────┘
                 │ subprocess per delivery
                 ▼
-      Claude Code / Goose / OpenClaw / Hermes / future agents
+      Claude Code / Goose / OpenClaw / Hermes / Crush / Google Antigravity / future agents
 ```
 
 The daemon remains the source of truth. Client surfaces should render and
 invoke backend concepts; they should not create parallel data models.
+
+Runtime discovery is a config-time control-plane action. It checks local
+executables, common binary directories, safe version output, and generic config
+markers. It does not run agent work, validate subscriptions, inspect secrets,
+or infer provider account state.
 
 ## Architectural decisions
 
@@ -72,6 +77,7 @@ invoke backend concepts; they should not create parallel data models.
 | `fabric.py` | message dispatch, retry loop, room reply recording, events |
 | `router.py` | direct, broadcast, and room target resolution |
 | `storage.py` | SQLite schema and queries |
+| `discovery.py` | local runtime discovery and config merge helpers |
 | `models.py` | durable transport objects |
 | `adapters/*` | leaf integrations for external runtimes |
 
@@ -84,6 +90,14 @@ records carry adapter identity, runtime type, durable presence, last-seen
 metadata, current visible task/room links, and event history. Presence is
 operational state only: it does not store chain-of-thought, memory, decisions,
 or autonomous plans.
+
+### Runtime registry
+
+Runtime discovery records locally detected tools as registry entries with
+`runtime_id`, `command`, `capabilities`, `cost_tier`, `adapter_type`, and
+`supported_modes`. Adapter-supported entries may also become enabled adapters
+in local config. Unsupported discoveries remain disabled registry-only records
+until a leaf adapter exists.
 
 ### Messages
 

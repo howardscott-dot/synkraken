@@ -5,10 +5,16 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Iterable
 
+try:
+    import termios
+except ImportError:  # pragma: no cover - termios is POSIX-only.
+    termios = None
 
-SUPPORTED_ADAPTER_TYPES = {"claude", "goose", "hermes", "openclaw"}
+
+SUPPORTED_ADAPTER_TYPES = {"claude", "crush", "goose", "hermes", "openclaw", "google_antigravity"}
 DEFAULT_SUPPORTED_MODES = ["direct", "broadcast", "room", "discussion", "team", "goal"]
 
 
@@ -108,9 +114,10 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
         runtime_type="crush",
         command_names=("crush",),
         capabilities=("coding", "review"),
-        cost_tier="unknown",
-        adapter_type="unsupported",
-        supported_modes=("direct",),
+        cost_tier="local",
+        adapter_type="crush",
+        supported_modes=tuple(DEFAULT_SUPPORTED_MODES),
+        default_timeout_seconds=90,
     ),
     RuntimeDefinition(
         runtime_id="aider",
@@ -136,7 +143,7 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
         ),
         capabilities=("coding", "review", "files", "shell"),
         cost_tier="premium",
-        adapter_type="unsupported",
+        adapter_type="google_antigravity",
         supported_modes=("direct",),
         safe_probe_args=(("--version",), ("version",), ("--help",)),
         verified_command_names=("agy",),
@@ -194,14 +201,7 @@ def _format_home_template(template: str, home: Path) -> str:
 
 def _safe_version(command_path: str, args: tuple[str, ...], timeout_seconds: float = 2.0) -> str:
     try:
-        result = subprocess.run(
-            [command_path, *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        result = _run_probe_command(command_path, args, timeout_seconds)
     except Exception:  # noqa: BLE001
         return ""
     if result.returncode != 0:
@@ -227,14 +227,7 @@ def _safe_probe_outputs(
     outputs: list[str] = []
     for args in probe_args:
         try:
-            result = subprocess.run(
-                [command_path, *args],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            result = _run_probe_command(command_path, args, timeout_seconds)
         except Exception:  # noqa: BLE001
             continue
         output = (result.stdout or "").strip()
@@ -280,6 +273,52 @@ def _marker_exists(markers: Iterable[str], home: Path) -> bool:
         if Path(_format_home_template(marker, home)).exists():
             return True
     return False
+
+
+def _save_terminal_attrs() -> list[tuple[int, list]]:
+    if termios is None:
+        return []
+    saved: list[tuple[int, list]] = []
+    seen: set[int] = set()
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            fd = stream.fileno()
+        except Exception:  # noqa: BLE001
+            continue
+        if fd in seen or not os.isatty(fd):
+            continue
+        try:
+            saved.append((fd, termios.tcgetattr(fd)))
+            seen.add(fd)
+        except termios.error:
+            continue
+    return saved
+
+
+def _restore_terminal_attrs(saved: list[tuple[int, list]]) -> None:
+    if termios is None:
+        return
+    for fd, attrs in saved:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+        except termios.error:
+            continue
+
+
+def _run_probe_command(command_path: str, args: tuple[str, ...], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    saved = _save_terminal_attrs()
+    try:
+        return subprocess.run(
+            [command_path, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    finally:
+        _restore_terminal_attrs(saved)
 
 
 def discover_local_runtimes(
@@ -389,6 +428,8 @@ def runtime_to_adapter_config(runtime: dict) -> dict:
         config["message_prefix"] = "Keep replies focused and structured."
     elif adapter_type == "goose":
         config["system"] = "You are replying through synkraken. Keep replies concise and structured."
+    elif adapter_type == "crush":
+        config["message_prefix"] = "Keep replies focused and concise."
     elif adapter_type == "hermes":
         config["system_prefix"] = "You are replying through synkraken. Keep replies concise and structured."
     return config
@@ -413,24 +454,31 @@ def runtime_to_registry_config(runtime: dict, *, enabled: bool | None = None) ->
 
 
 def parse_runtime_selection(runtimes: list[dict], raw: str, *, supported_only: bool = False) -> list[dict]:
-    if not raw or raw.lower() == "none":
-        return []
+    value = raw.strip().lower()
     candidates = [rt for rt in runtimes if not supported_only or rt.get("adapter_supported")]
-    if raw.lower() == "all":
+    if not value or value == "all":
         return candidates
-    selected_ids = {item.strip().lower() for item in raw.split(",") if item.strip()}
-    selected_indexes = {int(item) for item in selected_ids if item.isdigit()}
+    if value == "none":
+        return []
+
+    parts = [item.strip() for item in raw.split(",")]
+    if any(not item for item in parts):
+        raise ValueError('use comma-separated numbers, "all", or "none"')
+
     selected: list[dict] = []
-    for idx, runtime in enumerate(runtimes, start=1):
-        names = {
-            str(runtime.get("id") or "").lower(),
-            str(runtime.get("runtime_id") or "").lower(),
-            str(runtime.get("type") or "").lower(),
-            str(runtime.get("label") or "").lower(),
-        }
-        if idx in selected_indexes or selected_ids.intersection(names):
-            if not supported_only or runtime.get("adapter_supported"):
-                selected.append(runtime)
+    seen_indexes: set[int] = set()
+    for item in parts:
+        if not item.isdigit():
+            raise ValueError(f'"{item}" is not a number')
+        index = int(item)
+        if index < 1 or index > len(runtimes):
+            raise ValueError(f'{index} is outside the range 1-{len(runtimes)}')
+        if index in seen_indexes:
+            continue
+        seen_indexes.add(index)
+        runtime = runtimes[index - 1]
+        if not supported_only or runtime.get("adapter_supported"):
+            selected.append(runtime)
     return selected
 
 
