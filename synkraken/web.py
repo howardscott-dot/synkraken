@@ -112,6 +112,10 @@ INDEX_HTML = """<!doctype html>
         <h2>Decisions</h2>
         <div id="decisions-list" class="stack"></div>
       </section>
+      <section class="handoffs-box">
+        <h2>Handoffs</h2>
+        <div id="handoffs-list" class="stack"></div>
+      </section>
       <form id="task-form" class="compact task-form">
         <label for="task-title">Create task</label>
         <input id="task-title" placeholder="Follow up on auth issue">
@@ -398,6 +402,7 @@ const state = {
   teamRuns: [],
   goalRuns: [],
   decisions: [],
+  handoffs: [],
   flight: null,
   memory: null,
   currentRoom: null,
@@ -667,6 +672,7 @@ async function selectRoom(name) {
   await refreshTeamRuns();
   await refreshGoalRuns();
   await refreshDecisions();
+  await refreshHandoffs();
   await refreshTasks();
 }
 
@@ -689,6 +695,7 @@ async function selectAgent(adapterId) {
   await refreshTeamRuns();
   await refreshGoalRuns();
   await refreshDecisions();
+  await refreshHandoffs();
   await refreshTasks();
 }
 
@@ -943,6 +950,20 @@ async function refreshDecisions() {
       <span class="meta">${esc((decision.summary || "").slice(0, 110))}</span>
     </article>
   `).join("") || `<div class="meta">No decisions${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+}
+
+async function refreshHandoffs() {
+  const suffix = state.currentRoom ? `?room=${encodeURIComponent(state.currentRoom)}` : "";
+  const data = await api(`/v1/handoffs${suffix}`);
+  state.handoffs = data.handoffs || [];
+  $("handoffs-list").innerHTML = state.handoffs.map((handoff) => `
+    <article class="item handoff status-${esc(handoff.status)}">
+      <strong>${esc(handoff.status)}</strong>
+      <span class="meta">${esc(handoff.from_agent || "unknown")} → ${esc(handoff.to_agent || "unknown")}</span>
+      <span class="meta">${esc((handoff.summary || "").slice(0, 110))}</span>
+      <span class="meta">next: ${esc((handoff.recommended_next_step || "none").slice(0, 110))}</span>
+    </article>
+  `).join("") || `<div class="meta">No handoffs${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
 }
 
 async function toggleGoalRunDetails(goalRunId) {
@@ -1308,7 +1329,7 @@ $("goal-form").addEventListener("submit", async (event) => {
 
 async function bootstrap() {
   clearMemoryForm();
-  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions()]);
+  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions(), refreshHandoffs()]);
   if (state.rooms[0]) await selectRoom(state.rooms[0].name);
   const events = new EventSource("/api/v1/events/stream");
   events.onmessage = async (event) => {
@@ -1337,6 +1358,7 @@ async function bootstrap() {
       if (payload.event.startsWith("team.")) await refreshTeamRuns();
       if (payload.event.startsWith("goal.")) await refreshGoalRuns();
       if (payload.event.startsWith("decision.")) await refreshDecisions();
+      if (payload.event.startsWith("handoff.")) await refreshHandoffs();
       if (payload.event.startsWith("goal.") || payload.event.startsWith("team.") || payload.event.startsWith("memory.") || payload.event.startsWith("room.") || payload.event === "dead-letter.recorded") await refreshFlight();
       if (payload.event === "room.memory.updated" && data.room === state.currentRoom) await refreshMemory();
       if (payload.event.startsWith("typing.") || payload.event === "agent.presence") await refreshAgents();

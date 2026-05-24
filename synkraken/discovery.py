@@ -28,6 +28,9 @@ class RuntimeDefinition:
     cost_tier: str
     adapter_type: str
     supported_modes: tuple[str, ...]
+    usage_risk: str = "medium"
+    preferred_roles: tuple[str, ...] = ()
+    avoid_roles: tuple[str, ...] = ()
     default_timeout_seconds: int = 120
     safe_version_args: tuple[str, ...] = ("--version",)
     safe_probe_args: tuple[tuple[str, ...], ...] = ()
@@ -125,9 +128,10 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
         runtime_type="aider",
         command_names=("aider",),
         capabilities=("coding", "files"),
-        cost_tier="variable",
+        cost_tier="medium",
         adapter_type="unsupported",
         supported_modes=("direct",),
+        usage_risk="high",
     ),
     RuntimeDefinition(
         runtime_id="google-antigravity",
@@ -436,6 +440,9 @@ def discover_local_runtimes(
             "command_path": command[0],
             "capabilities": list(definition.capabilities),
             "cost_tier": definition.cost_tier,
+            "usage_risk": definition.usage_risk,
+            "preferred_roles": list(definition.preferred_roles),
+            "avoid_roles": list(definition.avoid_roles),
             "adapter_type": definition.adapter_type,
             "adapter_supported": adapter_supported,
             "supported_modes": list(definition.supported_modes),
@@ -470,6 +477,9 @@ def runtime_to_adapter_config(runtime: dict) -> dict:
         "timeout_seconds": int(runtime.get("timeout_seconds") or 120),
         "capabilities": list(runtime.get("capabilities") or []),
         "cost_tier": runtime.get("cost_tier") or "medium",
+        "usage_risk": runtime.get("usage_risk") or "medium",
+        "preferred_roles": list(runtime.get("preferred_roles") or []),
+        "avoid_roles": list(runtime.get("avoid_roles") or []),
         "supported_modes": list(runtime.get("supported_modes") or []),
     }
     if runtime.get("version"):
@@ -505,6 +515,9 @@ def runtime_to_registry_config(runtime: dict, *, enabled: bool | None = None) ->
         "command": list(runtime.get("command") or []),
         "capabilities": list(runtime.get("capabilities") or []),
         "cost_tier": runtime.get("cost_tier") or "medium",
+        "usage_risk": runtime.get("usage_risk") or "medium",
+        "preferred_roles": list(runtime.get("preferred_roles") or []),
+        "avoid_roles": list(runtime.get("avoid_roles") or []),
         "adapter_type": adapter_type,
         "supported_modes": list(runtime.get("supported_modes") or []),
         "enabled": is_enabled,

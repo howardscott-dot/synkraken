@@ -183,6 +183,19 @@ confidence when known, and JSON links to related runtime ids and message ids.
 Decision Records are not voting, handoffs, policy enforcement, or a flight
 recorder. They preserve what was decided and why.
 
+### Handoffs
+
+Durable records of workforce transfers. A handoff stores pending, accepted,
+rejected, or completed status; optional room/task/goal links; from-agent and
+to-agent fields; summary, open questions, risks, recommended next step,
+confidence when known, and JSON links to related message and decision ids.
+`handoff_events` records creation and status transitions.
+
+Handoffs preserve what work was handed off, who handed it off, who received it,
+what context and risks were attached, and whether the receiving worker accepted,
+rejected, or completed the transfer. They are not approval chains, voting,
+policy enforcement, scheduling, or autonomous workflow automation.
+
 ## Entity relationships
 
 ```text
@@ -211,6 +224,12 @@ decision ─────────── decision_events
     ├─────────────── optional task
     ├─────────────── optional goal
     └─────────────── linked message/runtime ids as JSON
+
+handoff ──────────── handoff_events
+    ├─────────────── optional room
+    ├─────────────── optional task
+    ├─────────────── optional goal
+    └─────────────── linked message/decision ids as JSON
 
 conversation_id groups related messages across direct, broadcast, or room flow
 ```

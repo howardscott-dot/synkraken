@@ -79,6 +79,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what was decided, who proposed it, who approved or rejected it, why, and what
   messages or runtimes it relates to; they are not voting, handoffs, a policy
   engine, or flight recorder.
+- Handoffs v0.1: durable `handoffs` and `handoff_events` tables, create/list/
+  latest/inspect/accept/reject/complete APIs, TUI `/handoffs` and `/handoff`
+  commands, a read-only Web Command Deck handoffs panel, and smoke coverage.
+  Handoffs record what work was handed off, who handed it off, who received it,
+  what context, risks, and next steps were attached, and whether the receiving
+  worker accepted, rejected, or completed it.
 - Configuration Doctrine: shipped defaults, docs, tests, prompts, and examples
   stay generic; installation-specific identity and project context belong in
   local config, workspace config, room memory, shared memory, skills, runtime

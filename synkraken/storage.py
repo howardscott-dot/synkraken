@@ -363,25 +363,32 @@ CREATE TABLE IF NOT EXISTS decision_events (
 );
 
 CREATE TABLE IF NOT EXISTS handoffs (
-    handoff_id TEXT PRIMARY KEY,
-    from_agent TEXT NOT NULL,
-    to_agent TEXT NOT NULL,
-    task_id TEXT,
-    room_name TEXT,
-    summary TEXT NOT NULL,
-    open_questions_json TEXT NOT NULL DEFAULT '[]',
-    risks_json TEXT NOT NULL DEFAULT '[]',
-    recommended_next_step TEXT NOT NULL DEFAULT '',
-    confidence INTEGER DEFAULT 0,
-    status TEXT NOT NULL,
+    id TEXT PRIMARY KEY,
+    handoff_id TEXT UNIQUE,
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    room_id TEXT,
+    room_name TEXT,
+    task_id TEXT,
+    goal_id TEXT,
+    from_agent TEXT,
+    to_agent TEXT,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    open_questions TEXT NOT NULL DEFAULT '',
+    risks TEXT NOT NULL DEFAULT '',
+    recommended_next_step TEXT NOT NULL DEFAULT '',
+    confidence INTEGER NULL,
+    linked_message_ids_json TEXT NOT NULL DEFAULT '[]',
+    linked_decision_ids_json TEXT NOT NULL DEFAULT '[]',
     accepted_at TEXT,
     rejected_at TEXT,
     completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS handoff_events (
-    event_id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY,
+    event_id TEXT UNIQUE,
     handoff_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     actor TEXT,
@@ -551,6 +558,7 @@ class Storage:
             """
         )
         self._migrate_decision_schema()
+        self._migrate_handoff_schema()
 
     def _migrate_decision_schema(self) -> None:
         columns = {
@@ -583,6 +591,52 @@ class Storage:
         self._conn.execute("UPDATE decisions SET reasoning = reason WHERE reasoning = '' AND reason != ''")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_room_id ON decisions(room_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_created_at ON decisions(created_at DESC)")
+
+    def _migrate_handoff_schema(self) -> None:
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(handoffs)").fetchall()
+        }
+        additions = {
+            "id": "TEXT",
+            "handoff_id": "TEXT",
+            "updated_at": "TEXT",
+            "room_id": "TEXT",
+            "room_name": "TEXT",
+            "task_id": "TEXT",
+            "goal_id": "TEXT",
+            "from_agent": "TEXT",
+            "to_agent": "TEXT",
+            "open_questions": "TEXT NOT NULL DEFAULT ''",
+            "risks": "TEXT NOT NULL DEFAULT ''",
+            "linked_message_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "linked_decision_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "accepted_at": "TEXT",
+            "rejected_at": "TEXT",
+            "completed_at": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE handoffs ADD COLUMN {column} {definition}")
+        self._conn.execute("UPDATE handoffs SET id = handoff_id WHERE (id IS NULL OR id = '') AND handoff_id IS NOT NULL")
+        self._conn.execute("UPDATE handoffs SET handoff_id = id WHERE (handoff_id IS NULL OR handoff_id = '') AND id IS NOT NULL")
+        self._conn.execute("UPDATE handoffs SET updated_at = created_at WHERE (updated_at IS NULL OR updated_at = '') AND created_at IS NOT NULL")
+        self._conn.execute("UPDATE handoffs SET room_id = room_name WHERE (room_id IS NULL OR room_id = '') AND room_name IS NOT NULL")
+        self._conn.execute("UPDATE handoffs SET room_name = room_id WHERE (room_name IS NULL OR room_name = '') AND room_id IS NOT NULL")
+        if "open_questions_json" in columns:
+            self._conn.execute("UPDATE handoffs SET open_questions = open_questions_json WHERE open_questions = '' AND open_questions_json != ''")
+        if "risks_json" in columns:
+            self._conn.execute("UPDATE handoffs SET risks = risks_json WHERE risks = '' AND risks_json != ''")
+        event_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(handoff_events)").fetchall()
+        }
+        if "id" not in event_columns:
+            self._conn.execute("ALTER TABLE handoff_events ADD COLUMN id TEXT")
+        if "event_id" not in event_columns:
+            self._conn.execute("ALTER TABLE handoff_events ADD COLUMN event_id TEXT")
+        self._conn.execute("UPDATE handoff_events SET id = event_id WHERE (id IS NULL OR id = '') AND event_id IS NOT NULL")
+        self._conn.execute("UPDATE handoff_events SET event_id = id WHERE (event_id IS NULL OR event_id = '') AND id IS NOT NULL")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_room_id ON handoffs(room_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_created_at ON handoffs(created_at DESC)")
 
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
@@ -2237,7 +2291,7 @@ class Storage:
         self,
         *,
         title: str,
-        summary: str,
+        summary: str = "",
         linked_runtime_ids: list[str] | None = None,
         linked_message_ids: list[str] | None = None,
         decision_id: str | None = None,
@@ -2473,50 +2527,84 @@ class Storage:
 
     def _handoff_from_row(self, row: sqlite3.Row) -> dict:
         data = dict(row)
-        data["open_questions"] = json.loads(data.pop("open_questions_json") or "[]")
-        data["risks"] = json.loads(data.pop("risks_json") or "[]")
+        handoff_id = data.get("id") or data.get("handoff_id")
+        room_id = data.get("room_id") or data.get("room_name")
+        data["id"] = handoff_id
+        data["handoff_id"] = handoff_id
+        data["room_id"] = room_id
+        data["room_name"] = room_id
+        open_questions_raw = data.get("open_questions") or data.pop("open_questions_json", "") or "[]"
+        risks_raw = data.get("risks") or data.pop("risks_json", "") or "[]"
+        data["open_questions"] = json.loads(open_questions_raw) if open_questions_raw.startswith("[") else open_questions_raw
+        data["risks"] = json.loads(risks_raw) if risks_raw.startswith("[") else risks_raw
+        data["linked_message_ids"] = json.loads(data.pop("linked_message_ids_json", "[]") or "[]")
+        data["linked_decision_ids"] = json.loads(data.pop("linked_decision_ids_json", "[]") or "[]")
         return data
 
     def create_handoff(
         self,
         *,
-        handoff_id: str,
-        from_agent: str,
-        to_agent: str,
-        task_id: str | None,
-        room_name: str | None,
+        handoff_id: str | None = None,
+        id: str | None = None,
+        from_agent: str | None = None,
+        to_agent: str | None = None,
+        task_id: str | None = None,
+        room_id: str | None = None,
+        room_name: str | None = None,
+        goal_id: str | None = None,
         summary: str,
-        open_questions: list[str],
-        risks: list[str],
-        recommended_next_step: str,
-        confidence: int,
-        created_at: str,
+        open_questions: list[str] | str | None = None,
+        risks: list[str] | str | None = None,
+        recommended_next_step: str = "",
+        confidence: int | None = None,
+        linked_message_ids: list[str] | None = None,
+        linked_decision_ids: list[str] | None = None,
+        created_at: str | None = None,
     ) -> dict:
+        record_id = id or handoff_id or str(uuid.uuid4())
+        now = created_at or utc_now_iso()
+        room = room_id or room_name
+        questions_text = (
+            open_questions
+            if isinstance(open_questions, str)
+            else json.dumps(open_questions or [], ensure_ascii=False)
+        )
+        risks_text = risks if isinstance(risks, str) else json.dumps(risks or [], ensure_ascii=False)
+        if confidence is not None:
+            confidence = max(0, min(100, int(confidence)))
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO handoffs (
-                    handoff_id, from_agent, to_agent, task_id, room_name, summary,
-                    open_questions_json, risks_json, recommended_next_step, confidence,
-                    status, created_at, accepted_at, rejected_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL)
+                    id, handoff_id, created_at, updated_at, room_id, room_name, task_id,
+                    goal_id, from_agent, to_agent, status, summary, open_questions, risks,
+                    recommended_next_step, confidence, linked_message_ids_json,
+                    linked_decision_ids_json, accepted_at, rejected_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                 """,
                 (
-                    handoff_id, from_agent, to_agent, task_id, room_name, summary,
-                    json.dumps(open_questions, ensure_ascii=False),
-                    json.dumps(risks, ensure_ascii=False),
-                    recommended_next_step, confidence, created_at,
+                    record_id, record_id, now, now, room, room, task_id, goal_id,
+                    from_agent, to_agent, summary, questions_text, risks_text,
+                    recommended_next_step, confidence,
+                    json.dumps(linked_message_ids or [], ensure_ascii=False),
+                    json.dumps(linked_decision_ids or [], ensure_ascii=False),
                 ),
             )
-        return self.get_handoff(handoff_id)
+        handoff = self.get_handoff(record_id)
+        assert handoff is not None
+        return handoff
 
     def get_handoff(self, handoff_id: str) -> dict | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM handoffs WHERE id = ? OR handoff_id = ?",
+                (handoff_id, handoff_id),
+            ).fetchone()
         return self._handoff_from_row(row) if row else None
 
     def list_handoffs(
         self,
+        room_id: str | None = None,
         room_name: str | None = None,
         status: str | None = None,
         agent: str | None = None,
@@ -2524,9 +2612,10 @@ class Storage:
     ) -> list[dict]:
         clauses: list[str] = []
         params: list[object] = []
-        if room_name is not None:
-            clauses.append("room_name = ?")
-            params.append(room_name)
+        room = room_id or room_name
+        if room is not None:
+            clauses.append("(room_id = ? OR room_name = ?)")
+            params.extend([room, room])
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
@@ -2546,29 +2635,83 @@ class Storage:
         if not fields:
             return self.get_handoff(handoff_id)
         allowed = {
-            "to_agent", "task_id", "room_name", "summary", "open_questions",
-            "risks", "recommended_next_step", "confidence", "status",
-            "accepted_at", "rejected_at", "completed_at",
+            "from_agent", "to_agent", "task_id", "room_id", "room_name", "goal_id",
+            "summary", "open_questions", "risks", "recommended_next_step", "confidence",
+            "status", "linked_message_ids", "linked_decision_ids", "accepted_at",
+            "rejected_at", "completed_at",
         }
         clean: dict[str, object] = {}
         for key, value in fields.items():
             if key not in allowed:
                 continue
             if key in ("open_questions", "risks"):
+                clean[key] = value if isinstance(value, str) else json.dumps(value or [], ensure_ascii=False)
+            elif key in ("linked_message_ids", "linked_decision_ids"):
                 clean[f"{key}_json"] = json.dumps(value or [], ensure_ascii=False)
+            elif key in {"room_id", "room_name"}:
+                clean["room_id"] = value
+                clean["room_name"] = value
             else:
                 clean[key] = value
         if not clean:
             return self.get_handoff(handoff_id)
+        clean["updated_at"] = utc_now_iso()
         assignments = ", ".join(f"{key} = ?" for key in clean)
         with self._lock, self._conn:
             cur = self._conn.execute(
-                f"UPDATE handoffs SET {assignments} WHERE handoff_id = ?",
-                [*clean.values(), handoff_id],
+                f"UPDATE handoffs SET {assignments} WHERE id = ? OR handoff_id = ?",
+                [*clean.values(), handoff_id, handoff_id],
             )
             if cur.rowcount == 0:
                 return None
         return self.get_handoff(handoff_id)
+
+    def latest_handoff(self, room_id: str | None = None, status: str | None = None) -> dict | None:
+        handoffs = self.list_handoffs(room_id=room_id, status=status, limit=1)
+        return handoffs[0] if handoffs else None
+
+    def accept_handoff(self, handoff_id: str, actor: str, created_at: str | None = None) -> dict | None:
+        handoff = self.get_handoff(handoff_id)
+        if handoff is None:
+            return None
+        now = created_at or utc_now_iso()
+        updated = self.update_handoff(handoff_id, {"status": "accepted", "accepted_at": now})
+        self.append_handoff_event(
+            handoff_id, "accepted", actor,
+            {"old_status": handoff.get("status"), "new_status": "accepted"}, now,
+        )
+        return updated
+
+    def reject_handoff(
+        self,
+        handoff_id: str,
+        actor: str,
+        *,
+        reason: str | None = None,
+        created_at: str | None = None,
+    ) -> dict | None:
+        handoff = self.get_handoff(handoff_id)
+        if handoff is None:
+            return None
+        now = created_at or utc_now_iso()
+        updated = self.update_handoff(handoff_id, {"status": "rejected", "rejected_at": now})
+        self.append_handoff_event(
+            handoff_id, "rejected", actor,
+            {"old_status": handoff.get("status"), "new_status": "rejected", "reason": reason or ""}, now,
+        )
+        return updated
+
+    def complete_handoff(self, handoff_id: str, actor: str, created_at: str | None = None) -> dict | None:
+        handoff = self.get_handoff(handoff_id)
+        if handoff is None:
+            return None
+        now = created_at or utc_now_iso()
+        updated = self.update_handoff(handoff_id, {"status": "completed", "completed_at": now})
+        self.append_handoff_event(
+            handoff_id, "completed", actor,
+            {"old_status": handoff.get("status"), "new_status": "completed"}, now,
+        )
+        return updated
 
     def record_handoff_event(
         self,
@@ -2578,19 +2721,33 @@ class Storage:
         details: str | None,
         created_at: str,
     ) -> None:
+        self.append_handoff_event(handoff_id, event_type, actor, details, created_at)
+
+    def append_handoff_event(
+        self,
+        handoff_id: str,
+        event_type: str,
+        actor: str | None = None,
+        details: dict | str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        handoff = self.get_handoff(handoff_id)
+        if handoff is None:
+            return
+        event_id = str(uuid.uuid4())
+        detail_text = json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
         with self._lock, self._conn:
-            if self._conn.execute("SELECT 1 FROM handoffs WHERE handoff_id = ?", (handoff_id,)).fetchone() is None:
-                return
             self._conn.execute(
                 """
-                INSERT INTO handoff_events (event_id, handoff_id, event_type, actor, details, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO handoff_events (id, event_id, handoff_id, event_type, actor, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (str(uuid.uuid4()), handoff_id, event_type, actor, details, created_at),
+                (event_id, event_id, handoff["id"], event_type, actor or "system", detail_text, created_at or utc_now_iso()),
             )
 
     def list_handoff_events(self, handoff_id: str) -> list[dict] | None:
-        if self.get_handoff(handoff_id) is None:
+        handoff = self.get_handoff(handoff_id)
+        if handoff is None:
             return None
         with self._lock:
             rows = self._conn.execute(
@@ -2600,6 +2757,6 @@ class Storage:
                 WHERE handoff_id = ?
                 ORDER BY created_at ASC, rowid ASC
                 """,
-                (handoff_id,),
+                (handoff["id"],),
             ).fetchall()
         return [dict(row) for row in rows]

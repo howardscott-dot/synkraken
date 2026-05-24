@@ -27,6 +27,8 @@ Provide a browser-based local operator surface that:
   Guardrail Agent, status, details, and cancellation for active runs
 - shows recent Decision Records with title, status, proposer, approval or
   rejection actor, and summary
+- shows recent Handoffs with status, from-agent, to-agent, summary, and
+  recommended next step
 
 ## v0.2 goals
 
@@ -104,6 +106,7 @@ The human operator is in control. The default interaction is:
 - inspect one Goal Run's recent events and final report summary
 - cancel active Goal Runs
 - list recent Decision Records and show status
+- list recent Handoffs and show status, sender, receiver, summary, and next step
 - list durable tasks
 - create a task
 - optionally assign it to an agent
@@ -144,6 +147,7 @@ The command deck must use the existing daemon model:
 | team governance | `GET /v1/team-runs`, `GET /v1/team-runs/{id}`, `GET /v1/team-runs/{id}/events`, `POST /v1/team-runs/{id}/approve`, `POST /v1/team-runs/{id}/reject` |
 | goal mode | `POST /v1/goal-runs`, `GET /v1/goal-runs`, `GET /v1/goal-runs/{id}`, `GET /v1/goal-runs/{id}/events`, `POST /v1/goal-runs/{id}/cancel` |
 | decisions | `GET /v1/decisions`, `GET /v1/decision/{id}`, `GET /v1/decision/latest`, `POST /v1/decision/propose`, `POST /v1/decision/approve`, `POST /v1/decision/reject` |
+| handoffs | `GET /v1/handoffs`, `GET /v1/handoff/{id}`, `GET /v1/handoff/latest`, `POST /v1/handoff`, `POST /v1/handoff/accept`, `POST /v1/handoff/reject`, `POST /v1/handoff/complete` |
 | live updates | `GET /v1/events/stream` |
 | tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
 | task comments | `POST /v1/tasks/{id}/comment` |
@@ -221,6 +225,13 @@ it should not invent alternate semantics.
   rejected it, why, and what messages or runtimes it relates to
 - Decision Records are not voting, handoffs, policy enforcement, or workflow
   automation
+- Handoffs are daemon-owned durable records through `handoffs` and
+  `handoff_events`
+- Handoffs show what work was handed off, who handed it off, who received it,
+  what context, risks, and next steps were attached, and whether the receiving
+  worker accepted, rejected, or completed it
+- Handoffs are not approval chains, voting, policy enforcement, scheduling, or
+  autonomous workflow automation
 - `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
   including failure summary and partial transcript. `/continue-team-run <id>` is
   future work.

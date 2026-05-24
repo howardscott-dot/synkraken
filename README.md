@@ -77,6 +77,10 @@ Synkraken gives you:
 - **Decision Records v0.1** for durable workforce decisions: what was decided,
   who proposed it, who approved or rejected it, why, and what messages or
   runtimes it relates to.
+- **Handoffs v0.1** for durable workforce transfers: what work was handed off,
+  who handed it off, who received it, what context, risks, and next steps were
+  attached, and whether the receiving worker accepted, rejected, or completed
+  it.
 - **A portable bridge skill** that agents read to learn how to use the bridge
   back (so any participating agent can reach the others, not just you)
 
@@ -293,6 +297,8 @@ Useful local TUI commands:
 /goals     list recent goal runs
 /goal-run  inspect one goal run
 /cancel-goal cancel an active goal run
+/handoffs  list recent handoffs
+/handoff   inspect, create, accept, reject, or complete a handoff
 /tail      jump the current transcript back to live
 /transcript show transcript mode: team runs, room history, and filters
 /save-transcript export the current room/chat transcript under exports/
@@ -540,6 +546,16 @@ or rejected it, the rationale, confidence when known, and optional links to
 rooms, tasks, goals, runtimes, and messages. Operators can inspect recent
 decisions with `/decisions`, view `/decision latest` or `/decision <id>`, and
 approve or reject proposed decisions with `/approve <id>` and `/reject <id>`.
+
+Handoffs are durable workforce transfers, not workflow automation or approval
+chains. A handoff records what work was handed off, who handed it off, who
+received it, what context, risks, open questions, and next steps were attached,
+and whether the receiving worker accepted, rejected, or completed it. Handoffs
+can link to rooms, tasks, goals, messages, and decisions. Operators can inspect
+recent handoffs with `/handoffs`, view `/handoff latest` or `/handoff <id>`,
+create a minimal handoff with `/handoff create from=<agent> to=<agent> summary="..." next="..."`,
+and update status with `/handoff accept <id>`, `/handoff reject <id>`, or
+`/handoff complete <id>`.
 
 POST `/v1/team-tasks` body:
 

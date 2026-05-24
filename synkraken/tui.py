@@ -1159,6 +1159,11 @@ def _view_help(stdscr, top, h, w):
         ('  /decisions                      recent decision records', None, 0),
         ('  /decision latest                inspect latest decision', None, 0),
         ('  /decision <id>                  inspect one decision', None, 0),
+        ('  /handoffs                       recent handoffs', None, 0),
+        ('  /handoff latest                 inspect latest handoff', None, 0),
+        ('  /handoff <id>                   inspect one handoff', None, 0),
+        ('  /handoff create from=<agent> to=<agent> summary="..." next="..."', None, 0),
+        ('  /handoff accept|reject|complete <id>', None, 0),
         ('  /team-runs                      recent team runs', None, 0),
         ('  /team-run <id>                  inspect one team run', None, 0),
         ('  /approve <id>                   approve a decision or pending team run', None, 0),
@@ -1599,49 +1604,76 @@ def _handoff_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[
         return ('handoffs', [
             f"[{h.get('status'):10}] {h.get('created_at')[:10]}  "
             f"{h.get('from_agent')} -> {h.get('to_agent')}: "
-            f"{h.get('summary', '')[:w-55]}"
+            f"{h.get('summary', '')[:80]}"
             for h in handoffs
         ])
+    if cmd == '/handoff latest':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        try:
+            h = _get_json(f'{base}/v1/handoff/latest{suffix}')
+        except Exception:
+            return ('handoff latest', ['(no handoffs)'])
+        return ('handoff latest', _format_handoff_lines(h))
     if cmd.startswith('/handoff '):
         parts = cmd.split(' ', 2)
         action = parts[1] if len(parts) > 1 else ''
         handoff_id = parts[2].strip() if len(parts) > 2 else ''
         if action == 'create':
-            return ('handoff', ['use POST /v1/handoff to create a handoff'])
+            try:
+                payload = _parse_handoff_create_args(handoff_id, state.get('current_room'))
+                result = _post_json(f'{base}/v1/handoff', payload)
+            except Exception as exc:
+                return ('handoff create', [
+                    'usage: /handoff create from=<agent> to=<agent> summary="..." next="..."',
+                    f'error: {exc}',
+                ])
+            return ('handoff create', _format_handoff_lines(result.get('handoff') or {}))
         if action in ('accept', 'reject', 'complete'):
             if not handoff_id:
                 return ('handoff', [f'usage: /handoff {action} <id>'])
-            result = _post_json(f'{base}/v1/handoff/{handoff_id}/{action}', {'actor': 'synkraken-tui'})
+            result = _post_json(f'{base}/v1/handoff/{action}', {'id': handoff_id, 'actor': 'synkraken-tui'})
             h = result.get('handoff', {})
-            return ('handoff', [f"{h.get('handoff_id')}  status={h.get('status')}"])
+            return ('handoff', _format_handoff_lines(h))
         if handoff_id:
             try:
-                h = _get_json(f'{base}/v1/handoffs/{handoff_id}')
+                h = _get_json(f'{base}/v1/handoff/{handoff_id}')
             except Exception:
                 return ('handoff', [f'could not load handoff: {handoff_id}'])
-            lines = [
-                f"handoff_id      {h.get('handoff_id')}",
-                f"status          {h.get('status')}",
-                f"from_agent      {h.get('from_agent')}",
-                f"to_agent        {h.get('to_agent')}",
-                f"room            {h.get('room_name') or '-'}",
-                f"task            {h.get('task_id') or '-'}",
-                f"confidence      {h.get('confidence')}",
-                f"next_step       {h.get('recommended_next_step')}",
-                '',
-                f"summary:        {h.get('summary')}",
-                f"open_questions: {', '.join(h.get('open_questions') or [])}",
-                f"risks:          {', '.join(h.get('risks') or [])}",
-                '',
-                "Events:",
-            ]
-            for ev in h.get('events', []):
-                lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor')}")
-            return ('handoff', lines)
-        return ('handoff', ['usage: /handoff [create|accept|reject|complete|<id>]'])
+            return ('handoff', _format_handoff_lines(h))
+        return ('handoff', ['usage: /handoff latest | /handoff <id> | /handoff create from=<agent> to=<agent> summary="..." next="..."'])
     if cmd == '/handoff':
-        return ('handoff', ['usage: /handoff [create|accept|reject|complete|<id>]'])
+        return ('handoff', ['usage: /handoff latest | /handoff <id> | /handoff create from=<agent> to=<agent> summary="..." next="..."'])
     return None
+
+
+def _format_handoff_lines(h: dict) -> list[str]:
+    questions = h.get('open_questions') or []
+    risks = h.get('risks') or []
+    if isinstance(questions, str):
+        questions = [questions] if questions else []
+    if isinstance(risks, str):
+        risks = [risks] if risks else []
+    lines = [
+        f"handoff        {h.get('id') or h.get('handoff_id')}",
+        f"status         {h.get('status')}",
+        f"from_agent     {h.get('from_agent') or '-'}",
+        f"to_agent       {h.get('to_agent') or '-'}",
+        f"room           {h.get('room_id') or h.get('room_name') or '-'}",
+        f"task           {h.get('task_id') or '-'}",
+        f"goal           {h.get('goal_id') or '-'}",
+        f"confidence     {h.get('confidence') if h.get('confidence') is not None else '-'}",
+        f"next_step      {h.get('recommended_next_step') or '-'}",
+        '',
+        f"summary        {str(h.get('summary') or '')[:180]}",
+        f"open_questions {', '.join(questions) or '-'}",
+        f"risks          {', '.join(risks) or '-'}",
+    ]
+    events = h.get('events') or []
+    if events:
+        lines.extend(['', 'events'])
+        for ev in events[-12:]:
+            lines.append(f"  {str(ev.get('created_at') or '')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or '-'}")
+    return lines
 
 
 def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
@@ -2192,6 +2224,51 @@ def _handle_goal_run(base: str, params: dict[str, Any]) -> dict:
         'max_rounds': params['max_rounds'],
         'mode': params.get('mode', 'balanced'),
     })
+
+
+def _parse_handoff_create_args(rest: str, current_room: str | None) -> dict[str, Any]:
+    try:
+        parts = shlex.split(rest)
+    except ValueError as exc:
+        raise ValueError(f'invalid /handoff create syntax: {exc}') from None
+    payload: dict[str, Any] = {'actor': 'synkraken-tui'}
+    body_parts: list[str] = []
+    key_map = {
+        'from': 'from_agent',
+        'to': 'to_agent',
+        'summary': 'summary',
+        'next': 'recommended_next_step',
+        'room': 'room_id',
+        'task': 'task_id',
+        'goal': 'goal_id',
+        'confidence': 'confidence',
+        'questions': 'open_questions',
+        'risks': 'risks',
+    }
+    for part in parts:
+        if '=' not in part:
+            body_parts.append(part)
+            continue
+        key, value = part.split('=', 1)
+        target = key_map.get(key.strip().lower())
+        if target is None:
+            body_parts.append(part)
+            continue
+        if target in {'open_questions', 'risks'}:
+            payload[target] = [item.strip() for item in value.split(',') if item.strip()]
+        elif target == 'confidence':
+            payload[target] = int(value)
+        else:
+            payload[target] = value.strip()
+    if body_parts and not payload.get('summary'):
+        payload['summary'] = ' '.join(body_parts).strip()
+    if current_room and not payload.get('room_id'):
+        payload['room_id'] = current_room
+    if not payload.get('to_agent'):
+        raise ValueError('to=<agent> required')
+    if not payload.get('summary'):
+        raise ValueError('summary required')
+    return payload
 
 
 def _start_async_discussion(state: dict, base: str, params: dict[str, Any]) -> None:

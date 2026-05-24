@@ -2883,28 +2883,40 @@ class AgentFabric:
         summary = str(payload.get("summary", "")).strip()
         if not summary:
             raise ValueError("summary required")
-        room_name = str(payload.get("room_name") or "").strip() or None
+        room_id = str(payload.get("room_id") or payload.get("room_name") or "").strip() or None
         task_id = str(payload.get("task_id") or "").strip() or None
-        open_questions = [str(x) for x in (payload.get("open_questions") or [])]
-        risks = [str(x) for x in (payload.get("risks") or [])]
-        recommended_next_step = str(payload.get("recommended_next_step") or "").strip()
-        confidence = int(payload.get("confidence", 0) or 0)
+        goal_id = str(payload.get("goal_id") or "").strip() or None
+        raw_questions = payload.get("open_questions") or []
+        raw_risks = payload.get("risks") or []
+        open_questions = raw_questions if isinstance(raw_questions, str) else [str(x) for x in raw_questions]
+        risks = raw_risks if isinstance(raw_risks, str) else [str(x) for x in raw_risks]
+        recommended_next_step = str(payload.get("recommended_next_step") or payload.get("next") or "").strip()
+        raw_confidence = payload.get("confidence")
+        confidence = int(raw_confidence) if raw_confidence not in (None, "") else None
+        linked_message_ids = [str(x) for x in (payload.get("linked_message_ids") or [])]
+        linked_decision_ids = [str(x) for x in (payload.get("linked_decision_ids") or [])]
         now = utc_now_iso()
-        handoff_id = str(payload.get("handoff_id") or "").strip() or new_id()
+        handoff_id = str(payload.get("id") or payload.get("handoff_id") or "").strip() or new_id()
         handoff = self.storage.create_handoff(
             handoff_id=handoff_id,
             from_agent=from_agent,
             to_agent=to_agent,
             task_id=task_id,
-            room_name=room_name,
+            room_id=room_id,
+            goal_id=goal_id,
             summary=summary,
             open_questions=open_questions,
             risks=risks,
             recommended_next_step=recommended_next_step,
             confidence=confidence,
+            linked_message_ids=linked_message_ids,
+            linked_decision_ids=linked_decision_ids,
             created_at=now,
         )
-        self.storage.record_handoff_event(handoff_id, "handoff_created", from_agent, None, now)
+        self.storage.append_handoff_event(
+            handoff_id, "created", from_agent,
+            {"status": "pending", "to_agent": to_agent}, now,
+        )
         self.event_bus.publish("handoff.created", {"handoff_id": handoff_id, "from_agent": from_agent, "to_agent": to_agent})
         return {"handoff": handoff, "events": self.storage.list_handoff_events(handoff_id) or []}
 
@@ -2915,20 +2927,18 @@ class AgentFabric:
         if handoff["status"] != "pending":
             raise ValueError(f"handoff cannot be accepted in status: {handoff['status']}")
         now = utc_now_iso()
-        updated = self.storage.update_handoff(handoff_id, {"status": "accepted", "accepted_at": now})
-        self.storage.record_handoff_event(handoff_id, "handoff_accepted", actor, None, now)
+        updated = self.storage.accept_handoff(handoff_id, actor, now)
         self.event_bus.publish("handoff.accepted", {"handoff_id": handoff_id, "accepted_by": actor})
         return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
 
-    def reject_handoff(self, handoff_id: str, actor: str = "operator") -> dict[str, Any]:
+    def reject_handoff(self, handoff_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
         handoff = self.storage.get_handoff(handoff_id)
         if not handoff:
             raise ValueError(f"handoff not found: {handoff_id}")
         if handoff["status"] != "pending":
             raise ValueError(f"handoff cannot be rejected in status: {handoff['status']}")
         now = utc_now_iso()
-        updated = self.storage.update_handoff(handoff_id, {"status": "rejected", "rejected_at": now})
-        self.storage.record_handoff_event(handoff_id, "handoff_rejected", actor, None, now)
+        updated = self.storage.reject_handoff(handoff_id, actor, reason=reason, created_at=now)
         self.event_bus.publish("handoff.rejected", {"handoff_id": handoff_id, "rejected_by": actor})
         return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
 
@@ -2939,8 +2949,7 @@ class AgentFabric:
         if handoff["status"] != "accepted":
             raise ValueError(f"handoff cannot be completed in status: {handoff['status']}")
         now = utc_now_iso()
-        updated = self.storage.update_handoff(handoff_id, {"status": "completed", "completed_at": now})
-        self.storage.record_handoff_event(handoff_id, "handoff_completed", actor, None, now)
+        updated = self.storage.complete_handoff(handoff_id, actor, now)
         self.event_bus.publish("handoff.completed", {"handoff_id": handoff_id, "completed_by": actor})
         return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
 

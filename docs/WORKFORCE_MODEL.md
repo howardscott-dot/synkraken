@@ -18,6 +18,9 @@ identity or hidden autonomy.
 - memory: bounded, inspectable room or shared context
 - decisions: durable choices with proposer, approval or rejection actor,
   rationale, confidence when known, and links to related messages or runtimes
+- handoffs: durable transfers with sender, receiver, context, risks, next step,
+  confidence when known, status, and links to rooms, tasks, goals, messages, or
+  decisions
 - events: append-only evidence of state changes and decisions
 
 ## Bounded Workflows
@@ -56,6 +59,17 @@ known, and which messages or runtimes the decision relates to.
 
 Decision Records are audit and memory infrastructure. They are not voting,
 handoffs, policy enforcement, autonomous planning, or background execution.
+
+## Handoffs
+
+Handoffs v0.1 preserve explicit workforce transfers. They record what work was
+handed off, who handed it off, who received it, what context, risks, open
+questions, and next steps were attached, confidence when known, and whether the
+receiving worker accepted, rejected, or completed it.
+
+Handoffs are coordination and recovery infrastructure. They are not approval
+chains, voting, policy enforcement, autonomous planning, scheduling, or
+background execution.
 
 ## Runtime Onboarding
 

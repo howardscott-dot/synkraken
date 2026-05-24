@@ -91,6 +91,11 @@ works.
   decisions with proposer, approval or rejection actor, reason, confidence,
   related runtime ids, related message ids, API routes, TUI commands, a minimal
   Web Command Deck list, and append-only decision events
+- Handoffs v0.1: durable pending, accepted, rejected, or completed workforce
+  transfers with from-agent, to-agent, summary, open questions, risks,
+  recommended next step, confidence, related message ids, related decision ids,
+  API routes, TUI commands, a minimal Web Command Deck list, and append-only
+  handoff events
 
 ### Deliberately deferred
 
@@ -100,7 +105,7 @@ works.
 - autonomous, semantic, or personal memory systems beyond peer-reviewed Shared
   Memory
 - vector DBs, embeddings, RAG, and semantic search
-- voting, handoffs, policy engine, flight recorder, and decision workflows
+- voting, approval chains, policy engine, flight recorder, and decision workflows
 - external product integrations
 - remote multi-user deployment
 - heavyweight frontend stack
@@ -120,9 +125,11 @@ works.
    transcripts
 8. Decision Records v0.1: record what was decided, who proposed it, who
    approved or rejected it, why, and what messages or runtimes it relates to
-9. Runtime Discovery hardening: adapter additions for discovered registry-only
+9. Handoffs v0.1: record what work was handed off, who handed it off, who
+   received it, what context, risks, and next steps were attached, and whether
+   the receiving worker accepted, rejected, or completed it
+10. Runtime Discovery hardening: adapter additions for discovered registry-only
    runtimes, richer local server probes, and non-secret health diagnostics
-10. Handoffs v0.5
 11. Workspace Packs v0.6
 12. External product integrations v0.7
 

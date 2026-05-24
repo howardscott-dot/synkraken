@@ -17,6 +17,7 @@ _TASK_STATUSES = {"open", "in_progress", "blocked", "done"}
 _TASK_PRIORITIES = {"low", "normal", "high"}
 _MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
 _DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
+_HANDOFF_STATUSES = {"pending", "accepted", "rejected", "completed"}
 _PROFILE_FIELDS = {
     "cost_tier",
     "usage_risk",
@@ -370,15 +371,32 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         # ── handoffs ─────────────────────────────────────────────────────
         if path == "/v1/handoffs":
             qs = parse_qs(parsed.query)
-            room = qs.get("room", [None])[0]
+            room = qs.get("room", qs.get("room_id", [None]))[0]
             status_q = qs.get("status", [None])[0]
             agent = qs.get("agent", [None])[0]
             limit = int(qs.get("limit", [50])[0])
+            if status_q and status_q not in _HANDOFF_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid handoff status"})
+                return
             self._send(HTTPStatus.OK, {
-                "handoffs": self.fabric.storage.list_handoffs(room_name=room, status=status_q, agent=agent, limit=limit)
+                "handoffs": self.fabric.storage.list_handoffs(room_id=room, status=status_q, agent=agent, limit=limit)
             })
             return
-        m = re.fullmatch(r"/v1/handoffs/([^/]+)", path)
+        if path == "/v1/handoff/latest":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", qs.get("room_id", [None]))[0]
+            status_q = qs.get("status", [None])[0]
+            if status_q and status_q not in _HANDOFF_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid handoff status"})
+                return
+            handoff = self.fabric.storage.latest_handoff(room_id=room, status=status_q)
+            if not handoff:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "no handoffs found"})
+                return
+            handoff["events"] = self.fabric.storage.list_handoff_events(handoff["id"]) or []
+            self._send(HTTPStatus.OK, handoff)
+            return
+        m = re.fullmatch(r"/v1/handoff/([^/]+)", path) or re.fullmatch(r"/v1/handoffs/([^/]+)", path)
         if m:
             handoff_id = unquote(m.group(1))
             handoff = self.fabric.storage.get_handoff(handoff_id)
@@ -445,7 +463,7 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             except KeyError as exc:
                 self._send(HTTPStatus.BAD_REQUEST, {"error": f"missing_field: {exc.args[0]}"})
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._send(HTTPStatus.OK, result)
@@ -742,6 +760,30 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, result)
             return
 
+        if path in {"/v1/handoff/accept", "/v1/handoff/reject", "/v1/handoff/complete"}:
+            action = path.rsplit("/", 1)[1]
+            try:
+                payload = self._read_json()
+                handoff_id = str(payload.get("id") or payload.get("handoff_id") or "").strip()
+                if not handoff_id:
+                    raise ValueError("id required")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if action == "accept":
+                    result = self.fabric.accept_handoff(handoff_id, actor)
+                elif action == "reject":
+                    result = self.fabric.reject_handoff(
+                        handoff_id,
+                        actor,
+                        str(payload.get("reason", "")).strip() or None,
+                    )
+                else:
+                    result = self.fabric.complete_handoff(handoff_id, actor)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
         m = re.fullmatch(r"/v1/handoff/([^/]+)/(accept|reject|complete)", path)
         if m:
             handoff_id = unquote(m.group(1))
@@ -752,7 +794,11 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 if action == "accept":
                     result = self.fabric.accept_handoff(handoff_id, actor)
                 elif action == "reject":
-                    result = self.fabric.reject_handoff(handoff_id, actor)
+                    result = self.fabric.reject_handoff(
+                        handoff_id,
+                        actor,
+                        str(payload.get("reason", "")).strip() or None,
+                    )
                 else:
                     result = self.fabric.complete_handoff(handoff_id, actor)
             except Exception as exc:  # noqa: BLE001
