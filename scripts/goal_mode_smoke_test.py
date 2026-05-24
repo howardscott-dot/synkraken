@@ -157,6 +157,10 @@ def main() -> None:
             raise AssertionError("TUI goal parser without room should fail")
         except ValueError as exc:
             assert str(exc) == "Goal mode needs a room. Create or select a room first."
+        parsed_goal = _parse_goal_args('--mode cheap --threshold 75 --rounds 3 "Keep it small"', "goal-room")
+        assert parsed_goal["mode"] == "cheap"
+        assert parsed_goal["threshold"] == 75
+        assert parsed_goal["max_rounds"] == 3
 
         achieved = fabric.goal_run({
             "source": "smoke",
@@ -166,11 +170,50 @@ def main() -> None:
             "max_rounds": 3,
         })
         assert_core_run(fabric, achieved, expected_status="achieved")
+        assert achieved["execution_profile"]["mode"] == "balanced"
+        assert achieved["execution_profile"]["max_rounds"] == 2
+        assert achieved["execution_profile"]["estimated_call_count"] > 0
+        assert achieved["goal_run"]["max_rounds"] == 2
         achieved_run = achieved["goal_run"]
         assert achieved_run["latest_score"] >= 80
         assert "threshold_met" in event_types(fabric, achieved_run["goal_run_id"])
         achieved_task = fabric.storage.get_task(achieved_run["linked_task_id"])
         assert achieved_task is not None and achieved_task["status"] == "done"
+
+        cheap_fabric, _cheap_adapters = build_fabric(Path(tmp) / "goal-cheap.sqlite3", review_score=90)
+        cheap = cheap_fabric.goal_run({
+            "source": "smoke",
+            "room_name": "goal-room",
+            "goal": "Handle a basic review with minimal execution risk",
+            "threshold": 80,
+            "max_rounds": 3,
+            "mode": "cheap",
+        })
+        cheap_run = cheap["goal_run"]
+        assert cheap_run["status"] == "achieved"
+        assert cheap_run["max_rounds"] == 1
+        assert cheap_run["token_police_agent"] is None
+        assert cheap_run["guardrail_agent"] is None
+        assert len(cheap_run["participants"]) == 2
+        assert cheap["execution_profile"]["mode"] == "cheap"
+        assert cheap["execution_profile"]["max_rounds"] == 1
+        assert len(cheap["execution_profile"]["agents"]) == 2
+
+        full_fabric, _full_adapters = build_fabric(Path(tmp) / "goal-full.sqlite3", review_score=90)
+        full = full_fabric.goal_run({
+            "source": "smoke",
+            "room_name": "goal-room",
+            "goal": "Run the full architecture review loop",
+            "threshold": 80,
+            "max_rounds": 3,
+            "mode": "full",
+        })
+        full_run = full["goal_run"]
+        assert full_run["status"] == "achieved"
+        assert full_run["max_rounds"] == 3
+        assert len(full_run["participants"]) == 4
+        assert full["execution_profile"]["mode"] == "full"
+        assert full["execution_profile"]["risk_level"] == "high"
 
         low_fabric, _low_adapters = build_fabric(Path(tmp) / "goal-low.sqlite3", review_score=50)
         partial = low_fabric.goal_run({

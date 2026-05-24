@@ -119,6 +119,18 @@ def _validate_adapters(raw: dict) -> None:
         timeout = adapter.setdefault("timeout_seconds", raw["routing"]["default_timeout_seconds"])
         if not isinstance(timeout, int) or timeout <= 0:
             raise ValueError(f"adapter '{adapter_id}' timeout_seconds must be a positive integer")
+        cost_tier = str(adapter.setdefault("cost_tier", adapter.get("cost_profile", "medium"))).strip().lower()
+        if cost_tier not in {"local", "cheap", "medium", "premium"}:
+            raise ValueError(f"adapter '{adapter_id}' cost_tier must be local, cheap, medium, or premium")
+        adapter["cost_tier"] = cost_tier
+        usage_risk = str(adapter.setdefault("usage_risk", "medium")).strip().lower()
+        if usage_risk not in {"low", "medium", "high"}:
+            raise ValueError(f"adapter '{adapter_id}' usage_risk must be low, medium, or high")
+        adapter["usage_risk"] = usage_risk
+        for key in ("preferred_roles", "avoid_roles"):
+            roles = adapter.setdefault(key, [])
+            if not isinstance(roles, list) or not all(isinstance(role, str) and role for role in roles):
+                raise ValueError(f"adapter '{adapter_id}' {key} must be a list of strings")
         adapter.setdefault("enabled", True)
 
 

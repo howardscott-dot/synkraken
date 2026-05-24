@@ -40,6 +40,11 @@ fields may identify the local deployment without changing shipped defaults:
 
 These fields are optional and empty in examples.
 
+Runtime discovery output belongs in local config. `config.local.json` may store
+adapter blocks and `runtime_registry` entries discovered on the operator's
+machine, including local command paths and version strings. Shipped defaults
+must stay generic and must not encode one machine's discovered runtimes.
+
 ## Workspace Context
 
 Workspace-specific purpose, project labels, and team conventions belong in

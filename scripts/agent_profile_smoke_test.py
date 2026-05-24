@@ -144,6 +144,19 @@ def main() -> None:
         assert token_police in {"cheap", "local"}, token_police
         assert guardrail == "premium" or guardrail in reviewers, guardrail
 
+        balanced_agents = fabric._goal_mode_agents(
+            ["cheap", "premium", "local"],
+            "balanced",
+            "Architecture plan for a durable control plane",
+        )
+        assert "premium" in balanced_agents, balanced_agents
+        cheap_agents = fabric._goal_mode_agents(
+            ["cheap", "premium", "local"],
+            "cheap",
+            "Basic review and summary",
+        )
+        assert cheap_agents == ["local", "cheap"], cheap_agents
+
         print("agent profile smoke test: ok")
 
 

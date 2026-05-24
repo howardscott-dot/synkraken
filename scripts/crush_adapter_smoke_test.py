@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from synkraken.adapters.crush import CrushAdapter
+from synkraken.adapters.crush import CrushAdapter, build_crush_env
 from synkraken.discovery import (
     _find_node_bin,
     _nvm_node_bin_dirs,
@@ -38,6 +38,8 @@ def main() -> None:
         adapter_with_node = CrushAdapter("crush", config_with_node)
 
         built_env = adapter_with_node._build_env()
+        shared_built_env = build_crush_env(config_with_node)
+        assert built_env["PATH"] == shared_built_env["PATH"]
         assert "PATH" in built_env
         path_entries = built_env["PATH"].split(os.pathsep)
         node_in_path = any(str(fake_node_dir) in p for p in path_entries)
@@ -125,7 +127,12 @@ def main() -> None:
         assert "crush" in summary["adapters_added"]
 
         fake_crush_js = tmp_path / "crush_js"
-        fake_crush_js.write_text("#!/bin/sh\necho crush-js-ok\n", encoding="utf-8")
+        fake_crush_js.write_text(
+            "#!/bin/sh\n"
+            'node | grep -q "fake-node-v99" || exit 9\n'
+            "echo crush-js-ok\n",
+            encoding="utf-8",
+        )
         fake_crush_js.chmod(0o755 | stat.S_IXUSR)
         config_for_discovery = {
             "type": "crush",
@@ -133,6 +140,12 @@ def main() -> None:
             "timeout_seconds": 2,
             "node_bin_dir": str(fake_node_dir),
         }
+        send_reply = CrushAdapter("crush", config_for_discovery).send(
+            FabricMessage(source="operator", target="crush", body="Reply with exactly: crush-js-ok")
+        )
+        assert send_reply.ok is True, send_reply.error
+        assert send_reply.body == "crush-js-ok"
+
         config_for_fabric = {
             "adapters": {
                 "crush": config_for_discovery
@@ -163,6 +176,7 @@ def main() -> None:
         assert rt_doc["ok"] is True
         assert rt_doc["health"]["type"] == "crush"
         assert rt_doc["health"]["enabled"] is True
+        assert rt_doc["node_available"] is True
 
     print("crush_adapter_smoke_test: PASS")
 

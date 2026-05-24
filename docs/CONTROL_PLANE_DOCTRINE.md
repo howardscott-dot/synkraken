@@ -16,6 +16,8 @@ SynKraken is responsible for:
 - recovery through durable storage, blocked states, dead letters, and
   inspectable partial transcripts
 - observability through append-only events and operator surfaces
+- runtime discovery that inventories local tools without executing work,
+  inferring subscriptions, or storing secrets
 
 SynKraken is not responsible for:
 
@@ -43,6 +45,11 @@ collapse into one runtime's assumptions.
 The daemon owns durable concepts. Runtimes own their model behavior, provider
 accounts, prompt handling, and execution costs.
 
+Runtime discovery must remain neutral. It may find commands, safe version
+strings, capabilities declared by SynKraken's registry, and supported adapter
+modes. It must not imply that SynKraken owns the runtime, pays for it, can use
+it without operator approval, or has verified account entitlements.
+
 ## Operator Authority
 
 Human command remains primary. SynKraken may coordinate work after an explicit
@@ -51,3 +58,7 @@ auditable.
 
 Hidden loops, hidden memory writes, silent agent-to-agent control, and
 permissionless execution are outside the doctrine.
+
+Discovery and onboarding must preserve operator authority. `merge` keeps
+existing adapter settings, `replace` rewrites only after an explicit choice,
+and `skip` leaves local configuration unchanged.

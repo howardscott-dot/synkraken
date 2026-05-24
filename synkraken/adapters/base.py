@@ -33,7 +33,7 @@ class BaseAdapter(ABC):
             "runtime_name": self.runtime_name(),
             "enabled": bool(self.config.get("enabled", True)),
         }
-        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust"):
+        for key in ("cost_tier", "usage_risk", "preferred_roles", "avoid_roles", "capabilities", "speed", "trust"):
             if key in self.config:
                 data[key] = self.config[key]
         return data

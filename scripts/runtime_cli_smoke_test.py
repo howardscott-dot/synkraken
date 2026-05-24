@@ -45,6 +45,35 @@ def main() -> None:
     original_get_json = cli_main.get_json
     original_cwd = Path.cwd()
     try:
+        requested_urls: list[str] = []
+
+        def fake_get_json(url: str) -> dict:
+            requested_urls.append(url)
+            if url.endswith("/v1/runtimes/doctor"):
+                return {
+                    "runtimes": [
+                        {
+                            "runtime_id": "crush",
+                            "runtime_type": "crush",
+                            "adapter_type": "crush",
+                            "command": ["crush"],
+                            "enabled": True,
+                            "registered": True,
+                            "ok": True,
+                            "health": {"type": "crush", "enabled": True},
+                            "node_available": True,
+                        }
+                    ]
+                }
+            raise AssertionError(f"unexpected URL: {url}")
+
+        cli_main.get_json = fake_get_json
+        code, output = run_cli(["runtime", "doctor"])
+        assert code == 0
+        assert any(url.endswith("/v1/runtimes/doctor") for url in requested_urls)
+        assert "Runtime doctor:" in output
+        assert "node available to adapter: yes" in output
+
         cli_main.get_json = lambda url: (_ for _ in ()).throw(urllib.error.URLError("offline"))
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)

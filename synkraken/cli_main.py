@@ -141,7 +141,7 @@ def _normalize_runtime(runtime_id: str, item: dict, *, source: str = "config") -
     skill_path = item.get("skill_path")
     if not skill_path and definition is not None and getattr(definition, "skill_path_template", None):
         skill_path = getattr(definition, "skill_path_template").format(home=str(Path.home()))
-    return {
+    normalized = {
         "runtime_id": runtime_id,
         "display_name": label,
         "runtime_type": runtime_type,
@@ -149,6 +149,9 @@ def _normalize_runtime(runtime_id: str, item: dict, *, source: str = "config") -
         "command": command,
         "capabilities": [str(value) for value in capabilities],
         "cost_tier": item.get("cost_tier") or item.get("cost_profile") or getattr(definition, "cost_tier", "medium"),
+        "usage_risk": item.get("usage_risk") or getattr(definition, "usage_risk", "medium"),
+        "preferred_roles": [str(value) for value in (item.get("preferred_roles") or getattr(definition, "preferred_roles", ()))],
+        "avoid_roles": [str(value) for value in (item.get("avoid_roles") or getattr(definition, "avoid_roles", ()))],
         "supported_modes": [str(value) for value in supported_modes],
         "enabled": bool(enabled),
         "adapter_supported": adapter_type in SUPPORTED_ADAPTER_TYPES,
@@ -158,6 +161,10 @@ def _normalize_runtime(runtime_id: str, item: dict, *, source: str = "config") -
         "version": item.get("version") or "",
         "status": item.get("status") or "",
     }
+    for key in ("registered", "ok", "health", "warnings", "node_available", "node_bin_dir"):
+        if key in item:
+            normalized[key] = item[key]
+    return normalized
 
 
 def _load_runtime_config(config_path: Path | None = None) -> dict:
@@ -193,7 +200,14 @@ def _normalize_runtime_payload(data: dict) -> dict:
 def _runtime_data(base: str) -> dict:
     try:
         return _normalize_runtime_payload(get_json(f"{base}/v1/runtimes"))
-    except Exception:  # noqa: BLE001
+    except Exception:
+        return _load_runtime_config()
+
+
+def _runtime_doctor_data(base: str) -> dict:
+    try:
+        return _normalize_runtime_payload(get_json(f"{base}/v1/runtimes/doctor"))
+    except Exception:
         return _load_runtime_config()
 
 
@@ -252,6 +266,10 @@ def print_runtimes(data: dict) -> None:
         print(f"  type: {runtime.get('runtime_type')}")
         print(f"  status: {status}")
         print(f"  enabled: {str(bool(runtime.get('enabled'))).lower()}")
+        print(f"  cost tier: {runtime.get('cost_tier') or 'medium'}")
+        print(f"  usage risk: {runtime.get('usage_risk') or 'medium'}")
+        print(f"  preferred roles: {', '.join(runtime.get('preferred_roles') or []) or '(none)'}")
+        print(f"  avoid roles: {', '.join(runtime.get('avoid_roles') or []) or '(none)'}")
         if not adapter_supported:
             print("  note: adapter not implemented yet")
 
@@ -264,6 +282,9 @@ def print_runtime_detail(runtime: dict) -> None:
     print(f"command: {' '.join(runtime.get('command') or []) or '(none)'}")
     print(f"capabilities: {', '.join(runtime.get('capabilities') or []) or '(none)'}")
     print(f"cost tier: {runtime.get('cost_tier') or 'unknown'}")
+    print(f"usage risk: {runtime.get('usage_risk') or 'medium'}")
+    print(f"preferred roles: {', '.join(runtime.get('preferred_roles') or []) or '(none)'}")
+    print(f"avoid roles: {', '.join(runtime.get('avoid_roles') or []) or '(none)'}")
     print(f"enabled: {str(bool(runtime.get('enabled'))).lower()}")
     print(f"adapter-supported: {'yes' if runtime.get('adapter_supported') else 'no'}")
 
@@ -283,6 +304,10 @@ def print_runtime_doctor(data: dict) -> None:
         print(f"  discovered command exists: {'yes' if _discovered_command_exists(runtime) else 'no'}")
         print(f"  configured command exists: {'yes' if _command_exists(runtime.get('command') or []) else 'no'}")
         print(f"  adapter: {'implemented' if adapter_supported else 'registry-only'}")
+        print(f"  cost tier: {runtime.get('cost_tier') or 'medium'}")
+        print(f"  usage risk: {runtime.get('usage_risk') or 'medium'}")
+        print(f"  preferred roles: {', '.join(runtime.get('preferred_roles') or []) or '(none)'}")
+        print(f"  avoid roles: {', '.join(runtime.get('avoid_roles') or []) or '(none)'}")
         if runtime.get("runtime_id") == "crush":
             node_ok = bool(runtime.get("node_available"))
             print(f"  node available to adapter: {'yes' if node_ok else 'no'}")
@@ -519,6 +544,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--install-skills", action="store_true", help="Install bridge skills for configured workers")
     sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
+    p_decisions = sub.add_parser("decisions", help="List decisions")
+    p_decisions.add_argument("--room", help="Filter by room")
+    p_decisions.add_argument("--status", help="Filter by status (proposed/approved/rejected/superseded)")
+    add_base_url_arg(p_decisions)
+
+    p_decision = sub.add_parser("decision", help="Inspect a decision")
+    p_decision.add_argument("decision_id", help="Decision id")
+    add_base_url_arg(p_decision)
+
+    p_approve = sub.add_parser("approve", help="Approve a decision")
+    p_approve.add_argument("decision_id", help="Decision id to approve")
+    add_base_url_arg(p_approve)
+
+    p_reject_cmd = sub.add_parser("reject", help="Reject a decision")
+    p_reject_cmd.add_argument("decision_id", help="Decision id to reject")
+    add_base_url_arg(p_reject_cmd)
+
+    p_handoffs = sub.add_parser("handoffs", help="List handoffs")
+    p_handoffs.add_argument("--room", help="Filter by room")
+    p_handoffs.add_argument("--status", help="Filter by status (pending/accepted/rejected/completed)")
+    add_base_url_arg(p_handoffs)
+
+    p_handoff = sub.add_parser("handoff", help="Create or inspect a handoff")
+    p_handoff.add_argument("action", nargs="?", choices=["create", "accept", "reject", "complete"], help="Action: create, accept, reject, complete")
+    p_handoff.add_argument("id", nargs="?", help="Handoff id for accept/reject/complete")
+    add_base_url_arg(p_handoff)
+
+    p_replay = sub.add_parser("replay", help="Show a replay (goal run, team run, or decision)")
+    p_replay.add_argument("id", help="Replay id")
+    add_base_url_arg(p_replay)
+
+    p_incident = sub.add_parser("incident", help="Show latest incident")
+    p_incident.add_argument("action", nargs="?", choices=["latest"], default="latest", help="Show latest failure")
+    add_base_url_arg(p_incident)
+
     return parser
 
 
@@ -604,7 +664,7 @@ def main() -> None:
             return
         if args.command == "runtime":
             if args.runtime_id == "doctor":
-                data = _runtime_data(base)
+                data = _runtime_doctor_data(base)
                 if args.json:
                     print(json.dumps(data, indent=2, ensure_ascii=False))
                 else:
@@ -657,6 +717,81 @@ def main() -> None:
             }
             result = post_json(f"{base}/v1/messages", payload)
             print_result(result, raw=args.json)
+            return
+        if args.command == "decisions":
+            url = f"{base}/v1/decisions"
+            if args.room:
+                url += f"?room={args.room}"
+                if args.status:
+                    url += f"&status={args.status}"
+            elif args.status:
+                url += f"?status={args.status}"
+            data = get_json(url)
+            decisions = data.get("decisions", [])
+            if not decisions:
+                print("No decisions found.")
+            else:
+                for d in decisions:
+                    print(f"[{d['status']:12}] {d['timestamp'][:10]} {d['title']}")
+                    print(f"  id: {d['decision_id']}  proposed_by: {d['proposed_by']}")
+                    if d.get("approved_by"):
+                        print(f"  approved_by: {d['approved_by']}")
+                    print()
+            return
+        if args.command == "decision":
+            data = get_json(f"{base}/v1/decisions/{args.decision_id}")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        if args.command == "approve":
+            payload = {"actor": "operator"}
+            result = post_json(f"{base}/v1/decision/{args.decision_id}/approve", payload)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        if args.command == "reject":
+            payload = {"actor": "operator"}
+            result = post_json(f"{base}/v1/decision/{args.decision_id}/reject", payload)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        if args.command == "handoffs":
+            url = f"{base}/v1/handoffs"
+            if args.room:
+                url += f"?room={args.room}"
+                if args.status:
+                    url += f"&status={args.status}"
+            elif args.status:
+                url += f"?status={args.status}"
+            data = get_json(url)
+            handoffs = data.get("handoffs", [])
+            if not handoffs:
+                print("No handoffs found.")
+            else:
+                for h in handoffs:
+                    print(f"[{h['status']:10}] {h['created_at'][:10]} {h['summary'][:60]}")
+                    print(f"  from: {h['from_agent']} -> to: {h['to_agent']}  id: {h['handoff_id']}")
+                    print()
+            return
+        if args.command == "handoff":
+            if args.action == "create":
+                print("Use POST /v1/handoff to create a handoff (not yet interactive in CLI)")
+                return
+            if args.action in ("accept", "reject", "complete"):
+                payload = {"actor": "operator"}
+                result = post_json(f"{base}/v1/handoff/{args.id}/{args.action}", payload)
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                return
+            if args.id:
+                data = get_json(f"{base}/v1/handoffs/{args.id}")
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print("synkraken handoff [create|accept|reject|complete] [id]")
+            return
+        if args.command == "replay":
+            data = get_json(f"{base}/v1/replay/{args.id}")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        if args.command == "incident":
+            data = get_json(f"{base}/v1/incident/latest")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
             return
         raise ValueError(f"Unknown command: {args.command}")
     except urllib.error.HTTPError as exc:

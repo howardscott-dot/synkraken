@@ -10,6 +10,44 @@ from .cli_utils import run_command
 from ..models import AdapterReply, FabricMessage
 
 
+def build_crush_env(config: dict, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    path_entries: list[str] = []
+
+    def add_path_entry(entry: object) -> None:
+        value = str(entry)
+        if value and value not in path_entries:
+            path_entries.append(value)
+
+    configured_node_bin = config.get("node_bin_dir")
+    if configured_node_bin:
+        add_path_entry(configured_node_bin)
+
+    discovered_node_bin = config.get("node_path")
+    if discovered_node_bin:
+        node_dir = str(Path(discovered_node_bin).parent) if "/" in discovered_node_bin else None
+        if node_dir:
+            add_path_entry(node_dir)
+
+    cmd = config.get("command", ["crush"])
+    if cmd:
+        add_path_entry(Path(cmd[0]).parent.resolve())
+
+    home_node_dir = Path.home() / ".nvm" / "versions" / "node"
+    if home_node_dir.is_dir():
+        try:
+            for version_link in home_node_dir.iterdir():
+                add_path_entry(version_link / "bin")
+        except OSError:
+            pass
+
+    if path_entries:
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(path_entries) + (os.pathsep + existing_path if existing_path else "")
+
+    return env
+
+
 class CrushAdapter(BaseAdapter):
     """Adapter for the Crush CLI.
 
@@ -59,41 +97,11 @@ class CrushAdapter(BaseAdapter):
             ">>>"
         )
 
-    def _build_env(self) -> dict:
-        env = os.environ.copy()
-        path_entries: list[str] = []
+    def build_env(self) -> dict[str, str]:
+        return build_crush_env(self.config)
 
-        cmd = self.config.get("command", ["crush"])
-        if cmd:
-            cmd_dir = str(Path(cmd[0]).parent.resolve())
-            if cmd_dir and cmd_dir not in path_entries:
-                path_entries.append(cmd_dir)
-
-        configured_node_bin = self.config.get("node_bin_dir")
-        if configured_node_bin and str(configured_node_bin) not in path_entries:
-            path_entries.append(str(configured_node_bin))
-
-        discovered_node_bin = self.config.get("node_bin_dir") or self.config.get("node_path")
-        if discovered_node_bin and str(discovered_node_bin) not in path_entries:
-            node_dir = str(Path(discovered_node_bin).parent) if "/" in discovered_node_bin else None
-            if node_dir and node_dir not in path_entries:
-                path_entries.append(node_dir)
-
-        home_node_dir = Path.home() / ".nvm" / "versions" / "node"
-        if home_node_dir.is_dir():
-            try:
-                for version_link in home_node_dir.iterdir():
-                    bin_dir = str(version_link / "bin")
-                    if bin_dir not in path_entries:
-                        path_entries.append(bin_dir)
-            except OSError:
-                pass
-
-        if path_entries:
-            existing_path = env.get("PATH", "")
-            env["PATH"] = os.pathsep.join(reversed(path_entries)) + (os.pathsep + existing_path if existing_path else "")
-
-        return env
+    def _build_env(self) -> dict[str, str]:
+        return self.build_env()
 
     def send(self, message: FabricMessage) -> AdapterReply:
         base_command = self.config.get("command", ["crush"])
@@ -113,7 +121,7 @@ class CrushAdapter(BaseAdapter):
                 command,
                 timeout,
                 cwd=working_dir,
-                env=self._build_env(),
+                env=self.build_env(),
             )
         except subprocess.TimeoutExpired:
             return AdapterReply(
