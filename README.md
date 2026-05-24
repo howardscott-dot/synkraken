@@ -74,6 +74,9 @@ Synkraken gives you:
   is reached.
 - **Durable Tasks v0.1** for the first step beyond chat: optionally linked to a
   room, assigned agent, and source message
+- **Decision Records v0.1** for durable workforce decisions: what was decided,
+  who proposed it, who approved or rejected it, why, and what messages or
+  runtimes it relates to.
 - **A portable bridge skill** that agents read to learn how to use the bridge
   back (so any participating agent can reach the others, not just you)
 
@@ -530,6 +533,13 @@ Tasks are durable work records, not workflow automation. A task can optionally
 belong to a room, be assigned to an agent, and point back to the message that
 created it. Tasks carry lightweight ownership metadata (`created_by`,
 `updated_by`) and an append-only event history for auditability.
+
+Decision Records are durable workforce choices, not voting or policy
+automation. A decision records what was decided, who proposed it, who approved
+or rejected it, the rationale, confidence when known, and optional links to
+rooms, tasks, goals, runtimes, and messages. Operators can inspect recent
+decisions with `/decisions`, view `/decision latest` or `/decision <id>`, and
+approve or reject proposed decisions with `/approve <id>` and `/reject <id>`.
 
 POST `/v1/team-tasks` body:
 

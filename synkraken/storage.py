@@ -11,12 +11,14 @@ from .models import AdapterReply, FabricMessage, utc_now_iso
 
 AGENT_STATUSES = {"configured", "online", "idle", "working", "blocked", "offline", "disabled"}
 AGENT_COST_TIERS = {"cheap", "medium", "premium", "local"}
+USAGE_RISKS = {"low", "medium", "high"}
 AGENT_PROFILE_ROLES = {"owner", "reviewer", "guardrail", "token_police", "summary", "ops"}
 SHARED_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
+DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
+HANDOFF_STATUSES = {"pending", "accepted", "rejected", "completed"}
 SHARED_MEMORY_TYPES = {
     "fact", "decision", "preference", "rule", "lesson", "technical_note", "project_context",
 }
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -263,11 +265,15 @@ CREATE TABLE IF NOT EXISTS goal_events (
 CREATE TABLE IF NOT EXISTS runtime_registry (
     runtime_id TEXT PRIMARY KEY,
     runtime_type TEXT NOT NULL,
+    adapter_type TEXT NOT NULL DEFAULT 'unsupported',
     version TEXT NOT NULL DEFAULT '',
     command_json TEXT NOT NULL DEFAULT '[]',
     working_dir TEXT NOT NULL DEFAULT '',
     timeout INTEGER NOT NULL DEFAULT 90,
     cost_profile TEXT NOT NULL DEFAULT 'medium',
+    usage_risk TEXT NOT NULL DEFAULT 'medium',
+    preferred_roles_json TEXT NOT NULL DEFAULT '[]',
+    avoid_roles_json TEXT NOT NULL DEFAULT '[]',
     supported_modes_json TEXT NOT NULL DEFAULT '[]',
     capabilities_json TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -318,6 +324,81 @@ CREATE INDEX IF NOT EXISTS idx_goal_events_run ON goal_events(goal_run_id);
 CREATE INDEX IF NOT EXISTS idx_goal_events_created ON goal_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_runtime_registry_type ON runtime_registry(runtime_type);
 CREATE INDEX IF NOT EXISTS idx_workspace_packs_name ON workspace_packs(name);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    timestamp TEXT,
+    room_id TEXT,
+    room_name TEXT,
+    task_id TEXT,
+    goal_id TEXT,
+    proposed_by TEXT,
+    approved_by TEXT,
+    status TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    reasoning TEXT NOT NULL DEFAULT '',
+    options_considered TEXT NOT NULL DEFAULT '',
+    selected_option TEXT,
+    risk TEXT NOT NULL DEFAULT '',
+    confidence INTEGER NULL,
+    linked_runtime_ids_json TEXT NOT NULL DEFAULT '[]',
+    linked_message_ids_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS decision_events (
+    event_id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(decision_id) REFERENCES decisions(decision_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS handoffs (
+    handoff_id TEXT PRIMARY KEY,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    task_id TEXT,
+    room_name TEXT,
+    summary TEXT NOT NULL,
+    open_questions_json TEXT NOT NULL DEFAULT '[]',
+    risks_json TEXT NOT NULL DEFAULT '[]',
+    recommended_next_step TEXT NOT NULL DEFAULT '',
+    confidence INTEGER DEFAULT 0,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    accepted_at TEXT,
+    rejected_at TEXT,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS handoff_events (
+    event_id TEXT PRIMARY KEY,
+    handoff_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(handoff_id) REFERENCES handoffs(handoff_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_room ON decisions(room_name);
+CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status);
+CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_events_decision ON decision_events(decision_id);
+CREATE INDEX IF NOT EXISTS idx_handoffs_room ON handoffs(room_name);
+CREATE INDEX IF NOT EXISTS idx_handoffs_status ON handoffs(status);
+CREATE INDEX IF NOT EXISTS idx_handoffs_agents ON handoffs(from_agent, to_agent);
+CREATE INDEX IF NOT EXISTS idx_handoffs_created ON handoffs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_handoff_events_handoff ON handoff_events(handoff_id);
 """
 
 
@@ -341,6 +422,18 @@ class Storage:
             self._conn.execute("ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'")
         if "updated_by" not in task_columns:
             self._conn.execute("ALTER TABLE tasks ADD COLUMN updated_by TEXT NOT NULL DEFAULT 'system'")
+        runtime_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(runtime_registry)").fetchall()
+        }
+        runtime_additions = {
+            "adapter_type": "TEXT NOT NULL DEFAULT 'unsupported'",
+            "usage_risk": "TEXT NOT NULL DEFAULT 'medium'",
+            "preferred_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+            "avoid_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for column, definition in runtime_additions.items():
+            if column not in runtime_columns:
+                self._conn.execute(f"ALTER TABLE runtime_registry ADD COLUMN {column} {definition}")
         agent_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(agents)").fetchall()
         }
@@ -352,7 +445,9 @@ class Storage:
             "current_room": "TEXT",
             "last_message_at": "TEXT",
             "cost_tier": "TEXT NOT NULL DEFAULT 'medium'",
+            "usage_risk": "TEXT NOT NULL DEFAULT 'medium'",
             "preferred_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+            "avoid_roles_json": "TEXT NOT NULL DEFAULT '[]'",
             "capabilities_json": "TEXT NOT NULL DEFAULT '[]'",
             "speed": "INTEGER NOT NULL DEFAULT 5",
             "trust": "INTEGER NOT NULL DEFAULT 5",
@@ -421,11 +516,15 @@ class Storage:
             CREATE TABLE IF NOT EXISTS runtime_registry (
                 runtime_id TEXT PRIMARY KEY,
                 runtime_type TEXT NOT NULL,
+                adapter_type TEXT NOT NULL DEFAULT 'unsupported',
                 version TEXT NOT NULL DEFAULT '',
                 command_json TEXT NOT NULL DEFAULT '[]',
                 working_dir TEXT NOT NULL DEFAULT '',
                 timeout INTEGER NOT NULL DEFAULT 90,
                 cost_profile TEXT NOT NULL DEFAULT 'medium',
+                usage_risk TEXT NOT NULL DEFAULT 'medium',
+                preferred_roles_json TEXT NOT NULL DEFAULT '[]',
+                avoid_roles_json TEXT NOT NULL DEFAULT '[]',
                 supported_modes_json TEXT NOT NULL DEFAULT '[]',
                 capabilities_json TEXT NOT NULL DEFAULT '[]',
                 enabled INTEGER NOT NULL DEFAULT 1,
@@ -451,6 +550,39 @@ class Storage:
             )
             """
         )
+        self._migrate_decision_schema()
+
+    def _migrate_decision_schema(self) -> None:
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(decisions)").fetchall()
+        }
+        additions = {
+            "id": "TEXT",
+            "decision_id": "TEXT",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+            "room_id": "TEXT",
+            "room_name": "TEXT",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "reasoning": "TEXT NOT NULL DEFAULT ''",
+            "options_considered": "TEXT NOT NULL DEFAULT ''",
+            "selected_option": "TEXT",
+            "risk": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in additions.items():
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE decisions ADD COLUMN {column} {definition}")
+        self._conn.execute("UPDATE decisions SET id = decision_id WHERE (id IS NULL OR id = '') AND decision_id IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET decision_id = id WHERE (decision_id IS NULL OR decision_id = '') AND id IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET created_at = timestamp WHERE (created_at IS NULL OR created_at = '') AND timestamp IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET timestamp = created_at WHERE (timestamp IS NULL OR timestamp = '') AND created_at IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET updated_at = created_at WHERE (updated_at IS NULL OR updated_at = '') AND created_at IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET room_id = room_name WHERE (room_id IS NULL OR room_id = '') AND room_name IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET room_name = room_id WHERE (room_name IS NULL OR room_name = '') AND room_id IS NOT NULL")
+        self._conn.execute("UPDATE decisions SET reason = reasoning WHERE reason = '' AND reasoning != ''")
+        self._conn.execute("UPDATE decisions SET reasoning = reason WHERE reasoning = '' AND reason != ''")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_room_id ON decisions(room_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_decisions_created_at ON decisions(created_at DESC)")
 
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
@@ -610,6 +742,9 @@ class Storage:
         data["command"] = json.loads(data.pop("command_json") or "[]")
         data["supported_modes"] = json.loads(data.pop("supported_modes_json") or "[]")
         data["capabilities"] = json.loads(data.pop("capabilities_json") or "[]")
+        data["preferred_roles"] = json.loads(data.pop("preferred_roles_json") or "[]")
+        data["avoid_roles"] = json.loads(data.pop("avoid_roles_json") or "[]")
+        data["cost_tier"] = data.get("cost_profile") or "medium"
         data["enabled"] = bool(data.get("enabled"))
         return data
 
@@ -623,22 +758,30 @@ class Storage:
             command = [command]
         supported_modes = runtime.get("supported_modes") or []
         capabilities = runtime.get("capabilities") or []
+        preferred_roles = runtime.get("preferred_roles") or []
+        avoid_roles = runtime.get("avoid_roles") or []
+        cost_tier = str(runtime.get("cost_tier") or runtime.get("cost_profile") or "medium")
+        usage_risk = str(runtime.get("usage_risk") or "medium")
         now = updated_at or utc_now_iso()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO runtime_registry (
-                    runtime_id, runtime_type, version, command_json, working_dir,
-                    timeout, cost_profile, supported_modes_json, capabilities_json,
-                    enabled, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    runtime_id, runtime_type, adapter_type, version, command_json, working_dir,
+                    timeout, cost_profile, usage_risk, preferred_roles_json, avoid_roles_json,
+                    supported_modes_json, capabilities_json, enabled, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(runtime_id) DO UPDATE SET
                     runtime_type = excluded.runtime_type,
+                    adapter_type = excluded.adapter_type,
                     version = excluded.version,
                     command_json = excluded.command_json,
                     working_dir = excluded.working_dir,
                     timeout = excluded.timeout,
                     cost_profile = excluded.cost_profile,
+                    usage_risk = excluded.usage_risk,
+                    preferred_roles_json = excluded.preferred_roles_json,
+                    avoid_roles_json = excluded.avoid_roles_json,
                     supported_modes_json = excluded.supported_modes_json,
                     capabilities_json = excluded.capabilities_json,
                     enabled = excluded.enabled,
@@ -647,11 +790,15 @@ class Storage:
                 (
                     runtime_id,
                     runtime_type,
+                    str(runtime.get("adapter_type") or runtime.get("type") or runtime_type),
                     str(runtime.get("version") or ""),
                     json.dumps([str(item) for item in command], ensure_ascii=False),
                     str(runtime.get("working_dir") or runtime.get("cwd") or ""),
                     int(runtime.get("timeout") or runtime.get("timeout_seconds") or 90),
-                    str(runtime.get("cost_profile") or runtime.get("cost_tier") or "medium"),
+                    cost_tier,
+                    usage_risk,
+                    json.dumps([str(item) for item in preferred_roles], ensure_ascii=False),
+                    json.dumps([str(item) for item in avoid_roles], ensure_ascii=False),
                     json.dumps([str(item) for item in supported_modes], ensure_ascii=False),
                     json.dumps([str(item) for item in capabilities], ensure_ascii=False),
                     1 if runtime.get("enabled", True) else 0,
@@ -1141,20 +1288,30 @@ class Storage:
             if cost_tier not in AGENT_COST_TIERS:
                 raise ValueError(f"invalid cost_tier: {cost_tier}")
             clean["cost_tier"] = cost_tier
-        if "preferred_roles" in fields:
-            roles = fields.get("preferred_roles") or []
+        if "usage_risk" in fields:
+            usage_risk = str(fields.get("usage_risk") or "medium").strip().lower()
+            if usage_risk not in USAGE_RISKS:
+                raise ValueError(f"invalid usage_risk: {usage_risk}")
+            clean["usage_risk"] = usage_risk
+        for field_name, column_name in (
+            ("preferred_roles", "preferred_roles_json"),
+            ("avoid_roles", "avoid_roles_json"),
+        ):
+            if field_name not in fields:
+                continue
+            roles = fields.get(field_name) or []
             if not isinstance(roles, list):
-                raise ValueError("preferred_roles must be a list")
+                raise ValueError(f"{field_name} must be a list")
             normalized_roles = []
             for role in roles:
                 role_text = str(role).strip().lower()
                 if not role_text:
                     continue
                 if role_text not in AGENT_PROFILE_ROLES:
-                    raise ValueError(f"invalid preferred role: {role_text}")
+                    raise ValueError(f"invalid {field_name} role: {role_text}")
                 if role_text not in normalized_roles:
                     normalized_roles.append(role_text)
-            clean["preferred_roles_json"] = json.dumps(normalized_roles, ensure_ascii=False)
+            clean[column_name] = json.dumps(normalized_roles, ensure_ascii=False)
         if "capabilities" in fields:
             capabilities = fields.get("capabilities") or []
             if not isinstance(capabilities, list):
@@ -1180,6 +1337,10 @@ class Storage:
         except Exception:
             data["preferred_roles"] = []
         try:
+            data["avoid_roles"] = json.loads(data.pop("avoid_roles_json") or "[]")
+        except Exception:
+            data["avoid_roles"] = []
+        try:
             data["capabilities"] = json.loads(data.pop("capabilities_json") or "[]")
         except Exception:
             data["capabilities"] = []
@@ -1204,16 +1365,16 @@ class Storage:
                 if current is None:
                     profile = self._normalize_agent_profile({
                         key: agent[key]
-                        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust")
+                        for key in ("cost_tier", "usage_risk", "preferred_roles", "avoid_roles", "capabilities", "speed", "trust")
                         if key in agent
                     })
                     self._conn.execute(
                         """
                         INSERT INTO agents (
                             adapter_id, runtime_name, adapter_type, enabled,
-                            status, last_seen_at, runtime, cost_tier,
-                            preferred_roles_json, capabilities_json, speed, trust
-                        ) VALUES (?, ?, ?, ?, 'configured', NULL, ?, ?, ?, ?, ?, ?)
+                            status, last_seen_at, runtime, cost_tier, usage_risk,
+                            preferred_roles_json, avoid_roles_json, capabilities_json, speed, trust
+                        ) VALUES (?, ?, ?, ?, 'configured', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             adapter_id,
@@ -1222,7 +1383,9 @@ class Storage:
                             1 if enabled else 0,
                             runtime,
                             profile.get("cost_tier", "medium"),
+                            profile.get("usage_risk", "medium"),
                             profile.get("preferred_roles_json", "[]"),
+                            profile.get("avoid_roles_json", "[]"),
                             profile.get("capabilities_json", "[]"),
                             profile.get("speed", 5),
                             profile.get("trust", 5),
@@ -1232,7 +1395,7 @@ class Storage:
                 else:
                     profile = self._normalize_agent_profile({
                         key: agent[key]
-                        for key in ("cost_tier", "preferred_roles", "capabilities", "speed", "trust")
+                        for key in ("cost_tier", "usage_risk", "preferred_roles", "avoid_roles", "capabilities", "speed", "trust")
                         if key in agent
                     })
                     assignments = ["runtime_name = ?", "adapter_type = ?", "enabled = ?", "runtime = ?"]
@@ -1281,8 +1444,8 @@ class Storage:
                 """
                 SELECT adapter_id, adapter_id AS agent_id, runtime_name, adapter_type AS type, enabled,
                        status, last_seen_at, runtime, current_task_id,
-                       current_room, last_message_at, cost_tier, preferred_roles_json,
-                       capabilities_json, speed, trust
+                       current_room, last_message_at, cost_tier, usage_risk,
+                       preferred_roles_json, avoid_roles_json, capabilities_json, speed, trust
                 FROM agents
                 ORDER BY adapter_id ASC
                 """
@@ -1295,8 +1458,8 @@ class Storage:
                 """
                 SELECT adapter_id, adapter_id AS agent_id, runtime_name, adapter_type AS type, enabled,
                        status, last_seen_at, runtime, current_task_id,
-                       current_room, last_message_at, cost_tier, preferred_roles_json,
-                       capabilities_json, speed, trust
+                       current_room, last_message_at, cost_tier, usage_risk,
+                       preferred_roles_json, avoid_roles_json, capabilities_json, speed, trust
                 FROM agents
                 WHERE adapter_id = ?
                 """,
@@ -2048,3 +2211,395 @@ class Storage:
             """,
             (str(uuid.uuid4()), task_id, actor, event_type, old_value, new_value, created_at),
         )
+
+    # ── decisions ────────────────────────────────────────────────────────
+
+    def _decision_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        decision_id = data.get("id") or data.get("decision_id")
+        created_at = data.get("created_at") or data.get("timestamp")
+        room_id = data.get("room_id") or data.get("room_name")
+        reason = data.get("reason") or data.get("reasoning") or ""
+        data["id"] = decision_id
+        data["decision_id"] = decision_id
+        data["created_at"] = created_at
+        data["updated_at"] = data.get("updated_at") or created_at
+        data["timestamp"] = created_at
+        data["room_id"] = room_id
+        data["room_name"] = room_id
+        data["reason"] = reason
+        data["reasoning"] = reason
+        data["linked_runtime_ids"] = json.loads(data.pop("linked_runtime_ids_json") or "[]")
+        data["linked_message_ids"] = json.loads(data.pop("linked_message_ids_json") or "[]")
+        return data
+
+    def create_decision(
+        self,
+        *,
+        title: str,
+        summary: str,
+        linked_runtime_ids: list[str] | None = None,
+        linked_message_ids: list[str] | None = None,
+        decision_id: str | None = None,
+        id: str | None = None,
+        room_id: str | None = None,
+        room_name: str | None = None,
+        task_id: str | None = None,
+        goal_id: str | None = None,
+        proposed_by: str | None = None,
+        reason: str = "",
+        reasoning: str = "",
+        options_considered: str = "",
+        selected_option: str | None = None,
+        risk: str = "",
+        confidence: int | None = None,
+        created_at: str | None = None,
+        timestamp: str | None = None,
+    ) -> dict:
+        record_id = id or decision_id or str(uuid.uuid4())
+        now = created_at or timestamp or utc_now_iso()
+        room = room_id or room_name
+        rationale = reason or reasoning
+        if confidence is not None:
+            confidence = max(0, min(100, int(confidence)))
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO decisions (
+                    id, decision_id, created_at, updated_at, timestamp, room_id, room_name,
+                    task_id, goal_id, proposed_by, approved_by, status, title, summary,
+                    reason, reasoning, options_considered, selected_option, risk, confidence,
+                    linked_runtime_ids_json, linked_message_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id, record_id, now, now, now, room, room, task_id, goal_id, proposed_by,
+                    title, summary, rationale, rationale, options_considered, selected_option,
+                    risk, confidence,
+                    json.dumps(linked_runtime_ids or [], ensure_ascii=False),
+                    json.dumps(linked_message_ids or [], ensure_ascii=False),
+                ),
+            )
+        decision = self.get_decision(record_id)
+        assert decision is not None
+        return decision
+
+    def get_decision(self, decision_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM decisions WHERE id = ? OR decision_id = ?",
+                (decision_id, decision_id),
+            ).fetchone()
+        return self._decision_from_row(row) if row else None
+
+    def list_decisions(
+        self,
+        room_id: str | None = None,
+        room_name: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[object] = []
+        room = room_id or room_name
+        if room is not None:
+            clauses.append("(room_id = ? OR room_name = ?)")
+            params.extend([room, room])
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM decisions {where} ORDER BY COALESCE(created_at, timestamp) DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._decision_from_row(row) for row in rows]
+
+    def latest_decision(self, room_id: str | None = None, status: str | None = None) -> dict | None:
+        decisions = self.list_decisions(room_id=room_id, status=status, limit=1)
+        return decisions[0] if decisions else None
+
+    def update_decision(self, decision_id: str, fields: dict) -> dict | None:
+        if not fields:
+            return self.get_decision(decision_id)
+        allowed = {
+            "room_id", "room_name", "task_id", "goal_id", "approved_by", "status",
+            "title", "summary", "reason", "reasoning", "options_considered", "selected_option",
+            "risk", "confidence", "linked_runtime_ids", "linked_message_ids",
+        }
+        clean: dict[str, object] = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key in ("linked_runtime_ids", "linked_message_ids"):
+                clean[f"{key}_json"] = json.dumps(value or [], ensure_ascii=False)
+            elif key in {"room_id", "room_name"}:
+                clean["room_id"] = value
+                clean["room_name"] = value
+            elif key in {"reason", "reasoning"}:
+                clean["reason"] = value
+                clean["reasoning"] = value
+            else:
+                clean[key] = value
+        if not clean:
+            return self.get_decision(decision_id)
+        clean["updated_at"] = utc_now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE decisions SET {assignments} WHERE id = ? OR decision_id = ?",
+                [*clean.values(), decision_id, decision_id],
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_decision(decision_id)
+
+    def approve_decision(self, decision_id: str, actor: str, created_at: str | None = None) -> dict | None:
+        decision = self.get_decision(decision_id)
+        if decision is None:
+            return None
+        now = created_at or utc_now_iso()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE decisions
+                SET status = 'approved', approved_by = ?, updated_at = ?
+                WHERE id = ? OR decision_id = ?
+                """,
+                (actor, now, decision_id, decision_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._append_decision_event_locked(
+                decision["id"], "approved", actor,
+                {"old_status": decision.get("status"), "new_status": "approved"}, now,
+            )
+        return self.get_decision(decision_id)
+
+    def reject_decision(
+        self,
+        decision_id: str,
+        actor: str,
+        *,
+        reason: str | None = None,
+        created_at: str | None = None,
+    ) -> dict | None:
+        decision = self.get_decision(decision_id)
+        if decision is None:
+            return None
+        now = created_at or utc_now_iso()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE decisions
+                SET status = 'rejected', approved_by = ?, updated_at = ?
+                WHERE id = ? OR decision_id = ?
+                """,
+                (actor, now, decision_id, decision_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._append_decision_event_locked(
+                decision["id"], "rejected", actor,
+                {"old_status": decision.get("status"), "new_status": "rejected", "reason": reason or ""}, now,
+            )
+        return self.get_decision(decision_id)
+
+    def _append_decision_event_locked(
+        self,
+        decision_id: str,
+        event_type: str,
+        actor: str | None,
+        details: dict | str | None,
+        created_at: str,
+    ) -> None:
+        detail_text = json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
+        self._conn.execute(
+            """
+            INSERT INTO decision_events (event_id, decision_id, event_type, actor, old_value, new_value, details, created_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
+            """,
+            (str(uuid.uuid4()), decision_id, event_type, actor or "system", detail_text, created_at),
+        )
+
+    def append_decision_event(
+        self,
+        decision_id: str,
+        event_type: str,
+        actor: str | None = None,
+        details: dict | str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        decision = self.get_decision(decision_id)
+        if decision is None:
+            return
+        with self._lock, self._conn:
+            self._append_decision_event_locked(decision["id"], event_type, actor, details, created_at or utc_now_iso())
+
+    def record_decision_event(
+        self,
+        decision_id: str,
+        event_type: str,
+        actor: str,
+        old_value: str | None,
+        new_value: str | None,
+        details: str | None,
+        created_at: str,
+    ) -> None:
+        detail = details
+        if old_value is not None or new_value is not None:
+            detail = {"old_value": old_value, "new_value": new_value, "details": details}
+        self.append_decision_event(decision_id, event_type, actor, detail, created_at)
+
+    def list_decision_events(self, decision_id: str) -> list[dict] | None:
+        decision = self.get_decision(decision_id)
+        if decision is None:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT event_id, decision_id, event_type, actor, old_value, new_value, details, created_at
+                FROM decision_events
+                WHERE decision_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (decision["id"],),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ── handoffs ──────────────────────────────────────────────────────────
+
+    def _handoff_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["open_questions"] = json.loads(data.pop("open_questions_json") or "[]")
+        data["risks"] = json.loads(data.pop("risks_json") or "[]")
+        return data
+
+    def create_handoff(
+        self,
+        *,
+        handoff_id: str,
+        from_agent: str,
+        to_agent: str,
+        task_id: str | None,
+        room_name: str | None,
+        summary: str,
+        open_questions: list[str],
+        risks: list[str],
+        recommended_next_step: str,
+        confidence: int,
+        created_at: str,
+    ) -> dict:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO handoffs (
+                    handoff_id, from_agent, to_agent, task_id, room_name, summary,
+                    open_questions_json, risks_json, recommended_next_step, confidence,
+                    status, created_at, accepted_at, rejected_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL)
+                """,
+                (
+                    handoff_id, from_agent, to_agent, task_id, room_name, summary,
+                    json.dumps(open_questions, ensure_ascii=False),
+                    json.dumps(risks, ensure_ascii=False),
+                    recommended_next_step, confidence, created_at,
+                ),
+            )
+        return self.get_handoff(handoff_id)
+
+    def get_handoff(self, handoff_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)).fetchone()
+        return self._handoff_from_row(row) if row else None
+
+    def list_handoffs(
+        self,
+        room_name: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if room_name is not None:
+            clauses.append("room_name = ?")
+            params.append(room_name)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if agent is not None:
+            clauses.append("(from_agent = ? OR to_agent = ?)")
+            params.extend([agent, agent])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM handoffs {where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._handoff_from_row(row) for row in rows]
+
+    def update_handoff(self, handoff_id: str, fields: dict) -> dict | None:
+        if not fields:
+            return self.get_handoff(handoff_id)
+        allowed = {
+            "to_agent", "task_id", "room_name", "summary", "open_questions",
+            "risks", "recommended_next_step", "confidence", "status",
+            "accepted_at", "rejected_at", "completed_at",
+        }
+        clean: dict[str, object] = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key in ("open_questions", "risks"):
+                clean[f"{key}_json"] = json.dumps(value or [], ensure_ascii=False)
+            else:
+                clean[key] = value
+        if not clean:
+            return self.get_handoff(handoff_id)
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE handoffs SET {assignments} WHERE handoff_id = ?",
+                [*clean.values(), handoff_id],
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_handoff(handoff_id)
+
+    def record_handoff_event(
+        self,
+        handoff_id: str,
+        event_type: str,
+        actor: str | None,
+        details: str | None,
+        created_at: str,
+    ) -> None:
+        with self._lock, self._conn:
+            if self._conn.execute("SELECT 1 FROM handoffs WHERE handoff_id = ?", (handoff_id,)).fetchone() is None:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO handoff_events (event_id, handoff_id, event_type, actor, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), handoff_id, event_type, actor, details, created_at),
+            )
+
+    def list_handoff_events(self, handoff_id: str) -> list[dict] | None:
+        if self.get_handoff(handoff_id) is None:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT event_id, handoff_id, event_type, actor, details, created_at
+                FROM handoff_events
+                WHERE handoff_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (handoff_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]

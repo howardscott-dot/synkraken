@@ -16,7 +16,17 @@ _ROOM_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
 _TASK_STATUSES = {"open", "in_progress", "blocked", "done"}
 _TASK_PRIORITIES = {"low", "normal", "high"}
 _MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
-_PROFILE_FIELDS = {"cost_tier", "preferred_roles", "capabilities", "speed", "trust", "actor"}
+_DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
+_PROFILE_FIELDS = {
+    "cost_tier",
+    "usage_risk",
+    "preferred_roles",
+    "avoid_roles",
+    "capabilities",
+    "speed",
+    "trust",
+    "actor",
+}
 
 
 def _utc_now_iso() -> str:
@@ -323,6 +333,81 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, data)
             return
 
+        # ── decisions ──────────────────────────────────────────────────
+        if path == "/v1/decisions":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", qs.get("room_id", [None]))[0]
+            status = qs.get("status", [None])[0]
+            limit = int(qs.get("limit", [50])[0])
+            if status and status not in _DECISION_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid decision status"})
+                return
+            self._send(HTTPStatus.OK, {
+                "decisions": self.fabric.storage.list_decisions(room_id=room, status=status, limit=limit)
+            })
+            return
+        if path == "/v1/decision/latest":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", qs.get("room_id", [None]))[0]
+            decision = self.fabric.storage.latest_decision(room_id=room)
+            if not decision:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "no decisions found"})
+                return
+            decision["events"] = self.fabric.storage.list_decision_events(decision["id"]) or []
+            self._send(HTTPStatus.OK, decision)
+            return
+        m = re.fullmatch(r"/v1/decision/([^/]+)", path) or re.fullmatch(r"/v1/decisions/([^/]+)", path)
+        if m:
+            decision_id = unquote(m.group(1))
+            decision = self.fabric.storage.get_decision(decision_id)
+            if not decision:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"decision not found: {decision_id}"})
+                return
+            decision["events"] = self.fabric.storage.list_decision_events(decision_id) or []
+            self._send(HTTPStatus.OK, decision)
+            return
+
+        # ── handoffs ─────────────────────────────────────────────────────
+        if path == "/v1/handoffs":
+            qs = parse_qs(parsed.query)
+            room = qs.get("room", [None])[0]
+            status_q = qs.get("status", [None])[0]
+            agent = qs.get("agent", [None])[0]
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, {
+                "handoffs": self.fabric.storage.list_handoffs(room_name=room, status=status_q, agent=agent, limit=limit)
+            })
+            return
+        m = re.fullmatch(r"/v1/handoffs/([^/]+)", path)
+        if m:
+            handoff_id = unquote(m.group(1))
+            handoff = self.fabric.storage.get_handoff(handoff_id)
+            if not handoff:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"handoff not found: {handoff_id}"})
+                return
+            handoff["events"] = self.fabric.storage.list_handoff_events(handoff_id) or []
+            self._send(HTTPStatus.OK, handoff)
+            return
+
+        # ── flight recorder ──────────────────────────────────────────────
+        m = re.fullmatch(r"/v1/replay/([^/]+)", path)
+        if m:
+            replay_id = unquote(m.group(1))
+            try:
+                result = self.fabric.get_replay(replay_id)
+            except ValueError as exc:
+                self._send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+        if path == "/v1/incident/latest":
+            incident = self.fabric.get_latest_incident()
+            if not incident:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "no incidents found"})
+                return
+            self._send(HTTPStatus.OK, incident)
+            return
+
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def _stream_events(self) -> None:
@@ -586,6 +671,90 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                     result = self.fabric.load_workspace(name)
                 else:
                     result = self.fabric.export_workspace(name)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        # ── decisions ──────────────────────────────────────────────────
+        if path == "/v1/decision/propose":
+            try:
+                payload = self._read_json()
+                result = self.fabric.propose_decision(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path in {"/v1/decision/approve", "/v1/decision/reject"}:
+            action = path.rsplit("/", 1)[1]
+            try:
+                payload = self._read_json()
+                decision_id = str(payload.get("id") or payload.get("decision_id") or "").strip()
+                if not decision_id:
+                    raise ValueError("id required")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if action == "approve":
+                    result = self.fabric.approve_decision(decision_id, actor)
+                else:
+                    result = self.fabric.reject_decision(
+                        decision_id,
+                        actor,
+                        str(payload.get("reason", "")).strip() or None,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        m = re.fullmatch(r"/v1/decision/([^/]+)/(approve|reject)", path)
+        if m:
+            decision_id = unquote(m.group(1))
+            action = m.group(2)
+            try:
+                payload = self._read_json()
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if action == "approve":
+                    result = self.fabric.approve_decision(decision_id, actor)
+                else:
+                    result = self.fabric.reject_decision(
+                        decision_id,
+                        actor,
+                        str(payload.get("reason", "")).strip() or None,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        # ── handoffs ─────────────────────────────────────────────────────
+        if path == "/v1/handoff":
+            try:
+                payload = self._read_json()
+                result = self.fabric.create_handoff(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        m = re.fullmatch(r"/v1/handoff/([^/]+)/(accept|reject|complete)", path)
+        if m:
+            handoff_id = unquote(m.group(1))
+            action = m.group(2)
+            try:
+                payload = self._read_json()
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if action == "accept":
+                    result = self.fabric.accept_handoff(handoff_id, actor)
+                elif action == "reject":
+                    result = self.fabric.reject_handoff(handoff_id, actor)
+                else:
+                    result = self.fabric.complete_handoff(handoff_id, actor)
             except Exception as exc:  # noqa: BLE001
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return

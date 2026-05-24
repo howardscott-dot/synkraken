@@ -25,6 +25,8 @@ Provide a browser-based local operator surface that:
 - supports explicit Goal Mode for the selected room
 - shows Goal Runs with round, score, threshold, owner, reviewers, Token Police,
   Guardrail Agent, status, details, and cancellation for active runs
+- shows recent Decision Records with title, status, proposer, approval or
+  rejection actor, and summary
 
 ## v0.2 goals
 
@@ -101,6 +103,7 @@ The human operator is in control. The default interaction is:
   Guardrail Agent, guardrail status, and run status
 - inspect one Goal Run's recent events and final report summary
 - cancel active Goal Runs
+- list recent Decision Records and show status
 - list durable tasks
 - create a task
 - optionally assign it to an agent
@@ -140,6 +143,7 @@ The command deck must use the existing daemon model:
 | team tasks | `POST /v1/team-tasks` |
 | team governance | `GET /v1/team-runs`, `GET /v1/team-runs/{id}`, `GET /v1/team-runs/{id}/events`, `POST /v1/team-runs/{id}/approve`, `POST /v1/team-runs/{id}/reject` |
 | goal mode | `POST /v1/goal-runs`, `GET /v1/goal-runs`, `GET /v1/goal-runs/{id}`, `GET /v1/goal-runs/{id}/events`, `POST /v1/goal-runs/{id}/cancel` |
+| decisions | `GET /v1/decisions`, `GET /v1/decision/{id}`, `GET /v1/decision/latest`, `POST /v1/decision/propose`, `POST /v1/decision/approve`, `POST /v1/decision/reject` |
 | live updates | `GET /v1/events/stream` |
 | tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
 | task comments | `POST /v1/tasks/{id}/comment` |
@@ -211,6 +215,12 @@ it should not invent alternate semantics.
   `goal_events`
 - Goal Mode is not infinite autonomy, hidden work, background scheduling,
   permissionless execution, unbounded token use, or hardcoded project context
+- Decision Records are daemon-owned durable records through `decisions` and
+  `decision_events`
+- Decision Records show what was decided, who proposed it, who approved or
+  rejected it, why, and what messages or runtimes it relates to
+- Decision Records are not voting, handoffs, policy enforcement, or workflow
+  automation
 - `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
   including failure summary and partial transcript. `/continue-team-run <id>` is
   future work.
@@ -258,7 +268,7 @@ it should not invent alternate semantics.
 - room creation or membership editing
 - direct one-to-one messages
 - conversation search
-- tasks or decisions UI
+- decision workflows beyond a minimal recent-decision list
 - authentication
 - remote hosting
 - external product integrations

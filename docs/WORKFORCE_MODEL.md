@@ -16,6 +16,8 @@ identity or hidden autonomy.
 - tasks: durable work records linked to rooms, agents, and source messages
 - runs: durable team or goal executions with audit events
 - memory: bounded, inspectable room or shared context
+- decisions: durable choices with proposer, approval or rejection actor,
+  rationale, confidence when known, and links to related messages or runtimes
 - events: append-only evidence of state changes and decisions
 
 ## Bounded Workflows
@@ -45,6 +47,15 @@ provider identity, or a security boundary.
 SynKraken may select, assign, and display roles to coordinate work, but it must
 record enough context for operators to inspect who did what, why a run stopped,
 and what remains blocked or done.
+
+## Decision Records
+
+Decision Records v0.1 preserve explicit workforce choices. They record what
+was decided, who proposed it, who approved or rejected it, why, confidence when
+known, and which messages or runtimes the decision relates to.
+
+Decision Records are audit and memory infrastructure. They are not voting,
+handoffs, policy enforcement, autonomous planning, or background execution.
 
 ## Runtime Onboarding
 

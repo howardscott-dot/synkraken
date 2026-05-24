@@ -72,6 +72,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coverage. Goal Mode is not infinite autonomy, hidden work, background
   scheduling, permissionless execution, unbounded token use, or hardcoded
   project context.
+- Decision Records v0.1: durable `decisions` and `decision_events` tables,
+  proposal/approval/rejection APIs, TUI `/decisions`, `/decision latest`,
+  `/decision <id>`, `/approve <id>`, and `/reject <id>` commands, a minimal Web
+  Command Deck decisions panel, and smoke coverage. Decision Records capture
+  what was decided, who proposed it, who approved or rejected it, why, and what
+  messages or runtimes it relates to; they are not voting, handoffs, a policy
+  engine, or flight recorder.
 - Configuration Doctrine: shipped defaults, docs, tests, prompts, and examples
   stay generic; installation-specific identity and project context belong in
   local config, workspace config, room memory, shared memory, skills, runtime

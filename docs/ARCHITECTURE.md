@@ -173,6 +173,16 @@ Goal Mode differs from Team Mode: Team Mode runs one coordinated pass, while
 Goal Mode runs bounded improvement loops until a threshold is met or limits are
 reached. It is not an autonomous background loop.
 
+### Decisions
+
+Durable records of workforce choices. A decision stores status, title, summary,
+reason, proposer, approval or rejection actor, optional room/task/goal links,
+confidence when known, and JSON links to related runtime ids and message ids.
+`decision_events` records proposal, approval, rejection, and later audit events.
+
+Decision Records are not voting, handoffs, policy enforcement, or a flight
+recorder. They preserve what was decided and why.
+
 ## Entity relationships
 
 ```text
@@ -196,6 +206,12 @@ goal_run ─────────── goal_events
     ├─────────────── required room
     └─────────────── linked task
 
+decision ─────────── decision_events
+    ├─────────────── optional room
+    ├─────────────── optional task
+    ├─────────────── optional goal
+    └─────────────── linked message/runtime ids as JSON
+
 conversation_id groups related messages across direct, broadcast, or room flow
 ```
 
@@ -214,13 +230,7 @@ agent, optional source message, status, priority, ownership metadata, durable
 comments, and durable event history. Tasks are now a first-class entity; they do
 not imply automation.
 
-### Decisions
-
-Recorded choices with rationale, participants, and links back to the messages
-or tasks that produced them.
-
-Broader memory systems and decisions remain architectural commitments for later
-slices.
+Broader memory systems remain architectural commitments for later slices.
 
 ## Agent doctrine
 

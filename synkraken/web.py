@@ -108,6 +108,10 @@ INDEX_HTML = """<!doctype html>
         </form>
         <div id="goal-runs-list" class="stack"></div>
       </section>
+      <section class="decisions-box">
+        <h2>Decisions</h2>
+        <div id="decisions-list" class="stack"></div>
+      </section>
       <form id="task-form" class="compact task-form">
         <label for="task-title">Create task</label>
         <input id="task-title" placeholder="Follow up on auth issue">
@@ -393,6 +397,7 @@ const state = {
   tasks: [],
   teamRuns: [],
   goalRuns: [],
+  decisions: [],
   flight: null,
   memory: null,
   currentRoom: null,
@@ -661,6 +666,7 @@ async function selectRoom(name) {
   await refreshMemory();
   await refreshTeamRuns();
   await refreshGoalRuns();
+  await refreshDecisions();
   await refreshTasks();
 }
 
@@ -682,6 +688,7 @@ async function selectAgent(adapterId) {
   await refreshAgents();
   await refreshTeamRuns();
   await refreshGoalRuns();
+  await refreshDecisions();
   await refreshTasks();
 }
 
@@ -923,6 +930,21 @@ async function refreshGoalRuns() {
   });
 }
 
+async function refreshDecisions() {
+  const suffix = state.currentRoom ? `?room=${encodeURIComponent(state.currentRoom)}` : "";
+  const data = await api(`/v1/decisions${suffix}`);
+  state.decisions = data.decisions || [];
+  $("decisions-list").innerHTML = state.decisions.map((decision) => `
+    <article class="item decision status-${esc(decision.status)}">
+      <strong>${esc(decision.status)}</strong>
+      <span class="meta">${esc(decision.title || "Untitled decision")}</span>
+      <span class="meta">proposed: ${esc(decision.proposed_by || "unknown")}</span>
+      <span class="meta">approved/rejected: ${esc(decision.approved_by || "pending")}</span>
+      <span class="meta">${esc((decision.summary || "").slice(0, 110))}</span>
+    </article>
+  `).join("") || `<div class="meta">No decisions${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+}
+
 async function toggleGoalRunDetails(goalRunId) {
   const box = $(`goal-details-${goalRunId}`);
   if (!box.classList.contains("hidden")) {
@@ -1082,6 +1104,7 @@ function parseGoal(rawBody) {
     .map((match) => match[1] ?? match[2] ?? match[3]);
   let threshold = 80;
   let rounds = 3;
+  let mode = "balanced";
   const values = [];
   for (let i = 0; i < matches.length; i += 1) {
     if (matches[i] === "--threshold") {
@@ -1090,14 +1113,18 @@ function parseGoal(rawBody) {
     } else if (matches[i] === "--rounds") {
       i += 1;
       rounds = Number.parseInt(matches[i] || "3", 10);
+    } else if (matches[i] === "--mode") {
+      i += 1;
+      mode = (matches[i] || "balanced").toLowerCase();
+      if (!["cheap", "balanced", "full"].includes(mode)) throw new Error("goal mode must be cheap, balanced, or full");
     } else {
       values.push(matches[i]);
     }
   }
   const goal = values.join(" ").trim();
   if (!state.currentRoom) throw new Error("Goal mode needs a room. Create or select a room first.");
-  if (!goal) throw new Error('usage: /goal [--threshold N] [--rounds N] "goal"');
-  return { room_name: state.currentRoom, goal, threshold, max_rounds: rounds };
+  if (!goal) throw new Error('usage: /goal [--mode cheap|balanced|full] [--threshold N] [--rounds N] "goal"');
+  return { room_name: state.currentRoom, goal, threshold, max_rounds: rounds, mode };
 }
 
 async function discuss(payload) {
@@ -1281,7 +1308,7 @@ $("goal-form").addEventListener("submit", async (event) => {
 
 async function bootstrap() {
   clearMemoryForm();
-  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns()]);
+  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions()]);
   if (state.rooms[0]) await selectRoom(state.rooms[0].name);
   const events = new EventSource("/api/v1/events/stream");
   events.onmessage = async (event) => {
@@ -1309,6 +1336,7 @@ async function bootstrap() {
       if (payload.event.startsWith("task.")) await refreshTasks();
       if (payload.event.startsWith("team.")) await refreshTeamRuns();
       if (payload.event.startsWith("goal.")) await refreshGoalRuns();
+      if (payload.event.startsWith("decision.")) await refreshDecisions();
       if (payload.event.startsWith("goal.") || payload.event.startsWith("team.") || payload.event.startsWith("memory.") || payload.event.startsWith("room.") || payload.event === "dead-letter.recorded") await refreshFlight();
       if (payload.event === "room.memory.updated" && data.room === state.currentRoom) await refreshMemory();
       if (payload.event.startsWith("typing.") || payload.event === "agent.presence") await refreshAgents();

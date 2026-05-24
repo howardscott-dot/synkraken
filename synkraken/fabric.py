@@ -146,6 +146,10 @@ class AgentFabric:
                 "working_dir": adapter_config.get("working_dir") or adapter_config.get("cwd") or "",
                 "timeout": adapter_config.get("timeout_seconds") or self.config.get("routing", {}).get("default_timeout_seconds", 90),
                 "cost_profile": adapter_config.get("cost_profile") or adapter_config.get("cost_tier") or "medium",
+                "cost_tier": adapter_config.get("cost_tier") or adapter_config.get("cost_profile") or "medium",
+                "usage_risk": adapter_config.get("usage_risk") or "medium",
+                "preferred_roles": adapter_config.get("preferred_roles") or [],
+                "avoid_roles": adapter_config.get("avoid_roles") or [],
                 "supported_modes": supported_modes,
                 "capabilities": capabilities,
                 "enabled": adapter_config.get("enabled", True),
@@ -175,11 +179,15 @@ class AgentFabric:
                 "enabled": runtime.get("enabled"),
                 "registered": runtime_id in self.adapters,
                 "command": command,
+                "cost_tier": runtime.get("cost_tier") or runtime.get("cost_profile") or "medium",
+                "usage_risk": runtime.get("usage_risk") or "medium",
+                "preferred_roles": runtime.get("preferred_roles") or [],
+                "avoid_roles": runtime.get("avoid_roles") or [],
                 "ok": bool(adapter and health.get("enabled", True)),
                 "health": health,
                 "warnings": [] if command else ["no command recorded"],
             }
-            if runtime_id == "crush":
+            if health.get("type") == "crush" or runtime.get("adapter_type") == "crush":
                 result["node_bin_dir"] = runtime.get("node_bin_dir")
                 node_available = self._check_node_in_adapter_env(runtime_id)
                 result["node_available"] = node_available
@@ -191,9 +199,10 @@ class AgentFabric:
         if adapter is None:
             return False
         try:
-            import tempfile, os as _os
             check_cmd = ["sh", "-c", "command -v node > /dev/null 2>&1 && echo OK || echo MISSING"]
-            if hasattr(adapter, "_build_env"):
+            if hasattr(adapter, "build_env"):
+                env = adapter.build_env()
+            elif hasattr(adapter, "_build_env"):
                 env = adapter._build_env()
             else:
                 env = None
@@ -247,7 +256,9 @@ class AgentFabric:
         blocked_goals = [goal for goal in goals if goal.get("status") in {"blocked", "failed", "cancelled"}]
         dead_letters = self.storage.list_dead_letters(limit=10).get("dead_letters", [])
         runtimes = self.list_runtimes()
-        premium = sum(1 for item in agents if item.get("cost_tier") == "premium")
+        tiers = Counter(str(item.get("cost_tier") or item.get("cost_profile") or "medium") for item in runtimes)
+        risks = Counter(str(item.get("usage_risk") or "medium") for item in runtimes)
+        premium = tiers.get("premium", 0)
         cost_complexity = "high" if premium >= 2 or len(runtimes) >= 5 else "medium" if premium or len(runtimes) >= 3 else "low"
         token_risk = "high" if len(active_goals) > 2 else "medium" if active_goals else "low"
         pending_reviews = len([run for run in self.storage.list_team_runs(limit=100) if run.get("status") == "awaiting_approval"])
@@ -262,6 +273,10 @@ class AgentFabric:
             "dead_letters": self.storage.count_dead_letters(),
             "recent_dead_letters": dead_letters,
             "cost_complexity": cost_complexity,
+            "cost_profiles": {
+                "cost_tiers": {key: tiers.get(key, 0) for key in ("local", "cheap", "medium", "premium")},
+                "usage_risk": {key: risks.get(key, 0) for key in ("low", "medium", "high")},
+            },
             "memory_count": self.storage.count_shared_memory(),
             "pending_reviews": pending_reviews,
         }
@@ -618,10 +633,13 @@ class AgentFabric:
         agent = self.storage.get_agent(agent_id) or {}
         config = self.config.get("adapters", {}).get(agent_id, {})
         preferred_roles = list(agent.get("preferred_roles") or config.get("preferred_roles") or [])
+        avoid_roles = list(agent.get("avoid_roles") or config.get("avoid_roles") or [])
         capabilities = list(agent.get("capabilities") or config.get("capabilities") or [])
         return {
             "cost_tier": str(agent.get("cost_tier") or config.get("cost_tier") or "medium").lower(),
+            "usage_risk": str(agent.get("usage_risk") or config.get("usage_risk") or "medium").lower(),
             "preferred_roles": [str(item).lower() for item in preferred_roles],
+            "avoid_roles": [str(item).lower() for item in avoid_roles],
             "capabilities": [str(item).lower() for item in capabilities],
             "speed": int(agent.get("speed") or config.get("speed") or 5),
             "trust": int(agent.get("trust") or config.get("trust") or 5),
@@ -633,32 +651,48 @@ class AgentFabric:
         return " ".join([
             profile["config_role"],
             " ".join(profile["preferred_roles"]),
+            " ".join(profile["avoid_roles"]),
             " ".join(profile["capabilities"]),
             profile["cost_tier"],
+            profile["usage_risk"],
         ]).lower()
 
     def _profile_score(self, agent_id: str, role: str, topic: str = "") -> int:
         profile = self._agent_profile(agent_id)
         roles = set(profile["preferred_roles"])
+        avoided = set(profile["avoid_roles"])
         caps = set(profile["capabilities"])
         cost_tier = profile["cost_tier"]
+        usage_risk = profile["usage_risk"]
         score = 0
         if role in roles:
             score += 40
+        if role in avoided:
+            score -= 60
+        if usage_risk == "high":
+            score -= 4
+        elif usage_risk == "low":
+            score += 3
         if role == "owner":
-            if cost_tier == "premium":
-                score += 25
+            deep_topic = any(term in str(topic).lower() for term in ("architecture", "design", "system", "plan", "strategy"))
+            high_fit = "architecture" in caps or "coding" in caps or "files" in caps
+            if cost_tier == "premium" and deep_topic and high_fit:
+                score += 22
+            elif cost_tier == "premium":
+                score -= 8
             if "architecture" in caps:
                 score += 15
-            if any(term in str(topic).lower() for term in ("architecture", "design", "system", "plan")) and "architecture" in caps:
+            if deep_topic and "architecture" in caps:
                 score += 20
             if cost_tier in {"cheap", "local"}:
-                score -= 6
+                score += 4 if not deep_topic else -6
         elif role == "reviewer":
             if "reviewer" in roles:
                 score += 20
             if {"review", "architecture", "quality", "risk"} & caps:
                 score += 12
+            if cost_tier in {"cheap", "local"} and not any(term in str(topic).lower() for term in ("architecture", "security", "risk")):
+                score += 10
         elif role == "token_police":
             if cost_tier in {"cheap", "local"}:
                 score += 30
@@ -1835,6 +1869,83 @@ class AgentFabric:
             return 0
         return max(0, min(100, int(match.group(1))))
 
+    def _goal_mode_limits(self, mode: str) -> dict[str, Any]:
+        profiles = {
+            "cheap": {"max_agents": 2, "max_rounds": 1, "reviewers": 1, "control_roles": False},
+            "balanced": {"max_agents": min(self.goal_max_agents, 4), "max_rounds": min(self.goal_default_max_rounds, 2), "reviewers": 1, "control_roles": True},
+            "full": {"max_agents": self.goal_max_agents, "max_rounds": self.goal_default_max_rounds, "reviewers": self.goal_max_reviewers, "control_roles": True},
+        }
+        if mode not in profiles:
+            raise ValueError("goal mode must be cheap, balanced, or full")
+        return profiles[mode]
+
+    def _goal_mode_agents(self, agents: list[str], mode: str, goal: str) -> list[str]:
+        if mode == "full":
+            return agents[: self.goal_max_agents]
+        tier_rank = {"local": 0, "cheap": 1, "medium": 2, "premium": 3}
+        risk_rank = {"low": 0, "medium": 1, "high": 2}
+        order = {agent: index for index, agent in enumerate(agents)}
+        if mode == "cheap":
+            return sorted(
+                agents,
+                key=lambda agent: (
+                    tier_rank.get(self._agent_profile(agent)["cost_tier"], 2),
+                    risk_rank.get(self._agent_profile(agent)["usage_risk"], 1),
+                    -self._profile_score(agent, "reviewer", goal),
+                    order[agent],
+                ),
+            )[: self._goal_mode_limits(mode)["max_agents"]]
+        owner_candidate = max(
+            agents,
+            key=lambda agent: (self._profile_score(agent, "owner", goal), -order[agent]),
+        )
+        selected = [owner_candidate]
+        remaining = [agent for agent in agents if agent != owner_candidate]
+        selected.extend(sorted(
+            remaining,
+            key=lambda agent: (
+                tier_rank.get(self._agent_profile(agent)["cost_tier"], 2),
+                risk_rank.get(self._agent_profile(agent)["usage_risk"], 1),
+                -max(
+                    self._profile_score(agent, "token_police", goal),
+                    self._profile_score(agent, "reviewer", goal),
+                    self._profile_score(agent, "summary", goal),
+                ),
+                order[agent],
+            ),
+        ))
+        return selected[: self._goal_mode_limits(mode)["max_agents"]]
+
+    def _goal_execution_profile(self, mode: str, agents: list[str], max_rounds: int, reviewers: list[str] | None = None,
+                                token_police: str | None = None, guardrail_agent: str | None = None) -> dict[str, Any]:
+        reviewer_count = len(reviewers or [])
+        control_count = len([agent for agent in (token_police, guardrail_agent) if agent])
+        estimated_calls = (len(agents) * 2) + (max_rounds * (1 + reviewer_count + control_count)) + 1
+        risks = [self._agent_profile(agent)["usage_risk"] for agent in agents]
+        if mode == "full" or "high" in risks:
+            risk_level = "high"
+        elif mode == "balanced" or "medium" in risks:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+        return {
+            "mode": mode,
+            "agents": agents,
+            "max_rounds": max_rounds,
+            "estimated_call_count": estimated_calls,
+            "risk_level": risk_level,
+        }
+
+    def _format_goal_execution_profile(self, profile: dict[str, Any]) -> str:
+        return (
+            "Goal execution profile:\n"
+            f"Mode: {profile['mode']}\n"
+            f"Agents: {', '.join(profile['agents']) or '(none)'}\n"
+            f"Max rounds: {profile['max_rounds']}\n"
+            f"Estimated call count: {profile['estimated_call_count']}\n"
+            f"Risk level: {profile['risk_level']}"
+        )
+
     def _choose_control_roles(self, agents: list[str], owner: str, reviewers: list[str], goal: str) -> tuple[str | None, str | None]:
         others = [agent for agent in agents if agent != owner]
         if not others:
@@ -1975,7 +2086,10 @@ class AgentFabric:
         room_name = str(payload.get("room_name", "")).strip()
         goal = str(payload.get("goal") or payload.get("source_goal") or "").strip()
         threshold = int(payload.get("threshold", self.goal_default_threshold))
-        max_rounds = int(payload.get("max_rounds", payload.get("rounds", self.goal_default_max_rounds)))
+        mode = str(payload.get("mode") or "balanced").strip().lower()
+        mode_limits = self._goal_mode_limits(mode)
+        requested_rounds = int(payload.get("max_rounds", payload.get("rounds", mode_limits["max_rounds"])))
+        max_rounds = min(requested_rounds, mode_limits["max_rounds"])
         if not room_name:
             raise ValueError("Goal mode needs a room. Create or select a room first.")
         if not self.storage.room_exists(room_name):
@@ -1984,9 +2098,9 @@ class AgentFabric:
             raise ValueError("goal required")
         if threshold < 1 or threshold > 100:
             raise ValueError("threshold must be between 1 and 100")
-        if max_rounds < 1 or max_rounds > self.goal_default_max_rounds:
-            raise ValueError(f"rounds must be between 1 and {self.goal_default_max_rounds}")
-        agents = self._room_agents(room_name)[: self.goal_max_agents]
+        if requested_rounds < 1:
+            raise ValueError("rounds must be at least 1")
+        agents = self._goal_mode_agents(self._room_agents(room_name), mode, goal)
         if not agents:
             raise ValueError(f"room has no available agents: {room_name}")
 
@@ -1994,9 +2108,10 @@ class AgentFabric:
         goal_run_id = new_id()
         conversation_id = goal_run_id
         memory_context, memory_items = self._prompt_memory_context(room_name)
+        execution_profile = self._goal_execution_profile(mode, agents, max_rounds)
         prompt_message = self._goal_visible(
             room_name,
-            f"Goal started: {goal}",
+            f"{self._format_goal_execution_profile(execution_profile)}\n\nGoal started: {goal}",
             goal_run_id=goal_run_id,
             actor=source,
             conversation_id=conversation_id,
@@ -2028,7 +2143,13 @@ class AgentFabric:
             started_at=now,
             created_by=source,
         )
-        self.storage.record_goal_event(goal_run_id, "goal_started", actor=source, details={"goal": goal, "participants": agents}, created_at=now)
+        self.storage.record_goal_event(
+            goal_run_id,
+            "goal_started",
+            actor=source,
+            details={"goal": goal, "participants": agents, "execution_profile": execution_profile},
+            created_at=now,
+        )
         self.storage.record_task_event(task_id, "synkraken-goal", "goal_started", None, goal, now)
         self.event_bus.publish("goal.started", {"goal_run_id": goal_run_id, "room_name": room_name, "task_id": task_id})
 
@@ -2064,10 +2185,11 @@ class AgentFabric:
             for agent in agents
         ]
         owner, reviewers, owner_votes, reviewer_votes = self._choose_team_owner(agents, nomination_results, goal)
-        reviewers = [agent for agent in reviewers if agent != owner][: self.goal_max_reviewers]
+        reviewers = [agent for agent in reviewers if agent != owner][: mode_limits["reviewers"]]
         if not reviewers:
             reviewers = [agent for agent in agents if agent != owner][:1]
-        token_police, guardrail_agent = self._choose_control_roles(agents, owner, reviewers, goal)
+        token_police, guardrail_agent = self._choose_control_roles(agents, owner, reviewers, goal) if mode_limits["control_roles"] else (None, None)
+        execution_profile = self._goal_execution_profile(mode, agents, max_rounds, reviewers, token_police, guardrail_agent)
         self.storage.update_goal_run(goal_run_id, {
             "status": "running",
             "owner_agent": owner,
@@ -2077,10 +2199,15 @@ class AgentFabric:
         })
         self.storage.update_task(task_id, {"status": "in_progress", "assigned_agent_id": owner}, "synkraken-goal", utc_now_iso())
         self.storage.record_goal_event(goal_run_id, "owner_selected", actor="synkraken-goal", details={"owner": owner, "owner_votes": owner_votes, "reviewer_votes": reviewer_votes})
-        self.storage.record_goal_event(goal_run_id, "control_roles_selected", actor="synkraken-goal", details={"token_police": token_police, "guardrail_agent": guardrail_agent})
+        self.storage.record_goal_event(
+            goal_run_id,
+            "control_roles_selected",
+            actor="synkraken-goal",
+            details={"token_police": token_police, "guardrail_agent": guardrail_agent, "execution_profile": execution_profile},
+        )
         self._goal_visible(
             room_name,
-            f"Goal owner selected: {owner}\nReviewers: {', '.join(reviewers) or '(none)'}\nToken Police: {token_police or '(none)'}\nGuardrail Agent: {guardrail_agent or '(none)'}",
+            f"{self._format_goal_execution_profile(execution_profile)}\n\nGoal owner selected: {owner}\nReviewers: {', '.join(reviewers) or '(none)'}\nToken Police: {token_police or '(none)'}\nGuardrail Agent: {guardrail_agent or '(none)'}",
             goal_run_id=goal_run_id,
             conversation_id=conversation_id,
         )
@@ -2246,6 +2373,7 @@ class AgentFabric:
             event_type = "goal_completed"
         final_report = (
             "Goal Mode final report\n"
+            f"Mode: {mode}\n"
             f"Goal: {goal}\n"
             f"Status: {status}\n"
             f"Score: {latest_score}/{threshold}\n"
@@ -2275,6 +2403,7 @@ class AgentFabric:
         assert run is not None
         return {
             "goal_run": run,
+            "execution_profile": execution_profile,
             "events": self.storage.list_goal_events(goal_run_id) or [],
             "messages": self.storage.get_room_messages(room_name, limit=200),
             "memory_context": memory_context,
@@ -2647,3 +2776,233 @@ class AgentFabric:
             "deliveries": deliveries,
             "dead_letters": dead_letters,
         }
+
+    # ── Decisions ─────────────────────────────────────────────────────────
+
+    def propose_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title", "")).strip()
+        if not title:
+            raise ValueError("title required")
+        summary = str(payload.get("summary", "")).strip()
+        reason = str(payload.get("reason") or payload.get("reasoning") or "").strip()
+        options_considered = str(payload.get("options_considered", "")).strip()
+        selected_option = str(payload.get("selected_option") or "").strip() or None
+        risk = str(payload.get("risk", "")).strip()
+        raw_confidence = payload.get("confidence")
+        confidence = int(raw_confidence) if raw_confidence not in (None, "") else None
+        room_id = str(payload.get("room_id") or payload.get("room_name") or "").strip() or None
+        task_id = str(payload.get("task_id") or "").strip() or None
+        goal_id = str(payload.get("goal_id") or "").strip() or None
+        proposed_by = str(payload.get("proposed_by") or payload.get("actor") or "operator").strip() or "operator"
+        linked_runtime_ids = [str(x) for x in (payload.get("linked_runtime_ids") or [])]
+        linked_message_ids = [str(x) for x in (payload.get("linked_message_ids") or [])]
+        now = utc_now_iso()
+        decision_id = str(payload.get("id") or payload.get("decision_id") or "").strip() or new_id()
+        decision = self.storage.create_decision(
+            decision_id=decision_id,
+            room_id=room_id,
+            task_id=task_id,
+            goal_id=goal_id,
+            proposed_by=proposed_by,
+            title=title,
+            summary=summary,
+            reason=reason,
+            options_considered=options_considered,
+            selected_option=selected_option,
+            risk=risk,
+            confidence=confidence,
+            linked_runtime_ids=linked_runtime_ids,
+            linked_message_ids=linked_message_ids,
+            created_at=now,
+        )
+        self.storage.append_decision_event(
+            decision_id, "proposed", proposed_by,
+            {"title": title, "status": "proposed"}, now,
+        )
+        self.event_bus.publish("decision.proposed", {"decision_id": decision_id, "id": decision_id, "proposed_by": proposed_by})
+        return {"decision": decision, "events": self.storage.list_decision_events(decision_id) or []}
+
+    def approve_decision(self, decision_id: str, actor: str = "operator") -> dict[str, Any]:
+        decision = self.storage.get_decision(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        if decision["status"] not in {"proposed", "superseded"}:
+            raise ValueError(f"decision cannot be approved in status: {decision['status']}")
+        updated = self.storage.approve_decision(decision_id, actor)
+        self.event_bus.publish("decision.approved", {"decision_id": decision_id, "id": decision_id, "approved_by": actor})
+        return {"decision": updated, "events": self.storage.list_decision_events(decision_id) or []}
+
+    def reject_decision(self, decision_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
+        decision = self.storage.get_decision(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        if decision["status"] not in {"proposed", "superseded"}:
+            raise ValueError(f"decision cannot be rejected in status: {decision['status']}")
+        updated = self.storage.reject_decision(decision_id, actor, reason=reason)
+        self.event_bus.publish("decision.rejected", {"decision_id": decision_id, "id": decision_id, "rejected_by": actor})
+        return {"decision": updated, "events": self.storage.list_decision_events(decision_id) or []}
+
+    def supersede_decision(self, decision_id: str, new_decision_id: str, actor: str = "operator") -> dict[str, Any]:
+        decision = self.storage.get_decision(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        now = utc_now_iso()
+        old_status = decision["status"]
+        self.storage.update_decision(decision_id, {"status": "superseded"})
+        self.storage.record_decision_event(
+            decision_id, "decision_superseded", actor, old_status, "superseded",
+            f"superseded_by={new_decision_id}", now,
+        )
+        self.event_bus.publish("decision.superseded", {"decision_id": decision_id, "superseded_by": new_decision_id})
+        return {"decision": self.storage.get_decision(decision_id), "events": self.storage.list_decision_events(decision_id) or []}
+
+    def get_decision_replay(self, decision_id: str) -> dict[str, Any]:
+        decision = self.storage.get_decision(decision_id)
+        if not decision:
+            raise ValueError(f"decision not found: {decision_id}")
+        events = self.storage.list_decision_events(decision_id) or []
+        messages = []
+        if decision.get("linked_message_ids"):
+            for mid in decision["linked_message_ids"]:
+                msg = self.storage.get_conversation(mid)
+                if msg:
+                    messages.extend(msg.get("messages", []))
+        return {
+            "decision": decision,
+            "events": events,
+            "messages": messages,
+        }
+
+    # ── Handoffs ──────────────────────────────────────────────────────────
+
+    def create_handoff(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from_agent = str(payload.get("from_agent") or payload.get("actor") or "operator").strip() or "operator"
+        to_agent = str(payload.get("to_agent", "")).strip()
+        if not to_agent:
+            raise ValueError("to_agent required")
+        summary = str(payload.get("summary", "")).strip()
+        if not summary:
+            raise ValueError("summary required")
+        room_name = str(payload.get("room_name") or "").strip() or None
+        task_id = str(payload.get("task_id") or "").strip() or None
+        open_questions = [str(x) for x in (payload.get("open_questions") or [])]
+        risks = [str(x) for x in (payload.get("risks") or [])]
+        recommended_next_step = str(payload.get("recommended_next_step") or "").strip()
+        confidence = int(payload.get("confidence", 0) or 0)
+        now = utc_now_iso()
+        handoff_id = str(payload.get("handoff_id") or "").strip() or new_id()
+        handoff = self.storage.create_handoff(
+            handoff_id=handoff_id,
+            from_agent=from_agent,
+            to_agent=to_agent,
+            task_id=task_id,
+            room_name=room_name,
+            summary=summary,
+            open_questions=open_questions,
+            risks=risks,
+            recommended_next_step=recommended_next_step,
+            confidence=confidence,
+            created_at=now,
+        )
+        self.storage.record_handoff_event(handoff_id, "handoff_created", from_agent, None, now)
+        self.event_bus.publish("handoff.created", {"handoff_id": handoff_id, "from_agent": from_agent, "to_agent": to_agent})
+        return {"handoff": handoff, "events": self.storage.list_handoff_events(handoff_id) or []}
+
+    def accept_handoff(self, handoff_id: str, actor: str = "operator") -> dict[str, Any]:
+        handoff = self.storage.get_handoff(handoff_id)
+        if not handoff:
+            raise ValueError(f"handoff not found: {handoff_id}")
+        if handoff["status"] != "pending":
+            raise ValueError(f"handoff cannot be accepted in status: {handoff['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_handoff(handoff_id, {"status": "accepted", "accepted_at": now})
+        self.storage.record_handoff_event(handoff_id, "handoff_accepted", actor, None, now)
+        self.event_bus.publish("handoff.accepted", {"handoff_id": handoff_id, "accepted_by": actor})
+        return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
+
+    def reject_handoff(self, handoff_id: str, actor: str = "operator") -> dict[str, Any]:
+        handoff = self.storage.get_handoff(handoff_id)
+        if not handoff:
+            raise ValueError(f"handoff not found: {handoff_id}")
+        if handoff["status"] != "pending":
+            raise ValueError(f"handoff cannot be rejected in status: {handoff['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_handoff(handoff_id, {"status": "rejected", "rejected_at": now})
+        self.storage.record_handoff_event(handoff_id, "handoff_rejected", actor, None, now)
+        self.event_bus.publish("handoff.rejected", {"handoff_id": handoff_id, "rejected_by": actor})
+        return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
+
+    def complete_handoff(self, handoff_id: str, actor: str = "operator") -> dict[str, Any]:
+        handoff = self.storage.get_handoff(handoff_id)
+        if not handoff:
+            raise ValueError(f"handoff not found: {handoff_id}")
+        if handoff["status"] != "accepted":
+            raise ValueError(f"handoff cannot be completed in status: {handoff['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_handoff(handoff_id, {"status": "completed", "completed_at": now})
+        self.storage.record_handoff_event(handoff_id, "handoff_completed", actor, None, now)
+        self.event_bus.publish("handoff.completed", {"handoff_id": handoff_id, "completed_by": actor})
+        return {"handoff": updated, "events": self.storage.list_handoff_events(handoff_id) or []}
+
+    # ── Flight Recorder ───────────────────────────────────────────────────
+
+    def get_replay(self, replay_id: str) -> dict[str, Any]:
+        goal_run = self.storage.get_goal_run(replay_id)
+        if goal_run:
+            events = self.storage.list_goal_events(replay_id) or []
+            task = self.storage.get_task(goal_run.get("linked_task_id")) if goal_run.get("linked_task_id") else None
+            messages = [
+                message for message in self.storage.get_room_messages(goal_run["room_name"], limit=200)
+                if message.get("conversation_id") == replay_id
+            ]
+            return {
+                "type": "goal_run",
+                "run": goal_run,
+                "events": events,
+                "task": task,
+                "messages": messages,
+            }
+        team_run = self.storage.get_team_run(replay_id)
+        if team_run:
+            events = self.storage.list_team_events(replay_id) or []
+            messages = self.storage.get_room_messages(team_run["room_name"], limit=200)
+            return {
+                "type": "team_run",
+                "run": team_run,
+                "events": events,
+                "messages": [
+                    message for message in messages
+                    if message.get("metadata", {}).get("team_run_id") == replay_id
+                    or message.get("metadata", {}).get("team_task")
+                ],
+            }
+        decision = self.storage.get_decision(replay_id)
+        if decision:
+            return self.get_decision_replay(replay_id) | {"type": "decision"}
+        raise ValueError(f"replay not found: {replay_id}")
+
+    def get_incident(self, incident_id: str) -> dict[str, Any]:
+        return self.get_replay(incident_id)
+
+    def get_latest_incident(self) -> dict[str, Any] | None:
+        failed_goals = self.storage.list_goal_runs(limit=100)
+        failed_goal = next(
+            (g for g in failed_goals if g.get("status") == "failed"),
+            None,
+        )
+        failed_teams = self.storage.list_team_runs(limit=100)
+        failed_team = next(
+            (t for t in failed_teams if t.get("status") in {"blocked", "failed", "completed_with_final_failure"}),
+            None,
+        )
+        if not failed_goal and not failed_team:
+            return None
+        if not failed_goal:
+            return self.get_replay(failed_team["team_run_id"])
+        if not failed_team:
+            return self.get_replay(failed_goal["goal_run_id"])
+        goal_ts = failed_goal.get("started_at") or ""
+        team_ts = failed_team.get("started_at") or ""
+        if goal_ts >= team_ts:
+            return self.get_replay(failed_goal["goal_run_id"])
+        return self.get_replay(failed_team["team_run_id"])

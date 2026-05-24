@@ -74,6 +74,7 @@ COMMANDS = [
     '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject',
     '/goal', '/goals', '/goal-run', '/cancel-goal',
     '/runtimes', '/runtime', '/workspace', '/flight',
+    '/decisions', '/decision', '/handoffs', '/handoff', '/replay', '/incident',
     '/filter', '/help', '/status', '/health', '/agents', '/tail', '/transcript',
     '/save-transcript',
     '/presence', '/agent', '/profiles', '/memory', '/clear', '/refresh', '/quit',
@@ -1155,10 +1156,13 @@ def _view_help(stdscr, top, h, w):
         ('  /goals                          recent goal runs', None, 0),
         ('  /goal-run <id>                  inspect one goal run', None, 0),
         ('  /cancel-goal <id>               cancel a running goal', None, 0),
+        ('  /decisions                      recent decision records', None, 0),
+        ('  /decision latest                inspect latest decision', None, 0),
+        ('  /decision <id>                  inspect one decision', None, 0),
         ('  /team-runs                      recent team runs', None, 0),
         ('  /team-run <id>                  inspect one team run', None, 0),
-        ('  /approve <id>                   approve a pending team run', None, 0),
-        ('  /reject <id>                    reject a pending team run', None, 0),
+        ('  /approve <id>                   approve a decision or pending team run', None, 0),
+        ('  /reject <id>                    reject a decision or pending team run', None, 0),
         ('  /save-transcript                export current room/chat transcript', None, 0),
         ('  /tail                           jump current transcript back to live', None, 0),
         ('  /transcript                     transcript mode: runs, history, filters', None, 0),
@@ -1522,6 +1526,124 @@ def _goal_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str
     return None
 
 
+def _decision_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]] | None:
+    if cmd == '/decisions':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        decisions = _get_json(f'{base}/v1/decisions{suffix}').get('decisions', [])
+        if not decisions:
+            return ('decisions', ['(no decisions)'])
+        return ('decisions', [
+            f"{d.get('id') or d.get('decision_id')}  {d.get('status')}  "
+            f"{str(d.get('created_at') or d.get('timestamp') or '')[:10]}  "
+            f"{str(d.get('title') or '')[:80]}  proposed_by={d.get('proposed_by') or '-'}"
+            for d in decisions
+        ])
+    if cmd == '/decision latest':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        try:
+            decision = _get_json(f'{base}/v1/decision/latest{suffix}')
+        except Exception:
+            return ('decision latest', ['(no decisions)'])
+        return ('decision latest', _format_decision_lines(decision))
+    if cmd.startswith('/decision '):
+        decision_id = cmd.split(' ', 1)[1].strip()
+        if not decision_id:
+            return ('decision', ['usage: /decision <id>'])
+        try:
+            d = _get_json(f'{base}/v1/decision/{decision_id}')
+        except Exception:
+            return ('decision', [f'could not load decision: {decision_id}'])
+        return ('decision', _format_decision_lines(d))
+    if cmd == '/decision':
+        return ('decision', ['usage: /decision latest | /decision <id>'])
+    return None
+
+
+def _format_decision_lines(d: dict) -> list[str]:
+    lines = [
+        f"decision        {d.get('id') or d.get('decision_id')}",
+        f"status          {d.get('status')}",
+        f"title           {d.get('title')}",
+        f"proposed_by     {d.get('proposed_by') or '-'}",
+        f"approved_by     {d.get('approved_by') or '-'}",
+        f"room            {d.get('room_id') or d.get('room_name') or '-'}",
+        f"task            {d.get('task_id') or '-'}",
+        f"goal            {d.get('goal_id') or '-'}",
+        f"confidence      {d.get('confidence') if d.get('confidence') is not None else '-'}",
+        '',
+        f"summary         {str(d.get('summary') or '')[:160]}",
+        f"reason          {str(d.get('reason') or d.get('reasoning') or '')[:160]}",
+    ]
+    runtimes = d.get('linked_runtime_ids') or []
+    messages = d.get('linked_message_ids') or []
+    if runtimes or messages:
+        lines.extend([
+            '',
+            f"runtimes        {', '.join(runtimes) or '-'}",
+            f"messages        {', '.join(messages) or '-'}",
+        ])
+    events = d.get('events') or []
+    if events:
+        lines.extend(['', 'events'])
+        for ev in events[-12:]:
+            lines.append(f"  {str(ev.get('created_at') or '')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or '-'}")
+    return lines
+
+
+def _handoff_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[str]] | None:
+    if cmd == '/handoffs':
+        suffix = f"?room={state['current_room']}" if state.get('current_room') else ""
+        handoffs = _get_json(f'{base}/v1/handoffs{suffix}').get('handoffs', [])
+        if not handoffs:
+            return ('handoffs', ['(no handoffs)'])
+        return ('handoffs', [
+            f"[{h.get('status'):10}] {h.get('created_at')[:10]}  "
+            f"{h.get('from_agent')} -> {h.get('to_agent')}: "
+            f"{h.get('summary', '')[:w-55]}"
+            for h in handoffs
+        ])
+    if cmd.startswith('/handoff '):
+        parts = cmd.split(' ', 2)
+        action = parts[1] if len(parts) > 1 else ''
+        handoff_id = parts[2].strip() if len(parts) > 2 else ''
+        if action == 'create':
+            return ('handoff', ['use POST /v1/handoff to create a handoff'])
+        if action in ('accept', 'reject', 'complete'):
+            if not handoff_id:
+                return ('handoff', [f'usage: /handoff {action} <id>'])
+            result = _post_json(f'{base}/v1/handoff/{handoff_id}/{action}', {'actor': 'synkraken-tui'})
+            h = result.get('handoff', {})
+            return ('handoff', [f"{h.get('handoff_id')}  status={h.get('status')}"])
+        if handoff_id:
+            try:
+                h = _get_json(f'{base}/v1/handoffs/{handoff_id}')
+            except Exception:
+                return ('handoff', [f'could not load handoff: {handoff_id}'])
+            lines = [
+                f"handoff_id      {h.get('handoff_id')}",
+                f"status          {h.get('status')}",
+                f"from_agent      {h.get('from_agent')}",
+                f"to_agent        {h.get('to_agent')}",
+                f"room            {h.get('room_name') or '-'}",
+                f"task            {h.get('task_id') or '-'}",
+                f"confidence      {h.get('confidence')}",
+                f"next_step       {h.get('recommended_next_step')}",
+                '',
+                f"summary:        {h.get('summary')}",
+                f"open_questions: {', '.join(h.get('open_questions') or [])}",
+                f"risks:          {', '.join(h.get('risks') or [])}",
+                '',
+                "Events:",
+            ]
+            for ev in h.get('events', []):
+                lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor')}")
+            return ('handoff', lines)
+        return ('handoff', ['usage: /handoff [create|accept|reject|complete|<id>]'])
+    if cmd == '/handoff':
+        return ('handoff', ['usage: /handoff [create|accept|reject|complete|<id>]'])
+    return None
+
+
 def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
     """Return local-only slash command output without touching the router."""
     health = data.get('health', {})
@@ -1548,19 +1670,21 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
             f"failures        {flight.get('failures')}",
             f"dead letters    {flight.get('dead_letters')}",
             f"cost complexity {flight.get('cost_complexity')}",
+            f"cost tiers      {json.dumps((flight.get('cost_profiles') or {}).get('cost_tiers') or {}, sort_keys=True)}",
+            f"usage risk      {json.dumps((flight.get('cost_profiles') or {}).get('usage_risk') or {}, sort_keys=True)}",
             f"memory count    {flight.get('memory_count')}",
             f"pending reviews {flight.get('pending_reviews')}",
         ])
     if cmd == '/runtimes':
         runtimes = _get_json(f'{base}/v1/runtimes').get('runtimes', [])
         return ('runtimes', [
-            f"{item.get('runtime_id')}  type={item.get('runtime_type')}  cost={item.get('cost_profile')}  timeout={item.get('timeout')}  modes={','.join(item.get('supported_modes') or []) or '-'}"
+            f"{item.get('runtime_id')}  type={item.get('runtime_type')}  cost={item.get('cost_tier') or item.get('cost_profile')}  risk={item.get('usage_risk', 'medium')}  roles={','.join(item.get('preferred_roles') or []) or '-'}  avoid={','.join(item.get('avoid_roles') or []) or '-'}  timeout={item.get('timeout')}  modes={','.join(item.get('supported_modes') or []) or '-'}"
             for item in runtimes
         ] or ['(no runtimes)'])
     if cmd == '/runtime doctor':
         doctor = _get_json(f'{base}/v1/runtimes/doctor').get('runtimes', [])
         return ('runtime doctor', [
-            f"{item.get('runtime_id')}  {'ok' if item.get('ok') else 'check'}  registered={item.get('registered')}  warnings={','.join(item.get('warnings') or []) or '-'}"
+            f"{item.get('runtime_id')}  {'ok' if item.get('ok') else 'check'}  registered={item.get('registered')}  cost={item.get('cost_tier', 'medium')}  risk={item.get('usage_risk', 'medium')}  roles={','.join(item.get('preferred_roles') or []) or '-'}  avoid={','.join(item.get('avoid_roles') or []) or '-'}  warnings={','.join(item.get('warnings') or []) or '-'}"
             for item in doctor
         ] or ['(no runtimes)'])
     if cmd.startswith('/runtime '):
@@ -2028,6 +2152,7 @@ def _parse_goal_args(rest: str, current_room: str | None) -> dict[str, Any]:
         raise ValueError(f'invalid /goal syntax: {exc}') from None
     threshold = 80
     rounds = 3
+    mode = 'balanced'
     values: list[str] = []
     i = 0
     while i < len(parts):
@@ -2040,15 +2165,22 @@ def _parse_goal_args(rest: str, current_room: str | None) -> dict[str, Any]:
         elif part == '--rounds':
             i += 1
             if i >= len(parts):
-                raise ValueError('usage: /goal [--threshold N] [--rounds N] "goal text"')
+                raise ValueError('usage: /goal [--mode cheap|balanced|full] [--threshold N] [--rounds N] "goal text"')
             rounds = int(parts[i])
+        elif part == '--mode':
+            i += 1
+            if i >= len(parts):
+                raise ValueError('usage: /goal [--mode cheap|balanced|full] [--threshold N] [--rounds N] "goal text"')
+            mode = parts[i].strip().lower()
+            if mode not in {'cheap', 'balanced', 'full'}:
+                raise ValueError('goal mode must be cheap, balanced, or full')
         else:
             values.append(part)
         i += 1
     goal = ' '.join(values).strip()
     if not goal:
-        raise ValueError('usage: /goal [--threshold N] [--rounds N] "goal text"')
-    return {'room_name': current_room, 'goal': goal, 'threshold': threshold, 'max_rounds': rounds}
+        raise ValueError('usage: /goal [--mode cheap|balanced|full] [--threshold N] [--rounds N] "goal text"')
+    return {'room_name': current_room, 'goal': goal, 'threshold': threshold, 'max_rounds': rounds, 'mode': mode}
 
 
 def _handle_goal_run(base: str, params: dict[str, Any]) -> dict:
@@ -2058,6 +2190,7 @@ def _handle_goal_run(base: str, params: dict[str, Any]) -> dict:
         'goal': params['goal'],
         'threshold': params['threshold'],
         'max_rounds': params['max_rounds'],
+        'mode': params.get('mode', 'balanced'),
     })
 
 
@@ -2776,6 +2909,67 @@ def _main(stdscr):
                     hint = ''
                     continue
 
+                decision_output = _decision_command_lines(cmd, base, state)
+                if decision_output is not None:
+                    state['local_output'] = decision_output
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                handoff_output = _handoff_command_lines(cmd, base, state)
+                if handoff_output is not None:
+                    state['local_output'] = handoff_output
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                if cmd.startswith('/replay '):
+                    replay_id = cmd.split(' ', 1)[1].strip()
+                    if not replay_id:
+                        state['local_output'] = ('replay', ['usage: /replay <id>'])
+                        state['view'] = 'local-output'
+                        hint = ''
+                        continue
+                    try:
+                        replay = _get_json(f'{base}/v1/replay/{replay_id}')
+                        lines = [
+                            f"type            {replay.get('type')}",
+                            f"run_id          {replay.get('run', {}).get('goal_run_id') or replay.get('run', {}).get('team_run_id') or replay_id}",
+                            f"status          {replay.get('run', {}).get('status')}",
+                            '',
+                            "Events:",
+                        ]
+                        for ev in replay.get('events', []):
+                            lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or ''}")
+                        lines.extend(['', 'Messages:', ''])
+                        for msg in replay.get('messages', []):
+                            lines.append(f"  {msg.get('source')} -> {msg.get('target')}: {str(msg.get('body') or '')[:80]}")
+                        state['local_output'] = ('replay', lines)
+                    except Exception as exc:
+                        state['local_output'] = ('replay', [f'error: {exc}'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                if cmd == '/incident latest' or cmd == '/incident':
+                    try:
+                        incident = _get_json(f'{base}/v1/incident/latest')
+                        lines = [
+                            f"type            {incident.get('type')}",
+                            f"run_id          {incident.get('run', {}).get('goal_run_id') or incident.get('run', {}).get('team_run_id')}",
+                            f"status          {incident.get('run', {}).get('status')}",
+                            '',
+                            "Events:",
+                        ]
+                        for ev in incident.get('events', []):
+                            lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or ''}")
+                        state['local_output'] = ('incident', lines)
+                    except Exception:
+                        state['local_output'] = ('incident', ['no incidents found'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
                 local_output = _local_command_lines(cmd, base, data, state)
                 if local_output is not None:
                     state['local_output'] = local_output
@@ -2945,24 +3139,35 @@ def _main(stdscr):
                     continue
 
                 if cmd.startswith('/approve ') or cmd.startswith('/reject '):
-                    action, team_run_id = cmd.split(' ', 1)
-                    team_run_id = team_run_id.strip()
-                    if not team_run_id:
-                        hint = f'usage: {action} <team_run_id>'
+                    action, record_id = cmd.split(' ', 1)
+                    record_id = record_id.strip()
+                    if not record_id:
+                        hint = f'usage: {action} <id>'
                         continue
                     try:
                         result = _post_json(
-                            f"{base}/v1/team-runs/{team_run_id}/{action.lstrip('/')}",
-                            {'actor': 'synkraken-tui'},
+                            f"{base}/v1/decision/{action.lstrip('/')}",
+                            {'id': record_id, 'actor': 'synkraken-tui'},
                         )
-                        run = result.get('team_run') or {}
-                        state['local_output'] = (action.lstrip('/'), _format_team_run_lines(run))
+                        decision = result.get('decision') or {}
+                        decision['events'] = result.get('events') or []
+                        state['local_output'] = (action.lstrip('/'), _format_decision_lines(decision))
                         state['view'] = 'local-output'
-                        hint = f"{'approved' if action == '/approve' else 'rejected'} {team_run_id}"
+                        hint = f"{'approved' if action == '/approve' else 'rejected'} decision {record_id}"
                     except Exception as exc:  # noqa: BLE001
-                        state['local_output'] = (action.lstrip('/'), [str(exc)])
-                        state['view'] = 'local-output'
-                        hint = ''
+                        try:
+                            result = _post_json(
+                                f"{base}/v1/team-runs/{record_id}/{action.lstrip('/')}",
+                                {'actor': 'synkraken-tui'},
+                            )
+                            run = result.get('team_run') or {}
+                            state['local_output'] = (action.lstrip('/'), _format_team_run_lines(run))
+                            state['view'] = 'local-output'
+                            hint = f"{'approved' if action == '/approve' else 'rejected'} {record_id}"
+                        except Exception:
+                            state['local_output'] = (action.lstrip('/'), [str(exc)])
+                            state['view'] = 'local-output'
+                            hint = ''
                     continue
 
                 if cmd.startswith('/discuss '):

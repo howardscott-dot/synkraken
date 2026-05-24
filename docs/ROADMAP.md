@@ -87,6 +87,10 @@ works.
   reviewer assignment, Token Police and Guardrail Agent control roles,
   threshold scoring, compact revision rounds, durable `goal_runs` and
   `goal_events`, Web/TUI/API controls, and no background autonomy
+- Decision Records v0.1: durable proposed, approved, rejected, or superseded
+  decisions with proposer, approval or rejection actor, reason, confidence,
+  related runtime ids, related message ids, API routes, TUI commands, a minimal
+  Web Command Deck list, and append-only decision events
 
 ### Deliberately deferred
 
@@ -96,7 +100,7 @@ works.
 - autonomous, semantic, or personal memory systems beyond peer-reviewed Shared
   Memory
 - vector DBs, embeddings, RAG, and semantic search
-- decision registry
+- voting, handoffs, policy engine, flight recorder, and decision workflows
 - external product integrations
 - remote multi-user deployment
 - heavyweight frontend stack
@@ -114,9 +118,10 @@ works.
 7. Goal Mode v0.1: bounded team execution loops for selected rooms, with
    threshold scoring, token budget review, guardrail review, and visible
    transcripts
-8. Runtime Discovery hardening: adapter additions for discovered registry-only
+8. Decision Records v0.1: record what was decided, who proposed it, who
+   approved or rejected it, why, and what messages or runtimes it relates to
+9. Runtime Discovery hardening: adapter additions for discovered registry-only
    runtimes, richer local server probes, and non-secret health diagnostics
-9. Decisions v0.4
 10. Handoffs v0.5
 11. Workspace Packs v0.6
 12. External product integrations v0.7
