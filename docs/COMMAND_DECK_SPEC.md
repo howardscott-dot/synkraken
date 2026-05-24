@@ -29,6 +29,8 @@ Provide a browser-based local operator surface that:
   rejection actor, and summary
 - shows recent Handoffs with status, from-agent, to-agent, summary, and
   recommended next step
+- shows a minimal Flight Recorder / Incident panel for replaying existing work
+  and inspecting the latest failure context
 
 ## v0.2 goals
 
@@ -107,6 +109,9 @@ The human operator is in control. The default interaction is:
 - cancel active Goal Runs
 - list recent Decision Records and show status
 - list recent Handoffs and show status, sender, receiver, summary, and next step
+- show latest incident context
+- replay a conversation, task, goal run, decision, or handoff id as a plain
+  timeline
 - list durable tasks
 - create a task
 - optionally assign it to an agent
@@ -148,6 +153,7 @@ The command deck must use the existing daemon model:
 | goal mode | `POST /v1/goal-runs`, `GET /v1/goal-runs`, `GET /v1/goal-runs/{id}`, `GET /v1/goal-runs/{id}/events`, `POST /v1/goal-runs/{id}/cancel` |
 | decisions | `GET /v1/decisions`, `GET /v1/decision/{id}`, `GET /v1/decision/latest`, `POST /v1/decision/propose`, `POST /v1/decision/approve`, `POST /v1/decision/reject` |
 | handoffs | `GET /v1/handoffs`, `GET /v1/handoff/{id}`, `GET /v1/handoff/latest`, `POST /v1/handoff`, `POST /v1/handoff/accept`, `POST /v1/handoff/reject`, `POST /v1/handoff/complete` |
+| flight recorder | `GET /v1/replay/{id}`, `GET /v1/incident/latest` |
 | live updates | `GET /v1/events/stream` |
 | tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
 | task comments | `POST /v1/tasks/{id}/comment` |
@@ -232,6 +238,13 @@ it should not invent alternate semantics.
   worker accepted, rejected, or completed it
 - Handoffs are not approval chains, voting, policy enforcement, scheduling, or
   autonomous workflow automation
+- Flight Recorder is daemon-owned read-model assembly through `GET
+  /v1/replay/{id}` and `GET /v1/incident/latest`
+- Flight Recorder reconstructs messages, deliveries, dead letters, decisions,
+  handoffs, task events, goal events, runtime participation, failures, and
+  outcome from existing persisted state
+- Flight Recorder is not a policy engine, approval chain, cost dashboard,
+  reputation system, visual analytics surface, or workflow automation
 - `/team-run <id>` and `GET /v1/team-runs/{id}` inspect failed or blocked runs,
   including failure summary and partial transcript. `/continue-team-run <id>` is
   future work.

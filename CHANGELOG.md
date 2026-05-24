@@ -85,6 +85,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Handoffs record what work was handed off, who handed it off, who received it,
   what context, risks, and next steps were attached, and whether the receiving
   worker accepted, rejected, or completed it.
+- Flight Recorder v0.1: replay API and latest-incident API that reconstruct AI
+  work from existing messages, deliveries, dead letters, decisions, handoffs,
+  tasks, and goal events; TUI `/replay <id>` and `/incident latest`; a minimal
+  read-only Web Command Deck panel; and smoke coverage. Flight Recorder is a
+  read model for inspection, not a policy engine, approval chain, analytics
+  dashboard, or new workflow runtime.
 - Configuration Doctrine: shipped defaults, docs, tests, prompts, and examples
   stay generic; installation-specific identity and project context belong in
   local config, workspace config, room memory, shared memory, skills, runtime

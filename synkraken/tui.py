@@ -1201,6 +1201,8 @@ def _view_help(stdscr, top, h, w):
         ('  /workspace init|load|export     manage workspace pack', None, 0),
         ('  /workspace list                 list workspace packs', None, 0),
         ('  /flight                         live control-plane status', None, 0),
+        ('  /replay <id>                    reconstruct messages, failures, decisions, handoffs', None, 0),
+        ('  /incident latest                show latest failure/dead-letter context', None, 0),
         ('  /tasks                          recent / open tasks', None, 0),
         ('  /dashboard                      overview (default)', None, 0),
         ('  /events                         live event stream', None, 0),
@@ -1673,6 +1675,42 @@ def _format_handoff_lines(h: dict) -> list[str]:
         lines.extend(['', 'events'])
         for ev in events[-12:]:
             lines.append(f"  {str(ev.get('created_at') or '')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or '-'}")
+    return lines
+
+
+def _format_replay_lines(replay: dict) -> list[str]:
+    summary = replay.get('summary') or {}
+    lines = [
+        f"Replay: {replay.get('id')}",
+        f"Kind: {replay.get('kind')}",
+        f"Outcome: {summary.get('outcome')}",
+        "",
+    ]
+    timeline = replay.get('timeline') or []
+    if not timeline:
+        lines.append("(no timeline events)")
+    for event in timeline:
+        timestamp = str(event.get('timestamp') or '')[:16].replace('T', ' ')
+        actor = event.get('actor') or event.get('source') or 'system'
+        target = event.get('target')
+        heading = f"{timestamp} {actor}"
+        if target:
+            heading += f" -> {target}"
+        lines.extend([
+            heading.rstrip(),
+            f"  {event.get('summary') or event.get('event_type')} [{event.get('status')}]",
+            "",
+        ])
+    lines.extend([
+        "Summary:",
+        f"messages: {summary.get('message_count', 0)}",
+        f"decisions: {summary.get('decision_count', 0)}",
+        f"handoffs: {summary.get('handoff_count', 0)}",
+        f"failures: {summary.get('failure_count', 0)}",
+    ])
+    runtimes = summary.get('runtimes') or []
+    if runtimes:
+        lines.append(f"runtimes: {', '.join(runtimes)}")
     return lines
 
 
@@ -3009,40 +3047,29 @@ def _main(stdscr):
                         continue
                     try:
                         replay = _get_json(f'{base}/v1/replay/{replay_id}')
-                        lines = [
-                            f"type            {replay.get('type')}",
-                            f"run_id          {replay.get('run', {}).get('goal_run_id') or replay.get('run', {}).get('team_run_id') or replay_id}",
-                            f"status          {replay.get('run', {}).get('status')}",
-                            '',
-                            "Events:",
-                        ]
-                        for ev in replay.get('events', []):
-                            lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or ''}")
-                        lines.extend(['', 'Messages:', ''])
-                        for msg in replay.get('messages', []):
-                            lines.append(f"  {msg.get('source')} -> {msg.get('target')}: {str(msg.get('body') or '')[:80]}")
-                        state['local_output'] = ('replay', lines)
+                        state['local_output'] = ('replay', _format_replay_lines(replay))
                     except Exception as exc:
                         state['local_output'] = ('replay', [f'error: {exc}'])
                     state['view'] = 'local-output'
                     hint = ''
                     continue
 
+                if cmd == '/replay':
+                    state['local_output'] = ('replay', ['usage: /replay <id>'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
                 if cmd == '/incident latest' or cmd == '/incident':
                     try:
-                        incident = _get_json(f'{base}/v1/incident/latest')
-                        lines = [
-                            f"type            {incident.get('type')}",
-                            f"run_id          {incident.get('run', {}).get('goal_run_id') or incident.get('run', {}).get('team_run_id')}",
-                            f"status          {incident.get('run', {}).get('status')}",
-                            '',
-                            "Events:",
-                        ]
-                        for ev in incident.get('events', []):
-                            lines.append(f"  {ev.get('created_at')[:19]}  {ev.get('event_type')}  actor={ev.get('actor') or ''}")
-                        state['local_output'] = ('incident', lines)
-                    except Exception:
-                        state['local_output'] = ('incident', ['no incidents found'])
+                        result = _get_json(f'{base}/v1/incident/latest')
+                        incident = result.get('incident')
+                        if incident:
+                            state['local_output'] = ('incident', _format_replay_lines(incident))
+                        else:
+                            state['local_output'] = ('incident', [result.get('message') or 'No incidents recorded.'])
+                    except Exception as exc:
+                        state['local_output'] = ('incident', [f'error: {exc}'])
                     state['view'] = 'local-output'
                     hint = ''
                     continue

@@ -132,6 +132,16 @@ memory mining.
 Operational records attached to messages. These preserve the distinction
 between "what was asked" and "what happened when it was sent."
 
+### Flight records
+
+Flight Recorder v0.1 is a read model assembled from existing persisted data.
+It does not add a workflow schema. `GET /v1/replay/<id>` reconstructs a
+conversation, task, goal run, decision, or handoff into a timestamped timeline
+covering messages, deliveries, dead letters, decisions, handoffs, task events,
+goal events, runtime participation, failures, and outcome. `GET
+/v1/incident/latest` anchors on the latest failed delivery or dead letter and
+returns the related replay context.
+
 ### Agent events
 
 Append-only operational events attached to agents. These record visible
@@ -232,6 +242,8 @@ handoff ──────────── handoff_events
     └─────────────── linked message/decision ids as JSON
 
 conversation_id groups related messages across direct, broadcast, or room flow
+
+flight replay reads across the existing tables above; it does not own a table
 ```
 
 ## Planned first-class entities

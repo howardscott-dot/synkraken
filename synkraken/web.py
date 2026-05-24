@@ -116,6 +116,16 @@ INDEX_HTML = """<!doctype html>
         <h2>Handoffs</h2>
         <div id="handoffs-list" class="stack"></div>
       </section>
+      <section class="flight-recorder-box">
+        <h2>Flight Recorder</h2>
+        <form id="replay-form" class="compact">
+          <label for="replay-id">Replay id</label>
+          <input id="replay-id" placeholder="conversation, task, goal, decision, handoff">
+          <button type="submit">Replay</button>
+        </form>
+        <div id="incident-panel" class="stack"></div>
+        <div id="replay-panel" class="stack"></div>
+      </section>
       <form id="task-form" class="compact task-form">
         <label for="task-title">Create task</label>
         <input id="task-title" placeholder="Follow up on auth issue">
@@ -373,6 +383,17 @@ select {
   color: var(--muted);
   font-size: .82rem;
 }
+.timeline {
+  display: grid;
+  gap: .4rem;
+  font-size: .82rem;
+}
+.timeline-row {
+  border-left: 2px solid var(--line);
+  padding-left: .55rem;
+}
+.timeline-row.failed { border-left-color: #ff8a80; }
+.timeline-row.completed { border-left-color: var(--ok); }
 .presence-line {
   display: flex;
   justify-content: space-between;
@@ -404,6 +425,8 @@ const state = {
   decisions: [],
   handoffs: [],
   flight: null,
+  latestIncident: null,
+  replay: null,
   memory: null,
   currentRoom: null,
   currentAgent: null,
@@ -966,6 +989,39 @@ async function refreshHandoffs() {
   `).join("") || `<div class="meta">No handoffs${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
 }
 
+function replayHtml(replay, title = "Replay") {
+  if (!replay) return "";
+  const summary = replay.summary || {};
+  const rows = (replay.timeline || []).slice(-12).map((event) => `
+    <div class="timeline-row ${esc(event.status || "")}">
+      <span class="meta">${esc((event.timestamp || "").slice(0, 16).replace("T", " "))} · ${esc(event.source || "")}</span>
+      <div><strong>${esc(event.actor || "system")}${event.target ? ` → ${esc(event.target)}` : ""}</strong></div>
+      <div>${esc(event.summary || event.event_type || "event")}</div>
+    </div>
+  `).join("");
+  return `
+    <article class="item">
+      <strong>${esc(title)}: ${esc(replay.id)}</strong>
+      <span class="meta">${esc(replay.kind)} · ${esc(summary.outcome || "unknown")} · messages ${esc(summary.message_count || 0)} · failures ${esc(summary.failure_count || 0)}</span>
+      <div class="timeline">${rows || `<div class="meta">No timeline events.</div>`}</div>
+    </article>
+  `;
+}
+
+async function refreshIncident() {
+  const result = await api("/v1/incident/latest");
+  state.latestIncident = result.incident || null;
+  $("incident-panel").innerHTML = state.latestIncident
+    ? replayHtml(state.latestIncident, "Latest incident")
+    : `<div class="meta">${esc(result.message || "No incidents recorded.")}</div>`;
+}
+
+async function loadReplay(id) {
+  const replay = await api(`/v1/replay/${encodeURIComponent(id)}`);
+  state.replay = replay;
+  $("replay-panel").innerHTML = replayHtml(replay, "Replay");
+}
+
 async function toggleGoalRunDetails(goalRunId) {
   const box = $(`goal-details-${goalRunId}`);
   if (!box.classList.contains("hidden")) {
@@ -1326,10 +1382,23 @@ $("goal-form").addEventListener("submit", async (event) => {
     setNotice(`goal failed: ${error.message}`);
   }
 });
+$("replay-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const id = $("replay-id").value.trim();
+  if (!id) {
+    setNotice("replay needs an id");
+    return;
+  }
+  try {
+    await loadReplay(id);
+  } catch (error) {
+    setNotice(`replay failed: ${error.message}`);
+  }
+});
 
 async function bootstrap() {
   clearMemoryForm();
-  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions(), refreshHandoffs()]);
+  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions(), refreshHandoffs(), refreshIncident()]);
   if (state.rooms[0]) await selectRoom(state.rooms[0].name);
   const events = new EventSource("/api/v1/events/stream");
   events.onmessage = async (event) => {
@@ -1359,6 +1428,7 @@ async function bootstrap() {
       if (payload.event.startsWith("goal.")) await refreshGoalRuns();
       if (payload.event.startsWith("decision.")) await refreshDecisions();
       if (payload.event.startsWith("handoff.")) await refreshHandoffs();
+      if (payload.event === "dead-letter.recorded" || payload.event === "delivery.recorded") await refreshIncident();
       if (payload.event.startsWith("goal.") || payload.event.startsWith("team.") || payload.event.startsWith("memory.") || payload.event.startsWith("room.") || payload.event === "dead-letter.recorded") await refreshFlight();
       if (payload.event === "room.memory.updated" && data.room === state.currentRoom) await refreshMemory();
       if (payload.event.startsWith("typing.") || payload.event === "agent.presence") await refreshAgents();

@@ -2956,62 +2956,357 @@ class AgentFabric:
     # ── Flight Recorder ───────────────────────────────────────────────────
 
     def get_replay(self, replay_id: str) -> dict[str, Any]:
-        goal_run = self.storage.get_goal_run(replay_id)
-        if goal_run:
-            events = self.storage.list_goal_events(replay_id) or []
-            task = self.storage.get_task(goal_run.get("linked_task_id")) if goal_run.get("linked_task_id") else None
-            messages = [
-                message for message in self.storage.get_room_messages(goal_run["room_name"], limit=200)
-                if message.get("conversation_id") == replay_id
-            ]
-            return {
-                "type": "goal_run",
-                "run": goal_run,
-                "events": events,
-                "task": task,
-                "messages": messages,
-            }
-        team_run = self.storage.get_team_run(replay_id)
-        if team_run:
-            events = self.storage.list_team_events(replay_id) or []
-            messages = self.storage.get_room_messages(team_run["room_name"], limit=200)
-            return {
-                "type": "team_run",
-                "run": team_run,
-                "events": events,
-                "messages": [
-                    message for message in messages
-                    if message.get("metadata", {}).get("team_run_id") == replay_id
-                    or message.get("metadata", {}).get("team_task")
-                ],
-            }
-        decision = self.storage.get_decision(replay_id)
-        if decision:
-            return self.get_decision_replay(replay_id) | {"type": "decision"}
-        raise ValueError(f"replay not found: {replay_id}")
+        context = self._flight_context(replay_id)
+        timeline: list[dict[str, Any]] = []
+        messages = context["messages"]
+        message_ids = [message["message_id"] for message in messages]
+        deliveries = self.storage.list_deliveries_for_messages(message_ids)
+        dead_letters = self.storage.list_dead_letters_for_messages(message_ids)
+
+        for message in messages:
+            timeline.append(self._timeline_event(
+                message.get("timestamp"),
+                "message",
+                message.get("source"),
+                message.get("target"),
+                self._summarize(message.get("body") or "message sent"),
+                "sent",
+                "messages",
+            ))
+        for delivery in deliveries:
+            timeline.append(self._timeline_event(
+                delivery.get("created_at"),
+                "delivery",
+                delivery.get("adapter_id"),
+                None,
+                self._summarize(delivery.get("body") or delivery.get("error") or delivery.get("status") or "delivery recorded"),
+                str(delivery.get("status") or ("completed" if delivery.get("ok") else "failed")),
+                "deliveries",
+            ))
+        for dead_letter in dead_letters:
+            timeline.append(self._timeline_event(
+                dead_letter.get("created_at"),
+                "dead_letter",
+                dead_letter.get("adapter_id"),
+                None,
+                self._summarize(dead_letter.get("reason") or "delivery failed"),
+                "failed",
+                "dead_letters",
+            ))
+
+        task = context.get("task")
+        if task:
+            timeline.append(self._timeline_event(
+                task.get("created_at"),
+                "task_created",
+                task.get("created_by"),
+                task.get("assigned_agent_id"),
+                self._summarize(task.get("title") or "task created"),
+                task.get("status"),
+                "tasks",
+            ))
+            for event in self.storage.list_task_events(task["task_id"]) or []:
+                timeline.append(self._timeline_event(
+                    event.get("created_at"),
+                    event.get("event_type"),
+                    event.get("actor"),
+                    task.get("assigned_agent_id"),
+                    self._summarize(event.get("new_value") or event.get("old_value") or event.get("event_type") or "task event"),
+                    task.get("status"),
+                    "tasks",
+                ))
+
+        goal = context.get("goal")
+        if goal:
+            timeline.append(self._timeline_event(
+                goal.get("started_at"),
+                "goal_started",
+                goal.get("created_by"),
+                goal.get("room_name"),
+                self._summarize(goal.get("source_goal") or "goal started"),
+                goal.get("status"),
+                "goals",
+            ))
+            for event in self.storage.list_goal_events(goal["goal_run_id"]) or []:
+                timeline.append(self._timeline_event(
+                    event.get("created_at"),
+                    event.get("event_type"),
+                    event.get("actor"),
+                    goal.get("room_name"),
+                    self._summarize(event.get("details") or event.get("event_type") or "goal event"),
+                    goal.get("status"),
+                    "goals",
+                ))
+
+        for decision in context["decisions"]:
+            timeline.append(self._timeline_event(
+                decision.get("created_at") or decision.get("timestamp"),
+                "decision",
+                decision.get("proposed_by"),
+                decision.get("room_name") or decision.get("task_id") or decision.get("goal_id"),
+                self._summarize(decision.get("summary") or decision.get("title") or "decision recorded"),
+                decision.get("status"),
+                "decisions",
+            ))
+            for event in self.storage.list_decision_events(decision["id"]) or []:
+                timeline.append(self._timeline_event(
+                    event.get("created_at"),
+                    f"decision_{event.get('event_type')}",
+                    event.get("actor"),
+                    decision.get("id"),
+                    self._summarize(event.get("details") or event.get("event_type") or "decision event"),
+                    decision.get("status"),
+                    "decisions",
+                ))
+
+        for handoff in context["handoffs"]:
+            timeline.append(self._timeline_event(
+                handoff.get("created_at"),
+                "handoff",
+                handoff.get("from_agent"),
+                handoff.get("to_agent"),
+                self._summarize(handoff.get("summary") or "handoff recorded"),
+                handoff.get("status"),
+                "handoffs",
+            ))
+            for event in self.storage.list_handoff_events(handoff["id"]) or []:
+                timeline.append(self._timeline_event(
+                    event.get("created_at"),
+                    f"handoff_{event.get('event_type')}",
+                    event.get("actor"),
+                    handoff.get("to_agent"),
+                    self._summarize(event.get("details") or event.get("event_type") or "handoff event"),
+                    handoff.get("status"),
+                    "handoffs",
+                ))
+
+        timeline.sort(key=lambda item: (item.get("timestamp") or "", item.get("source") or "", item.get("event_type") or ""))
+        return {
+            "id": replay_id,
+            "kind": context["kind"],
+            "timeline": timeline,
+            "summary": self._flight_summary(context, timeline, messages, deliveries, dead_letters),
+        }
 
     def get_incident(self, incident_id: str) -> dict[str, Any]:
         return self.get_replay(incident_id)
 
-    def get_latest_incident(self) -> dict[str, Any] | None:
-        failed_goals = self.storage.list_goal_runs(limit=100)
-        failed_goal = next(
-            (g for g in failed_goals if g.get("status") == "failed"),
-            None,
+    def get_latest_incident(self) -> dict[str, Any]:
+        anchor = self.storage.latest_incident_anchor()
+        if not anchor:
+            return {"incident": None, "message": "No incidents recorded."}
+        message = self.storage.get_message(str(anchor.get("message_id") or ""))
+        replay_id = (message or {}).get("conversation_id") or str(anchor.get("message_id") or "")
+        replay = self.get_replay(replay_id)
+        replay["incident_anchor"] = anchor
+        return {"incident": replay, "message": "Latest incident loaded."}
+
+    def _flight_context(self, replay_id: str) -> dict[str, Any]:
+        task = self.storage.get_task(replay_id)
+        goal = self.storage.get_goal_run(replay_id)
+        decision = self.storage.get_decision(replay_id)
+        handoff = self.storage.get_handoff(replay_id)
+        conversation = self.storage.get_conversation(replay_id)
+        messages = conversation.get("messages", [])
+        kind = "conversation" if messages else "unknown"
+        if task:
+            kind = "task"
+            if task.get("source_message_id"):
+                messages.extend(self.storage.list_messages_by_ids([task["source_message_id"]]))
+        if goal:
+            kind = "goal"
+            task = task or (self.storage.get_task(goal.get("linked_task_id")) if goal.get("linked_task_id") else None)
+            messages.extend([
+                message for message in self.storage.get_room_messages(goal["room_name"], limit=500)
+                if message.get("conversation_id") == replay_id
+            ])
+        if decision:
+            kind = "decision"
+            messages.extend(self.storage.list_messages_by_ids(decision.get("linked_message_ids") or []))
+            if decision.get("task_id"):
+                task = task or self.storage.get_task(decision["task_id"])
+            if decision.get("goal_id"):
+                goal = goal or self.storage.get_goal_run(decision["goal_id"])
+        if handoff:
+            kind = "handoff"
+            messages.extend(self.storage.list_messages_by_ids(handoff.get("linked_message_ids") or []))
+            if handoff.get("task_id"):
+                task = task or self.storage.get_task(handoff["task_id"])
+            if handoff.get("goal_id"):
+                goal = goal or self.storage.get_goal_run(handoff["goal_id"])
+
+        messages = self._unique_messages(messages)
+        message_ids = {message["message_id"] for message in messages}
+        decisions = self._linked_decisions(replay_id, kind, message_ids, task, goal, decision)
+        handoffs = self._linked_handoffs(replay_id, kind, message_ids, task, goal, decision, handoff)
+        return {
+            "kind": kind,
+            "task": task,
+            "goal": goal,
+            "decisions": decisions,
+            "handoffs": handoffs,
+            "messages": messages,
+        }
+
+    def _linked_decisions(
+        self,
+        replay_id: str,
+        kind: str,
+        message_ids: set[str],
+        task: dict | None,
+        goal: dict | None,
+        decision: dict | None,
+    ) -> list[dict]:
+        decisions: list[dict] = [decision] if decision else []
+        task_id = (task or {}).get("task_id") or (replay_id if kind == "task" else None)
+        goal_id = (goal or {}).get("goal_run_id") or (replay_id if kind == "goal" else None)
+        for item in self.storage.list_decisions(limit=500):
+            linked_messages = set(item.get("linked_message_ids") or [])
+            if item in decisions:
+                continue
+            if (task_id and item.get("task_id") == task_id) or (goal_id and item.get("goal_id") == goal_id) or (message_ids and linked_messages.intersection(message_ids)):
+                decisions.append(item)
+        return self._unique_records(decisions)
+
+    def _linked_handoffs(
+        self,
+        replay_id: str,
+        kind: str,
+        message_ids: set[str],
+        task: dict | None,
+        goal: dict | None,
+        decision: dict | None,
+        handoff: dict | None,
+    ) -> list[dict]:
+        handoffs: list[dict] = [handoff] if handoff else []
+        task_id = (task or {}).get("task_id") or (replay_id if kind == "task" else None)
+        goal_id = (goal or {}).get("goal_run_id") or (replay_id if kind == "goal" else None)
+        decision_id = (decision or {}).get("id") or (replay_id if kind == "decision" else None)
+        for item in self.storage.list_handoffs(limit=500):
+            linked_messages = set(item.get("linked_message_ids") or [])
+            linked_decisions = set(item.get("linked_decision_ids") or [])
+            if item in handoffs:
+                continue
+            if (
+                (task_id and item.get("task_id") == task_id)
+                or (goal_id and item.get("goal_id") == goal_id)
+                or (decision_id and decision_id in linked_decisions)
+                or (message_ids and linked_messages.intersection(message_ids))
+            ):
+                handoffs.append(item)
+        return self._unique_records(handoffs)
+
+    def _flight_summary(
+        self,
+        context: dict[str, Any],
+        timeline: list[dict[str, Any]],
+        messages: list[dict],
+        deliveries: list[dict],
+        dead_letters: list[dict],
+    ) -> dict[str, Any]:
+        timestamps = [item["timestamp"] for item in timeline if item.get("timestamp")]
+        started_at = timestamps[0] if timestamps else None
+        ended_at = timestamps[-1] if timestamps else None
+        runtimes = self._flight_runtimes(context, messages, deliveries)
+        failure_count = len(dead_letters) + len([delivery for delivery in deliveries if not delivery.get("ok")])
+        return {
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_ms": self._duration_ms(started_at, ended_at),
+            "runtimes": runtimes,
+            "message_count": len(messages),
+            "decision_count": len(context["decisions"]),
+            "handoff_count": len(context["handoffs"]),
+            "failure_count": failure_count,
+            "outcome": self._flight_outcome(context, failure_count),
+        }
+
+    def _flight_runtimes(self, context: dict[str, Any], messages: list[dict], deliveries: list[dict]) -> list[str]:
+        values: set[str] = set()
+        ignored = {"operator", "synkraken-tui", "synkraken-web", "system", "synkraken-room"}
+        for message in messages:
+            values.update(str(value) for value in (message.get("source"), message.get("target")) if value)
+        for delivery in deliveries:
+            if delivery.get("adapter_id"):
+                values.add(str(delivery["adapter_id"]))
+        for decision in context.get("decisions") or []:
+            values.update(str(value) for value in (decision.get("linked_runtime_ids") or []) if value)
+        for handoff in context.get("handoffs") or []:
+            values.update(str(value) for value in (handoff.get("from_agent"), handoff.get("to_agent")) if value)
+        return sorted(
+            value for value in values
+            if value not in ignored and not value.startswith("room:")
         )
-        failed_teams = self.storage.list_team_runs(limit=100)
-        failed_team = next(
-            (t for t in failed_teams if t.get("status") in {"blocked", "failed", "completed_with_final_failure"}),
-            None,
-        )
-        if not failed_goal and not failed_team:
+
+    def _flight_outcome(self, context: dict[str, Any], failure_count: int) -> str:
+        task = context.get("task") or {}
+        goal = context.get("goal") or {}
+        decisions = context.get("decisions") or []
+        handoffs = context.get("handoffs") or []
+        if task.get("status") == "done" or goal.get("status") in {"achieved", "partially_achieved", "completed"}:
+            return "completed"
+        if task.get("status") == "blocked" or goal.get("status") in {"blocked", "failed", "cancelled"}:
+            return "blocked" if task.get("status") == "blocked" or goal.get("status") == "blocked" else "failed"
+        if any(decision.get("status") == "rejected" for decision in decisions) or any(handoff.get("status") == "rejected" for handoff in handoffs):
+            return "failed"
+        if decisions and all(decision.get("status") == "approved" for decision in decisions):
+            return "completed"
+        if handoffs and all(handoff.get("status") == "completed" for handoff in handoffs):
+            return "completed"
+        if failure_count:
+            return "failed"
+        if context.get("messages"):
+            return "completed"
+        return "unknown"
+
+    def _timeline_event(
+        self,
+        timestamp: str | None,
+        event_type: str | None,
+        actor: str | None,
+        target: str | None,
+        summary: str,
+        status: str | None,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp": timestamp,
+            "event_type": event_type or "event",
+            "actor": actor,
+            "target": target,
+            "summary": summary,
+            "status": status or "unknown",
+            "source": source,
+        }
+
+    def _duration_ms(self, started_at: str | None, ended_at: str | None) -> int | None:
+        if not started_at or not ended_at:
             return None
-        if not failed_goal:
-            return self.get_replay(failed_team["team_run_id"])
-        if not failed_team:
-            return self.get_replay(failed_goal["goal_run_id"])
-        goal_ts = failed_goal.get("started_at") or ""
-        team_ts = failed_team.get("started_at") or ""
-        if goal_ts >= team_ts:
-            return self.get_replay(failed_goal["goal_run_id"])
-        return self.get_replay(failed_team["team_run_id"])
+        try:
+            start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return max(0, int((end - start).total_seconds() * 1000))
+
+    def _summarize(self, value: object, limit: int = 160) -> str:
+        text = str(value or "").replace("\n", " ").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def _unique_messages(self, messages: list[dict]) -> list[dict]:
+        by_id: dict[str, dict] = {}
+        for message in messages:
+            message_id = message.get("message_id")
+            if message_id:
+                by_id[message_id] = message
+        return sorted(by_id.values(), key=lambda item: (item.get("timestamp") or "", item.get("message_id") or ""))
+
+    def _unique_records(self, records: list[dict]) -> list[dict]:
+        by_id: dict[str, dict] = {}
+        for record in records:
+            record_id = record.get("id") or record.get("decision_id") or record.get("handoff_id")
+            if record_id:
+                by_id[str(record_id)] = record
+        return list(by_id.values())

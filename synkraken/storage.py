@@ -705,6 +705,40 @@ class Storage:
                 ),
             )
 
+    def _message_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        raw = data.pop("metadata_json", "{}") or "{}"
+        try:
+            data["metadata"] = json.loads(raw)
+        except json.JSONDecodeError:
+            data["metadata"] = {}
+        return data
+
+    def get_message(self, message_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+        return self._message_from_row(row) if row else None
+
+    def list_messages_by_ids(self, message_ids: list[str]) -> list[dict]:
+        ids = [message_id for message_id in dict.fromkeys(message_ids) if message_id]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM messages
+                WHERE message_id IN ({placeholders})
+                ORDER BY timestamp ASC, message_id ASC
+                """,
+                ids,
+            ).fetchall()
+        return [self._message_from_row(row) for row in rows]
+
     def get_conversation(self, conversation_id: str) -> dict:
         with self._lock:
             msg_rows = self._conn.execute(
@@ -721,10 +755,44 @@ class Storage:
             ).fetchall()
         return {
             "conversation_id": conversation_id,
-            "messages": [dict(row) for row in msg_rows],
+            "messages": [self._message_from_row(row) for row in msg_rows],
             "deliveries": [dict(row) for row in del_rows],
             "dead_letters": [dict(row) for row in dead_rows],
         }
+
+    def list_deliveries_for_messages(self, message_ids: list[str]) -> list[dict]:
+        ids = [message_id for message_id in dict.fromkeys(message_ids) if message_id]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM deliveries
+                WHERE message_id IN ({placeholders})
+                ORDER BY created_at ASC, delivery_id ASC
+                """,
+                ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_dead_letters_for_messages(self, message_ids: list[str]) -> list[dict]:
+        ids = [message_id for message_id in dict.fromkeys(message_ids) if message_id]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM dead_letters
+                WHERE message_id IN ({placeholders})
+                ORDER BY created_at ASC, dead_letter_id ASC
+                """,
+                ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_recent_conversations(self, limit: int = 10) -> dict:
         with self._lock:
@@ -771,6 +839,33 @@ class Storage:
                 (limit,),
             ).fetchall()
         return {"dead_letters": [dict(row) for row in rows]}
+
+    def latest_incident_anchor(self) -> dict | None:
+        with self._lock:
+            dead = self._conn.execute(
+                """
+                SELECT 'dead_letter' AS incident_type, dead_letter_id AS incident_id,
+                       message_id, adapter_id, reason, created_at
+                FROM dead_letters
+                ORDER BY created_at DESC, dead_letter_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            failed = self._conn.execute(
+                """
+                SELECT 'delivery' AS incident_type, delivery_id AS incident_id,
+                       message_id, adapter_id, COALESCE(error, status) AS reason,
+                       created_at
+                FROM deliveries
+                WHERE ok = 0 OR status IN ('failed', 'timeout')
+                ORDER BY created_at DESC, delivery_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        candidates = [dict(row) for row in (dead, failed) if row is not None]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item.get("created_at") or "", int(item.get("incident_id") or 0)))
 
     # ── flight summary ───────────────────────────────────────────────────
 
@@ -1739,10 +1834,10 @@ class Storage:
             rows = self._conn.execute(
                 """
                 SELECT message_id, conversation_id, source, target, timestamp,
-                       message_type, subject, priority, reply_to, hop_count, body
+                       message_type, subject, priority, reply_to, hop_count, body, metadata_json
                 FROM (
                     SELECT message_id, conversation_id, source, target, timestamp,
-                           message_type, subject, priority, reply_to, hop_count, body
+                           message_type, subject, priority, reply_to, hop_count, body, metadata_json
                     FROM messages
                     WHERE target = ?
                     ORDER BY timestamp DESC
@@ -1752,7 +1847,7 @@ class Storage:
                 """,
                 (target, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._message_from_row(row) for row in rows]
 
     # ── tasks ──────────────────────────────────────────────────────────────
 

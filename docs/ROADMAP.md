@@ -96,6 +96,11 @@ works.
   recommended next step, confidence, related message ids, related decision ids,
   API routes, TUI commands, a minimal Web Command Deck list, and append-only
   handoff events
+- Flight Recorder v0.1: read-only reconstruction of AI work from existing
+  persisted messages, deliveries, dead letters, decisions, handoffs, task
+  events, and goal events, with replay and latest-incident APIs, TUI commands,
+  a minimal Web Command Deck panel, runtime participation, failures, and
+  outcome summaries
 
 ### Deliberately deferred
 
@@ -105,7 +110,8 @@ works.
 - autonomous, semantic, or personal memory systems beyond peer-reviewed Shared
   Memory
 - vector DBs, embeddings, RAG, and semantic search
-- voting, approval chains, policy engine, flight recorder, and decision workflows
+- voting, approval chains, policy engine, decision workflows, dashboards, and
+  automated incident handling
 - external product integrations
 - remote multi-user deployment
 - heavyweight frontend stack
@@ -128,10 +134,12 @@ works.
 9. Handoffs v0.1: record what work was handed off, who handed it off, who
    received it, what context, risks, and next steps were attached, and whether
    the receiving worker accepted, rejected, or completed it
-10. Runtime Discovery hardening: adapter additions for discovered registry-only
-   runtimes, richer local server probes, and non-secret health diagnostics
-11. Workspace Packs v0.6
-12. External product integrations v0.7
+10. Flight Recorder v0.1: reconstruct messages, failures, decisions, handoffs,
+    runtime participation, and outcome from existing records
+11. Runtime Discovery hardening: adapter additions for discovered registry-only
+    runtimes, richer local server probes, and non-secret health diagnostics
+12. Workspace Packs v0.6
+13. External product integrations v0.7
 
 Packs sit above the OSS control plane and below vertical products. They may add
 workflow templates, role presets, memory templates, runtime recommendations,

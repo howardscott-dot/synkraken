@@ -411,19 +411,10 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/replay/([^/]+)", path)
         if m:
             replay_id = unquote(m.group(1))
-            try:
-                result = self.fabric.get_replay(replay_id)
-            except ValueError as exc:
-                self._send(HTTPStatus.NOT_FOUND, {"error": str(exc)})
-                return
-            self._send(HTTPStatus.OK, result)
+            self._send(HTTPStatus.OK, self.fabric.get_replay(replay_id))
             return
         if path == "/v1/incident/latest":
-            incident = self.fabric.get_latest_incident()
-            if not incident:
-                self._send(HTTPStatus.NOT_FOUND, {"error": "no incidents found"})
-                return
-            self._send(HTTPStatus.OK, incident)
+            self._send(HTTPStatus.OK, self.fabric.get_latest_incident())
             return
 
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})

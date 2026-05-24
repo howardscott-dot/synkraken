@@ -22,6 +22,9 @@ identity or hidden autonomy.
   confidence when known, status, and links to rooms, tasks, goals, messages, or
   decisions
 - events: append-only evidence of state changes and decisions
+- flight records: read-only reconstructions of work assembled from existing
+  messages, deliveries, failures, decisions, handoffs, task events, and goal
+  events
 
 ## Bounded Workflows
 
@@ -70,6 +73,17 @@ receiving worker accepted, rejected, or completed it.
 Handoffs are coordination and recovery infrastructure. They are not approval
 chains, voting, policy enforcement, autonomous planning, scheduling, or
 background execution.
+
+## Flight Recorder
+
+Flight Recorder v0.1 lets an operator reconstruct what happened during AI
+work. It answers what happened, which runtimes were involved, what messages
+were sent, what failed, what decisions and handoffs occurred, and what outcome
+SynKraken can infer from the persisted record.
+
+Flight records are read models over existing data. They are not a policy
+engine, approval chain, cost dashboard, reputation system, auto-detection
+system, or new orchestration layer.
 
 ## Runtime Onboarding
 

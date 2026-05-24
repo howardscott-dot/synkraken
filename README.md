@@ -81,6 +81,9 @@ Synkraken gives you:
   who handed it off, who received it, what context, risks, and next steps were
   attached, and whether the receiving worker accepted, rejected, or completed
   it.
+- **Flight Recorder v0.1** for reconstructing AI work from existing records:
+  messages, deliveries, failures, decisions, handoffs, runtime participation,
+  and outcome.
 - **A portable bridge skill** that agents read to learn how to use the bridge
   back (so any participating agent can reach the others, not just you)
 
@@ -556,6 +559,15 @@ recent handoffs with `/handoffs`, view `/handoff latest` or `/handoff <id>`,
 create a minimal handoff with `/handoff create from=<agent> to=<agent> summary="..." next="..."`,
 and update status with `/handoff accept <id>`, `/handoff reject <id>`, or
 `/handoff complete <id>`.
+
+Flight Recorder v0.1 reconstructs what happened during AI work from existing
+SQLite records. `GET /v1/replay/<id>` accepts a conversation, task, goal run,
+decision, or handoff id and returns a timeline plus summary counts for
+messages, decisions, handoffs, failures, runtimes, and outcome. `GET
+/v1/incident/latest` returns the latest failed delivery or dead-letter context,
+or a clean `No incidents recorded.` response. The TUI exposes `/replay <id>`
+and `/incident latest`; the Web Command Deck includes a minimal read-only
+Flight Recorder panel.
 
 POST `/v1/team-tasks` body:
 
