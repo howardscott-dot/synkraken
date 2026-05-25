@@ -7,6 +7,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Dynamic agents in the TUI v0.1: the command deck no longer hard-codes the
+  goose/hermes/openclaw runtime names. Agent colors are assigned from a palette
+  by hashing the adapter id, enabled agents are listed and sorted by presence
+  status, mention aliases and autocomplete are derived from live agents, and
+  delivery rows show a classified status (acknowledged, empty_reply, failed,
+  timed_out) with empty bodies rendered as `[empty reply]`.
 - Crush adapter v0.1: support for running Crush as an active SynKraken worker, including prompt delivery via `crush run --quiet`, isolation boundary, working directory control, discovery integration, runtime diagnostics, and TUI color pair.
 - Google Antigravity adapter v0.1: support for running Google Antigravity as an active SynKraken worker, including prompt delivery, command verification, discovery integration, and runtime diagnostics.
 - Documentation Lock Batch v0.1: category and architecture lock docs for the

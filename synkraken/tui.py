@@ -358,24 +358,65 @@ def _health_marker(ok: bool) -> str:
     return '●' if ok else '○'
 
 
-_AGENT_COLOR_PAIRS = {
-    'goose':    (C_GOOSE_D, C_GOOSE_L),
-    'hermes':   (C_HERMES_D, C_HERMES_L),
-    'openclaw': (C_OPENCLAW_D, C_OPENCLAW_L),
-    'claude':   (C_CLAUDE_D, C_CLAUDE_L),
-    'crush':    (C_CRUSH_D, C_CRUSH_L),
-}
+_AGENT_COLOR_PALETTE = (
+    (C_GOOSE_D, C_GOOSE_L),
+    (C_HERMES_D, C_HERMES_L),
+    (C_OPENCLAW_D, C_OPENCLAW_L),
+    (C_CLAUDE_D, C_CLAUDE_L),
+    (C_CRUSH_D, C_CRUSH_L),
+    (C_BLUE, C_TEAL),
+)
 
 
 def _agent_color(adapter_id: str) -> tuple[int, int]:
     aid = (adapter_id or '').lower()
     if aid in ('operator', 'synkraken-tui', ''):
         return C_OPERATOR_D, C_OPERATOR_L
-    norm = aid.replace('-main', '').replace('-', '')
-    for key, (d, l) in _AGENT_COLOR_PAIRS.items():
-        if key in norm:
-            return d, l
-    return C_BLUE, C_TEAL
+    idx = sum(ord(ch) for ch in aid) % len(_AGENT_COLOR_PALETTE)
+    return _AGENT_COLOR_PALETTE[idx]
+
+
+def _agent_status(agent: dict) -> str:
+    return str(agent.get('status') or ('online' if agent.get('enabled') else 'disabled'))
+
+
+def _agent_sort_key(agent: dict) -> tuple[int, str]:
+    order = {
+        'working': 0,
+        'online': 1,
+        'idle': 2,
+        'configured': 3,
+        'blocked': 4,
+        'offline': 5,
+        'disabled': 6,
+    }
+    status = _agent_status(agent)
+    return order.get(status, 3), str(agent.get('adapter_id') or '')
+
+
+def _enabled_agents(data: dict) -> list[dict]:
+    agents = data.get('agents', {}).get('agents', [])
+    return sorted(
+        [agent for agent in agents if agent.get('enabled', True)],
+        key=_agent_sort_key,
+    )
+
+
+def _display_body(body: Any) -> str:
+    text = str(body or '').replace('\n', ' ').strip()
+    return text if text else '[empty reply]'
+
+
+def _delivery_status(delivery: dict) -> str:
+    explicit = str(delivery.get('status') or '').lower()
+    if explicit in ('timeout', 'timed_out'):
+        return 'timed_out'
+    if not bool(delivery.get('ok')):
+        error = str(delivery.get('error') or '').lower()
+        return 'timed_out' if 'timeout' in error or 'timed out' in error else 'failed'
+    if not str(delivery.get('body') or delivery.get('body_preview') or '').strip():
+        return 'empty_reply'
+    return 'acknowledged'
 
 
 def _runtime_label(agent: dict) -> str:
@@ -395,37 +436,32 @@ def _presence_marker(status: str) -> str:
 
 
 def _agent_presence_line(agent: dict) -> str:
-    status = str(agent.get('status') or ('online' if agent.get('enabled') else 'disabled'))
+    status = _agent_status(agent)
     last_seen = _time_ago(agent.get('last_seen_at')) if agent.get('last_seen_at') else 'never'
     return f"{agent.get('adapter_id', ''):<14} {_presence_marker(status)} {status:<10} {last_seen:>5}"
 
 
 def _agent_ids(data: dict) -> list[str]:
-    return [a.get('adapter_id', '') for a in data.get('agents', {}).get('agents', [])]
+    return [a.get('adapter_id', '') for a in _enabled_agents(data)]
 
 
 def _mention_alias_map(data: dict) -> dict[str, str]:
     aliases: dict[str, str] = {'everyone': 'broadcast', 'all': 'broadcast'}
-    for agent in data.get('agents', {}).get('agents', []):
+    for agent in _enabled_agents(data):
         aid = str(agent.get('adapter_id', '')).strip()
         rn = str(agent.get('runtime_name', aid)).strip()
         if aid:
             aliases[aid.lower()] = aid
         if rn:
             aliases[rn.lower()] = aid
-        if aid == 'openclaw-main':
-            aliases.setdefault('openclaw', aid)
-            aliases.setdefault('main', aid)
     return aliases
 
 
 def _resolve_target(target: str) -> str:
     lowered = target.strip().lower()
-    aliases = {
-        'openclaw': 'openclaw-main', 'main': 'openclaw-main',
-        'hermes': 'hermes', 'goose': 'goose', 'broadcast': 'broadcast',
-    }
-    return aliases.get(lowered, target)
+    if lowered in ('everyone', 'all', 'broadcast'):
+        return 'broadcast'
+    return lowered or target
 
 
 def _time_ago(iso_str: str | None) -> str:
@@ -600,15 +636,15 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
         lines.append((f'  started {_time_ago(started)} ago', C_MUTED, curses.A_DIM))
     lines.append(('', None, 0))
     lines.append(('agents', C_MUTED, curses.A_BOLD))
-    for a in data.get('agents', {}).get('agents', []):
+    for a in _enabled_agents(data):
         aid = a.get('adapter_id', '')
-        status = str(a.get('status') or ('online' if a.get('enabled') else 'disabled'))
+        status = _agent_status(a)
         d, _ = _agent_color(aid)
         typing_now = aid in typing_ids
         marker = '◐' if typing_now else _presence_marker(status)
         suffix = '  typing…' if typing_now else ''
         ago = _time_ago(a.get('last_seen_at')) if a.get('last_seen_at') else 'never'
-        line = f"  {aid:<12} {marker} {status:<9} {ago:>5}{suffix}"
+        line = f"  {aid:<18} {marker} {status:<9} {ago:>5}{suffix}"
         attr = curses.A_BOLD if typing_now else 0
         lines.append((line, d, attr))
     _panel_lines(stdscr, top, 0, left_w, top_h, lines)
@@ -619,12 +655,12 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
         ('type @name (or @everyone) to chat', C_MUTED, curses.A_DIM),
         ('', None, 0),
     ]
-    for a in data.get('agents', {}).get('agents', []):
+    for a in _enabled_agents(data):
         aid = a.get('adapter_id', '')
         rn = _runtime_label(a)
         d, _ = _agent_color(aid)
-        mention = f"@{rn.lower()}"
-        target_lines.append((f"  {mention:<14}→  {rn}", d, 0))
+        mention = f"@{aid}"
+        target_lines.append((f"  {mention:<22}→  {rn}", d, 0))
     target_lines.append((f"  {'@everyone':<14}→  broadcast", C_BRIGHT, curses.A_BOLD))
     flight = data.get('flight') or {}
     if flight:
@@ -659,11 +695,12 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
         for d in deliveries[:max(0, mid_h - 2)]:
             aid = d.get('adapter_id', '')
             ok = bool(d.get('ok'))
-            preview = (d.get('body_preview', '') or '').replace('\n', ' ').strip()
+            preview = _display_body(d.get('body_preview') if 'body_preview' in d else d.get('body'))
             ago = _time_ago(d.get('created_at'))
             d_color, l_color = _agent_color(aid)
+            status = _delivery_status(d)
             marker = '✓' if ok else '✗'
-            head = f"  {marker} {aid:>12}  "
+            head = f"  {marker} {aid:>18}  {status:<12}  "
             tail = f"  {ago:>4} ago"
             avail = max(10, inner_w - len(head) - len(tail))
             if len(preview) > avail:
@@ -678,12 +715,12 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
     conv_lines: list[tuple] = []
     conversations = data.get('recent', {}).get('conversations', [])
     if not conversations:
-        conv_lines.append(('(no conversations yet — say something like @goose hello)', C_MUTED, curses.A_DIM))
+        conv_lines.append(('(no conversations yet — say something like @<adapter-id> hello)', C_MUTED, curses.A_DIM))
     else:
         for idx, c in enumerate(conversations[:max(0, bot_h - 3)], start=1):
             src = c.get('sample_source', '') or ''
             tgt = c.get('sample_target', '') or ''
-            preview = (c.get('preview', '') or '').replace('\n', ' ').strip()
+            preview = _display_body(c.get('preview'))
             ago = _time_ago(c.get('last_timestamp'))
             src_d, _ = _agent_color(src)
             head = f"  {idx:>2}.  {src:>10} → {tgt:<16}  "
@@ -712,9 +749,10 @@ def _format_event(event: dict[str, Any]) -> tuple[str, int]:
         aid = d.get('adapter_id', '')
         ok = bool(d.get('ok'))
         marker = '✓' if ok else '✗'
-        preview = (d.get('body_preview', '') or '').replace('\n', ' ')[:80]
+        status = _delivery_status(d)
+        preview = _display_body(d.get('body_preview') if 'body_preview' in d else d.get('body'))[:80]
         c, _ = _agent_color(aid)
-        return (f"  {ts}  {marker} {aid:<14} {preview}", c if ok else C_RED)
+        return (f"  {ts}  {marker} {aid:<18} {status:<12} {preview}", c if ok else C_RED)
     if etype == 'dead-letter.recorded':
         return (f"  {ts}  ✗ {d.get('adapter_id')} — {d.get('reason', '')[:60]}", C_RED)
     if etype == 'typing.started':
@@ -758,7 +796,7 @@ def _view_conversations(stdscr, data, top, h, w):
         for idx, c in enumerate(conversations[:max_rows], start=1):
             src = c.get('sample_source', '') or ''
             tgt = c.get('sample_target', '') or ''
-            preview = (c.get('preview', '') or '').replace('\n', ' ').strip()[:120]
+            preview = _display_body(c.get('preview'))[:120]
             ago = _time_ago(c.get('last_timestamp'))
             cid = c.get('conversation_id', '') or ''
             src_d, _ = _agent_color(src)
@@ -773,9 +811,7 @@ def _view_conversations(stdscr, data, top, h, w):
 def _chat_bubble(speaker: str, body: str, ts: str,
                  header_color: int, body_color: int,
                  *, align: str, max_w: int) -> list[tuple]:
-    body = (body or '').strip()
-    if not body:
-        body = '(empty)'
+    body = _display_body(body)
     # Choose a target body width: roughly 60% of available, minimum 24.
     target_w = max(24, min(int(max_w * 0.65), max_w - 4))
     wrapped = _wrap(body, target_w)
@@ -855,9 +891,7 @@ def _chat_lines(result: dict, w: int) -> list[tuple]:
             # already saved as separate messages by the fabric).
             for d in dels_by_mid.get(m.get('message_id'), []):
                 aid = d.get('adapter_id', '')
-                rep = (d.get('body') or '').strip()
-                if not rep:
-                    continue
+                rep = _display_body(d.get('body'))
                 d_c, l_c = _agent_color(aid)
                 rts = _hhmmss(d.get('created_at'))
                 lines.extend(_chat_bubble(aid, rep, rts, d_c, l_c,
@@ -969,7 +1003,7 @@ def _format_transcript_messages(label: str, result: dict) -> str:
         ts = msg.get('timestamp') or ''
         source = msg.get('source') or 'unknown'
         target = msg.get('target') or ''
-        body = str(msg.get('body') or '').rstrip()
+        body = _display_body(msg.get('body'))
         header = f"[{ts}] {source} -> {target}".rstrip()
         lines.append(header)
         lines.append(body)
@@ -1080,15 +1114,15 @@ def _view_adapters(stdscr, data, top, h, w):
     avail_h = h - top - 4
     _draw_panel(stdscr, top, 0, w, avail_h, title='ADAPTERS')
     lines: list[tuple] = []
-    for a in data.get('agents', {}).get('agents', []):
+    for a in _enabled_agents(data):
         aid = a.get('adapter_id', '')
         rn = _runtime_label(a)
-        status = str(a.get('status') or ('online' if a.get('enabled') else 'disabled'))
+        status = _agent_status(a)
         atype = a.get('type', '')
         d, _ = _agent_color(aid)
         marker = _presence_marker(status)
         ago = _time_ago(a.get('last_seen_at')) if a.get('last_seen_at') else 'never'
-        lines.append((f"  {rn:<14}  {marker} {status:<10} {ago:>5}  [{aid}] type={atype:<10}",
+        lines.append((f"  {rn:<18}  {marker} {status:<10} {ago:>5}  [{aid}] type={atype:<10}",
                       d, curses.A_BOLD if status in ('online', 'idle', 'working') else 0))
     if not lines:
         lines = [('(no adapters configured)', C_MUTED, curses.A_DIM)]
@@ -1108,7 +1142,7 @@ def _view_rooms(stdscr, data, state, top, h, w):
         )
         lines.append(('', None, 0))
         lines.append(('create one:', C_TEAL, curses.A_BOLD))
-        lines.append(('  /room create general goose hermes openclaw-main', None, 0))
+        lines.append(('  /room create general <adapter-id> <adapter-id>', None, 0))
         lines.append(('', None, 0))
         lines.append(('then enter to chat:', C_TEAL, curses.A_BOLD))
         lines.append(('  /room enter general', None, 0))
@@ -1141,14 +1175,14 @@ def _view_help(stdscr, top, h, w):
         (f'{NAME} — {TAGLINE}', C_BRIGHT, curses.A_BOLD),
         ('', None, 0),
         ('CHAT', C_TEAL, curses.A_BOLD),
-        ('  @goose hello                    direct message goose', None, 0),
-        ('  @hermes @openclaw please confer send to multiple agents', None, 0),
+        ('  @<adapter-id> hello             direct message an agent', None, 0),
+        ('  @agent-a @agent-b confer        send to multiple agents', None, 0),
         ('  @everyone status?               current room if entered; otherwise global', None, 0),
         ('  @everyone --global status?      explicit global broadcast', None, 0),
         ('  #room hi all                    send to a specific room', None, 0),
         ('  (in a room) plain text          messages go to the current room', None, 0),
-        ('  /discuss goose hermes "topic"   bounded agent discussion', None, 0),
-        ('  /discuss --turns 4 --room ops goose hermes "topic"', None, 0),
+        ('  /discuss agent-a agent-b "topic" bounded agent discussion', None, 0),
+        ('  /discuss --turns 4 --room ops agent-a agent-b "topic"', None, 0),
         ('  /team "task"                    room team task mode', None, 0),
         ('  /team --turns 4 "task"          bounded room team task mode', None, 0),
         ('  /goal "goal"                    bounded room goal mode', None, 0),
@@ -1717,7 +1751,7 @@ def _format_replay_lines(replay: dict) -> list[str]:
 def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
     """Return local-only slash command output without touching the router."""
     health = data.get('health', {})
-    agents = data.get('agents', {}).get('agents', [])
+    agents = _enabled_agents(data)
     if cmd == '/status':
         return ('status', [
             f'daemon URL      {base}',
@@ -1905,19 +1939,19 @@ def _view_command_result(stdscr, label, result, top, h, w):
         ok = bool(d.get('ok'))
         d_color, l_color = _agent_color(aid)
         marker = '✓' if ok else '✗'
+        status = _delivery_status(d)
         # Format the metadata line: omit duration when None, render ms cleanly.
         dur_ms = d.get('duration_ms')
         dur = f"{dur_ms}ms" if dur_ms is not None else ''
-        parts = [f"{marker} {label_} [{aid}]", f"attempts={d.get('attempts', 1)}"]
+        parts = [f"{marker} {label_} [{aid}]", status, f"attempts={d.get('attempts', 1)}"]
         if dur:
             parts.append(dur)
         lines.append(('   '.join(parts), d_color if ok else C_RED, curses.A_BOLD))
         if d.get('error'):
             lines.append((f"   error: {d.get('error')}", C_RED, 0))
-        body = (d.get('body') or '').strip()
-        if body:
-            for chunk in _wrap(body, w - 8):
-                lines.append((f"   {chunk}", l_color, 0))
+        body = _display_body(d.get('body'))
+        for chunk in _wrap(body, w - 8):
+            lines.append((f"   {chunk}", l_color, 0))
         lines.append(('', None, 0))
     dl = result.get('dead_letters', [])
     if dl:
@@ -1988,7 +2022,7 @@ def _mention_route(target: str, body: str, current_room: str | None) -> tuple[st
 def _parse_leading_mentions(cmd: str, aliases: dict[str, str]) -> tuple[list[str], str]:
     """Parse only leading @mentions as routing targets.
 
-    Mentions later in the sentence, especially quoted ones like ``"@goose"``,
+    Mentions later in the sentence, especially quoted ones like ``"@agent"``,
     are message content rather than delivery targets.
     """
     remaining = cmd.strip()
@@ -2488,7 +2522,7 @@ def _autocomplete(command: str, data: dict) -> tuple[str, str]:
     head, rest = command.split(' ', 1)
     parts = rest.split(' ')
     if head in ('/send', '/compose') and len(parts) == 1 and parts[0]:
-        ids = _agent_ids(data) + ['broadcast', 'openclaw', 'main']
+        ids = _agent_ids(data) + ['broadcast']
         matches = [a for a in ids if a.startswith(parts[0])]
         if len(matches) == 1:
             return f'{head} {matches[0]} ', ''
@@ -2724,7 +2758,7 @@ def _main(stdscr):
         'view': prefs.get('default_view', 'dashboard'),
         'event_filter': prefs.get('event_filter', 'all'),
         'refresh_seconds': prefs.get('refresh_seconds', 3),
-        'last_target': prefs.get('last_target', 'hermes'),
+        'last_target': prefs.get('last_target', 'broadcast'),
         'current_room': prefs.get('current_room'),
         'command_result': None,
         'local_output': None,
@@ -2881,7 +2915,7 @@ def _main(stdscr):
             events = list(stream.events)
             typing_names = stream.get_typing_names()
             typing_ids = stream.get_typing_ids()
-            connected = len(data.get('agents', {}).get('agents', []))
+            connected = len(_enabled_agents(data))
             dead_count = len(data.get('dead_letters', {}).get('dead_letters', []))
 
             stdscr.erase()
@@ -3188,7 +3222,7 @@ def _main(stdscr):
                     elif ct.startswith('room:'):
                         prefix = f"#{ct.split(':', 1)[1]}"
                     else:
-                        prefix = f"@{ct or state.get('last_target', 'hermes')}"
+                        prefix = f"@{ct or state.get('last_target', 'broadcast')}"
                     command = f'{prefix} '
                     hint = 'compose: complete the message and press Enter'
                     continue
