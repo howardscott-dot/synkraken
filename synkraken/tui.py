@@ -76,7 +76,7 @@ COMMANDS = [
     '/runtimes', '/runtime', '/workspace', '/flight',
     '/decisions', '/decision', '/handoffs', '/handoff', '/replay', '/incident',
     '/filter', '/help', '/status', '/health', '/agents', '/tail', '/transcript',
-    '/save-transcript',
+    '/save-transcript', '/workforce', '/stress',
     '/presence', '/agent', '/profiles', '/memory', '/clear', '/refresh', '/quit',
 ]
 ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'members', 'kick', 'list']
@@ -290,11 +290,13 @@ class EventStreamWorker:
                         'attempts': data.get('attempts') or row.get('attempts'),
                         'error': data.get('error') or data.get('reason') or row.get('error'),
                         'body_preview': data.get('body_preview') or row.get('body_preview'),
+                        'quality': data.get('quality') or row.get('quality'),
                         'updated_at': time.time(),
                     })
-                    if status == 'replied':
+                    if status in ('replied', 'acknowledged'):
                         row['expires_at'] = time.time() + 1.5
-                    elif status in ('failed', 'timeout'):
+                    elif status in ('empty_reply', 'failed', 'timeout', 'blocked',
+                                    'wrong_identity', 'unexpected_output', 'suspicious_output'):
                         row['expires_at'] = time.time() + 300
                     else:
                         row['expires_at'] = None
@@ -407,16 +409,52 @@ def _display_body(body: Any) -> str:
     return text if text else '[empty reply]'
 
 
+def _delivery_quality(delivery: dict) -> str:
+    quality = str(delivery.get('quality') or '').strip()
+    if quality:
+        return quality
+    raw = delivery.get('raw_json')
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            return str(parsed.get('quality') or '').strip()
+        except (TypeError, json.JSONDecodeError):
+            return ''
+    return ''
+
+
 def _delivery_status(delivery: dict) -> str:
     explicit = str(delivery.get('status') or '').lower()
-    if explicit in ('timeout', 'timed_out'):
-        return 'timed_out'
+    if explicit in {
+        'replied', 'acknowledged', 'empty_reply', 'failed', 'timeout',
+        'blocked', 'wrong_identity', 'unexpected_output', 'suspicious_output',
+    }:
+        return explicit
+    if explicit == 'timed_out':
+        return 'timeout'
     if not bool(delivery.get('ok')):
         error = str(delivery.get('error') or '').lower()
-        return 'timed_out' if 'timeout' in error or 'timed out' in error else 'failed'
+        return 'timeout' if 'timeout' in error or 'timed out' in error else 'failed'
     if not str(delivery.get('body') or delivery.get('body_preview') or '').strip():
         return 'empty_reply'
     return 'acknowledged'
+
+
+def _delivery_preview(delivery: dict) -> str:
+    quality = _delivery_quality(delivery)
+    if quality == 'suspicious_output':
+        body = _display_body(delivery.get('body_preview') if 'body_preview' in delivery else delivery.get('body'))
+        return f"[suspicious output] {body}" if body != '[empty reply]' else '[suspicious output] [empty reply]'
+    return _display_body(delivery.get('body_preview') if 'body_preview' in delivery else delivery.get('body'))
+
+
+def _delivery_target_id(delivery: dict) -> str:
+    return str(
+        delivery.get('delivery_target')
+        or delivery.get('adapter_id')
+        or delivery.get('runtime_name')
+        or 'unknown'
+    )
 
 
 def _runtime_label(agent: dict) -> str:
@@ -693,14 +731,16 @@ def _view_dashboard(stdscr, data, state, typing_ids, top, h, w):
                             C_MUTED, curses.A_DIM))
     else:
         for d in deliveries[:max(0, mid_h - 2)]:
-            aid = d.get('adapter_id', '')
+            aid = _delivery_target_id(d)
             ok = bool(d.get('ok'))
-            preview = _display_body(d.get('body_preview') if 'body_preview' in d else d.get('body'))
+            preview = _delivery_preview(d)
             ago = _time_ago(d.get('created_at'))
             d_color, l_color = _agent_color(aid)
             status = _delivery_status(d)
+            quality = _delivery_quality(d)
+            status_label = f"{status}/{quality}" if quality and quality != status else status
             marker = '✓' if ok else '✗'
-            head = f"  {marker} {aid:>18}  {status:<12}  "
+            head = f"  {marker} {aid:>18}  {status_label:<20}  "
             tail = f"  {ago:>4} ago"
             avail = max(10, inner_w - len(head) - len(tail))
             if len(preview) > avail:
@@ -746,13 +786,15 @@ def _format_event(event: dict[str, Any]) -> tuple[str, int]:
         cid = (d.get('conversation_id', '') or '')[:12]
         return (f"  {ts}  → {src} → {d.get('target')}  [{cid}]", src_d)
     if etype == 'delivery.recorded':
-        aid = d.get('adapter_id', '')
+        aid = _delivery_target_id(d)
         ok = bool(d.get('ok'))
         marker = '✓' if ok else '✗'
         status = _delivery_status(d)
-        preview = _display_body(d.get('body_preview') if 'body_preview' in d else d.get('body'))[:80]
+        quality = _delivery_quality(d)
+        status_label = f"{status}/{quality}" if quality and quality != status else status
+        preview = _delivery_preview(d)[:80]
         c, _ = _agent_color(aid)
-        return (f"  {ts}  {marker} {aid:<18} {status:<12} {preview}", c if ok else C_RED)
+        return (f"  {ts}  {marker} {aid:<18} {status_label:<24} {preview}", c if ok else C_RED)
     if etype == 'dead-letter.recorded':
         return (f"  {ts}  ✗ {d.get('adapter_id')} — {d.get('reason', '')[:60]}", C_RED)
     if etype == 'typing.started':
@@ -846,18 +888,30 @@ def _activity_row(row: dict[str, Any], *, max_w: int) -> tuple:
         'sent': 'thinking…',
         'thinking': 'thinking…',
         'replied': 'replied',
+        'acknowledged': 'replied',
+        'empty_reply': 'empty reply',
         'failed': 'failed',
         'timeout': 'timeout',
+        'blocked': 'blocked',
+        'wrong_identity': 'wrong identity',
+        'unexpected_output': 'unexpected output',
+        'suspicious_output': 'suspicious output',
     }
     phrase = phrases.get(status, 'working…')
     extra = ''
-    if status in ('failed', 'timeout') and row.get('error'):
+    quality = str(row.get('quality') or '')
+    if quality:
+        extra = f"  quality={quality}"
+    if status in ('failed', 'timeout', 'blocked', 'wrong_identity', 'unexpected_output', 'suspicious_output') and row.get('error'):
         extra = f"  {str(row.get('error'))[:80]}"
     line = f"  {row.get('label') or f'{aid} {phrase}'}"
     line += f"  [{status}]"
     line += extra
-    color = C_RED if status in ('failed', 'timeout') else C_TYPING
-    return (line[:max_w], color, curses.A_DIM if status not in ('failed', 'timeout') else curses.A_BOLD)
+    color = C_RED if status in ('failed', 'timeout', 'blocked', 'wrong_identity') else C_TYPING
+    weak = status in ('empty_reply', 'unexpected_output', 'suspicious_output') or bool(quality)
+    if weak:
+        color = C_WARN
+    return (line[:max_w], color, curses.A_DIM if status not in ('failed', 'timeout', 'blocked', 'wrong_identity') else curses.A_BOLD)
 
 
 def _chat_lines(result: dict, w: int) -> list[tuple]:
@@ -874,12 +928,18 @@ def _chat_lines(result: dict, w: int) -> list[tuple]:
 
     inner_w = w - 6
     lines: list[tuple] = []
+    if result.get('delivery_summary'):
+        lines.append((str(result['delivery_summary']), C_BRIGHT, curses.A_BOLD))
+        lines.append(('', None, 0))
     if not msgs and not activity_rows:
         lines.append(('(no messages yet)', C_MUTED, curses.A_DIM))
     else:
         for m in msgs:
             src = m.get('source', '') or ''
             body = m.get('body', '') or ''
+            metadata = m.get('metadata') or {}
+            if metadata.get('quality') == 'suspicious_output':
+                body = f"[suspicious output] {_display_body(body)}"
             ts = _hhmmss(m.get('timestamp', ''))
             d_color, l_color = _agent_color(src)
             align = 'right' if src in ('operator', 'synkraken-tui') else 'left'
@@ -889,9 +949,9 @@ def _chat_lines(result: dict, w: int) -> list[tuple]:
             # Per-message deliveries (only show when this view came from
             # /history of a non-room conversation — replies in rooms are
             # already saved as separate messages by the fabric).
-            for d in dels_by_mid.get(m.get('message_id'), []):
-                aid = d.get('adapter_id', '')
-                rep = _display_body(d.get('body'))
+            for d in dels_by_mid.pop(m.get('message_id'), []):
+                aid = _delivery_target_id(d)
+                rep = _delivery_preview(d)
                 d_c, l_c = _agent_color(aid)
                 rts = _hhmmss(d.get('created_at'))
                 lines.extend(_chat_bubble(aid, rep, rts, d_c, l_c,
@@ -904,6 +964,14 @@ def _chat_lines(result: dict, w: int) -> list[tuple]:
         for rows in activity_by_mid.values():
             for row in rows:
                 lines.append(_activity_row(row, max_w=inner_w))
+        for rows in dels_by_mid.values():
+            for d in rows:
+                aid = _delivery_target_id(d)
+                rep = _delivery_preview(d)
+                d_c, l_c = _agent_color(aid)
+                rts = _hhmmss(d.get('created_at'))
+                lines.extend(_chat_bubble(aid, rep, rts, d_c, l_c,
+                                           align='left', max_w=inner_w))
     return lines
 
 
@@ -1225,6 +1293,8 @@ def _view_help(stdscr, top, h, w):
         ('  /status                         daemon URL, health, agents, view/filter', None, 0),
         ('  /health                         raw daemon health summary', None, 0),
         ('  /agents                         configured / registered agents', None, 0),
+        ('  /workforce                      enabled agents and delivery health', None, 0),
+        ('  /stress latest                  summarize latest CLI stress report', None, 0),
         ('  /presence                       agent operational presence', None, 0),
         ('  /agent <id>                     agent status and recent events', None, 0),
         ('  /agent profile <id>             agent profile fields', None, 0),
@@ -1748,6 +1818,157 @@ def _format_replay_lines(replay: dict) -> list[str]:
     return lines
 
 
+def _delivery_is_degraded(delivery: dict) -> bool:
+    status = _delivery_status(delivery)
+    quality = _delivery_quality(delivery)
+    return status in {
+        'empty_reply', 'failed', 'timeout', 'blocked', 'wrong_identity',
+        'unexpected_output', 'suspicious_output',
+    } or bool(quality)
+
+
+def _broadcast_summary(deliveries: list[dict]) -> dict[str, int]:
+    summary = {
+        'targets': len(deliveries),
+        'replied': 0,
+        'empty': 0,
+        'failed': 0,
+        'timeout': 0,
+        'degraded': 0,
+    }
+    for delivery in deliveries:
+        status = _delivery_status(delivery)
+        if status in ('replied', 'acknowledged'):
+            summary['replied'] += 1
+        if status == 'empty_reply':
+            summary['empty'] += 1
+        if status in ('failed', 'blocked', 'wrong_identity'):
+            summary['failed'] += 1
+        if status == 'timeout':
+            summary['timeout'] += 1
+        if _delivery_is_degraded(delivery):
+            summary['degraded'] += 1
+    return summary
+
+
+def _delivery_summary_label(deliveries: list[dict]) -> str:
+    summary = _broadcast_summary(deliveries)
+    return (
+        f"targets: {summary['targets']}  replied: {summary['replied']}  "
+        f"empty: {summary['empty']}  failed: {summary['failed']}  "
+        f"timeout: {summary['timeout']}"
+    )
+
+
+def _merge_dispatch_result_into_room_transcript(base: str, room_name: str, result: dict) -> dict:
+    transcript = _handle_room_transcript(base, room_name)
+    deliveries = list(result.get('deliveries', []))
+    dead_letters = list(result.get('dead_letters', []))
+    transcript['deliveries'] = deliveries
+    transcript['dead_letters'] = dead_letters
+    if deliveries:
+        transcript['delivery_summary'] = _delivery_summary_label(deliveries)
+    return transcript
+
+
+def _workforce_command_lines(data: dict, base: str) -> tuple[str, list[str]]:
+    agents = _enabled_agents(data)
+    try:
+        deliveries = _get_json(f'{base}/v1/deliveries?limit=200').get('deliveries', [])
+    except Exception:
+        deliveries = data.get('deliveries', {}).get('deliveries', [])
+    by_agent: dict[str, list[dict]] = {}
+    for delivery in deliveries:
+        by_agent.setdefault(_delivery_target_id(delivery), []).append(delivery)
+    lines = ['Workforce', '']
+    if not agents:
+        return ('workforce', ['(no enabled agents)'])
+    for agent in agents:
+        aid = str(agent.get('adapter_id') or '')
+        recent = by_agent.get(aid, [])
+        latest = recent[0] if recent else {}
+        latest_status = _delivery_status(latest) if latest else '(none)'
+        latest_quality = _delivery_quality(latest) if latest else ''
+        failures = sum(1 for item in recent if _delivery_status(item) in ('failed', 'blocked', 'wrong_identity'))
+        empties = sum(1 for item in recent if _delivery_status(item) == 'empty_reply')
+        timeouts = sum(1 for item in recent if _delivery_status(item) == 'timeout')
+        degraded = failures or empties or timeouts or latest_quality
+        note = ''
+        if latest_quality:
+            note = latest_quality
+        elif latest_status == 'empty_reply':
+            note = 'empty reply'
+        elif latest_status == 'timeout':
+            note = 'timeout'
+        elif latest_status in ('failed', 'blocked', 'wrong_identity', 'unexpected_output', 'suspicious_output'):
+            note = latest_status
+        lines.extend([
+            aid,
+            f"  status: {agent.get('status') or _agent_status(agent)}",
+            f"  last_seen: {agent.get('last_seen_at') or '(never)'}",
+            f"  cost: {agent.get('cost_tier') or 'medium'}",
+            f"  usage_risk: {agent.get('usage_risk') or 'medium'}",
+            f"  latest: {latest_status}",
+            f"  quality: {latest_quality or '(none)'}",
+            f"  recent failures: {failures}",
+            f"  recent empty_reply: {empties}",
+            f"  recent timeout: {timeouts}",
+            f"  health: {'degraded' if degraded else 'ok'}",
+        ])
+        if note:
+            lines.append(f"  note: {note}")
+        lines.append('')
+    return ('workforce', lines)
+
+
+def _latest_stress_report_lines() -> tuple[str, list[str]]:
+    reports = sorted(Path('audits').glob('cli-stress-*/report.md'), key=lambda p: p.stat().st_mtime)
+    if not reports:
+        return ('stress latest', ['(no audits/cli-stress-*/report.md found)'])
+    path = reports[-1]
+    text = path.read_text(encoding='utf-8', errors='replace')
+    final = '(unknown)'
+    degraded: list[str] = []
+    direct_rows = 0
+    broadcast_rows = 0
+    section = ''
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith('- final status:') or lowered.startswith('- final:'):
+            final = line.split(':', 1)[1].strip().strip('`')
+        elif line == '## Direct Sends':
+            section = 'direct'
+        elif line == '## Broadcast':
+            section = 'broadcast'
+        elif line.startswith('## '):
+            section = ''
+        elif line.startswith('|') and '---' not in line and 'agent' not in line:
+            cells = [cell.strip().strip('`') for cell in line.strip('|').split('|')]
+            if len(cells) >= 2:
+                if section == 'direct':
+                    direct_rows += 1
+                elif section == 'broadcast':
+                    broadcast_rows += 1
+                if cells[1] not in ('ok', ''):
+                    degraded.append(f"{cells[0]}: {cells[1]}")
+    lines = [
+        f"final status: {final}",
+        f"report path: {path}",
+        '',
+        'degraded adapters:',
+    ]
+    lines.extend(f"  {item}" for item in degraded[:20])
+    if not degraded:
+        lines.append('  (none)')
+    lines.extend([
+        '',
+        f"direct send summary: {direct_rows} rows",
+        f"broadcast summary: {broadcast_rows} rows",
+    ])
+    return ('stress latest', lines)
+
+
 def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[str, list[str]] | None:
     """Return local-only slash command output without touching the router."""
     health = data.get('health', {})
@@ -1779,6 +2000,12 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
             f"memory count    {flight.get('memory_count')}",
             f"pending reviews {flight.get('pending_reviews')}",
         ])
+    if cmd == '/workforce':
+        return _workforce_command_lines(data, base)
+    if cmd == '/stress latest':
+        return _latest_stress_report_lines()
+    if cmd == '/stress':
+        return ('stress', ['usage: /stress latest'])
     if cmd == '/runtimes':
         runtimes = _get_json(f'{base}/v1/runtimes').get('runtimes', [])
         return ('runtimes', [
@@ -1933,23 +2160,44 @@ def _view_command_result(stdscr, label, result, top, h, w):
     deliveries = result.get('deliveries', [])
     if not deliveries and not result.get('dead_letters'):
         lines.append(('(no deliveries)', C_MUTED, curses.A_DIM))
+    if deliveries:
+        summary = _broadcast_summary(deliveries)
+        heading = (
+            'Broadcast result'
+            if (msg.get('target') == 'broadcast') or any(d.get('original_target') == 'broadcast' for d in deliveries)
+            else 'Delivery result'
+        )
+        lines.extend([
+            (heading, C_BRIGHT, curses.A_BOLD),
+            (f"targets: {summary['targets']}", C_MUTED, 0),
+            (f"replied: {summary['replied']}", C_MUTED, 0),
+            (f"empty: {summary['empty']}", C_MUTED, 0),
+            (f"failed: {summary['failed']}", C_MUTED, 0),
+            (f"timeout: {summary['timeout']}", C_MUTED, 0),
+            (f"degraded: {summary['degraded']}", C_MUTED, 0),
+            ('', None, 0),
+        ])
     for d in deliveries:
-        aid = d.get('adapter_id', '')
+        aid = _delivery_target_id(d)
         label_ = d.get('runtime_name') or aid
         ok = bool(d.get('ok'))
         d_color, l_color = _agent_color(aid)
         marker = '✓' if ok else '✗'
         status = _delivery_status(d)
+        quality = _delivery_quality(d)
+        status_label = f"{status}/{quality}" if quality and quality != status else status
         # Format the metadata line: omit duration when None, render ms cleanly.
         dur_ms = d.get('duration_ms')
         dur = f"{dur_ms}ms" if dur_ms is not None else ''
-        parts = [f"{marker} {label_} [{aid}]", status, f"attempts={d.get('attempts', 1)}"]
+        parts = [f"{marker} {label_} [{aid}]", status_label, f"attempts={d.get('attempts', 1)}"]
         if dur:
             parts.append(dur)
         lines.append(('   '.join(parts), d_color if ok else C_RED, curses.A_BOLD))
+        if quality and quality != status:
+            lines.append((f"   quality: {quality}", C_WARN, 0))
         if d.get('error'):
             lines.append((f"   error: {d.get('error')}", C_RED, 0))
-        body = _display_body(d.get('body'))
+        body = _delivery_preview(d)
         for chunk in _wrap(body, w - 8):
             lines.append((f"   {chunk}", l_color, 0))
         lines.append(('', None, 0))
@@ -2007,6 +2255,22 @@ def _spinner_frame() -> str:
 
 def _handle_send(base: str, target: str, body: str) -> dict:
     return _post_json(f'{base}/v1/messages', {'source': 'synkraken-tui', 'target': target, 'body': body})
+
+
+def _handle_room_note(base: str, room_name: str, body: str) -> dict:
+    return _post_json(
+        f'{base}/v1/rooms/{urllib.parse.quote(room_name)}/messages',
+        {'source': 'synkraken-tui', 'body': body},
+    )
+
+
+def _room_member_ids(base: str, room_name: str) -> list[str]:
+    room = _get_json(f'{base}/v1/rooms/{urllib.parse.quote(room_name)}')
+    return [str(member.get('adapter_id')) for member in room.get('members', []) if member.get('adapter_id')]
+
+
+def _no_room_members_message() -> str:
+    return "No room members. Use /room add <agent> or /room add all."
 
 
 def _mention_route(target: str, body: str, current_room: str | None) -> tuple[str, str]:
@@ -2093,6 +2357,47 @@ def _start_async_send(state: dict, base: str, target: str, body: str,
                  'metadata': metadata or {}},
             )
         except Exception as exc:  # noqa: BLE001
+            pending['error'] = str(exc)
+        finally:
+            pending['done'] = True
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _start_async_room_note(state: dict, base: str, room_name: str, body: str) -> None:
+    pending = {
+        'label': f'#{room_name}', 'target': f'room:{room_name}', 'body': body,
+        'started_at': time.time(), 'done': False, 'room_note': True,
+        'result': None, 'error': None, 'return_view': 'chat',
+    }
+    state['pending'] = pending
+    temp_message = {
+        'message_id': f"pending:{time.time()}",
+        'conversation_id': f'room:{room_name}',
+        'source': 'synkraken-tui',
+        'target': f'room:{room_name}',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'body': body,
+        'metadata': {'room_note': True},
+    }
+    base_result = {}
+    if state.get('view') == 'chat' and state.get('command_result'):
+        base_result = dict(state['command_result'][1])
+    messages = list(base_result.get('messages', []))
+    messages.append(temp_message)
+    state['command_result'] = (f'#{room_name}', {
+        'conversation_id': f'room:{room_name}',
+        'messages': messages,
+        'deliveries': list(base_result.get('deliveries', [])),
+        'dead_letters': list(base_result.get('dead_letters', [])),
+    })
+    state['chat_target'] = f'room:{room_name}'
+    state['view'] = 'chat'
+
+    def run():
+        try:
+            pending['result'] = _handle_room_note(base, room_name, body)
+        except Exception as exc:
             pending['error'] = str(exc)
         finally:
             pending['done'] = True
@@ -2709,22 +3014,36 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
                      'dead_letters': [{'adapter_id': f'room:{name}', 'reason': str(exc)}]},
                     '')
     if sub == 'add':
-        if len(args) < 2:
-            return ('rooms', None, 'usage: /room add <name> <adapter_id>')
-        name = args[0].lstrip('#').lower()
-        adapter = _resolve_target(args[1].lstrip('@'))
+        if not args:
+            return ('rooms', None, 'usage: /room add [name] <adapter_id|all>')
+        if len(args) == 1 and state.get('current_room'):
+            name = str(state['current_room'])
+            adapter = _resolve_target(args[0].lstrip('@'))
+        elif len(args) >= 2:
+            name = args[0].lstrip('#').lower()
+            adapter = _resolve_target(args[1].lstrip('@'))
+        else:
+            return ('rooms', None, 'usage: /room add <name> <adapter_id|all>')
         try:
-            room = _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': adapter})
+            if adapter in ('all', 'broadcast'):
+                members = _agent_ids(data)
+                for member in members:
+                    _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': member})
+                return ('rooms', None, f"added {len(members)} agent{'s' if len(members) != 1 else ''} to #{name}")
+            _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': adapter})
             return ('rooms', None, f'added {adapter} to #{name}')
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return ('add error',
                     {'message': {}, 'deliveries': [],
                      'dead_letters': [{'adapter_id': adapter, 'reason': str(exc)}]},
                     '')
     if sub == 'members':
-        if not args:
-            return ('rooms', None, 'usage: /room members <name>')
-        name = args[0].lstrip('#').lower()
+        if args:
+            name = args[0].lstrip('#').lower()
+        elif state.get('current_room'):
+            name = str(state['current_room'])
+        else:
+            return ('rooms', None, 'usage: /room members [name]')
         try:
             room = _get_json(f'{base}/v1/rooms/{name}')
             members = [member.get('adapter_id') for member in room.get('members', [])]
@@ -2886,7 +3205,7 @@ def _main(stdscr):
                         room_name = state['current_room']
                         state['command_result'] = (
                             f'#{room_name}',
-                            _handle_room_transcript(base, room_name),
+                            _merge_dispatch_result_into_room_transcript(base, room_name, p.get('result') or {}),
                         )
                         state['chat_target'] = f'room:{room_name}'
                     elif (state.get('view') == 'chat'
@@ -2894,7 +3213,7 @@ def _main(stdscr):
                         room_name = str(p['target']).split(':', 1)[1]
                         state['command_result'] = (
                             f'#{room_name}',
-                            _handle_room_transcript(base, room_name),
+                            _merge_dispatch_result_into_room_transcript(base, room_name, p.get('result') or {}),
                         )
                         state['chat_target'] = p['target']
                     else:
@@ -2904,6 +3223,10 @@ def _main(stdscr):
                     if state.get('view') not in ('dashboard', 'chat', 'rooms', 'events'):
                         state['view'] = 'command-result'
                 hint = f"{p['label']}  done ({time.time() - p['started_at']:.1f}s)"
+                if p.get('room_note'):
+                    hint = "room note recorded; use @everyone or @agent-id to dispatch"
+                elif (p.get('result') or {}).get('deliveries'):
+                    hint = _delivery_summary_label((p.get('result') or {}).get('deliveries', []))
                 if p.get('team_task') and state.get('last_team_run_id'):
                     run_id = state['last_team_run_id']
                     hint = f"team done  ·  view/review: /team-run {run_id}  ·  export: /save-transcript"
@@ -3355,6 +3678,23 @@ def _main(stdscr):
                             metadata = None
                             if t == 'broadcast':
                                 t, body = _mention_route(t, body, state.get('current_room'))
+                                if t.startswith('room:'):
+                                    try:
+                                        enabled_members = set(_agent_ids(data))
+                                        members = [
+                                            member for member in _room_member_ids(base, t.split(':', 1)[1])
+                                            if member in enabled_members
+                                        ]
+                                    except Exception as exc:
+                                        state['local_output'] = ('room dispatch', [f'error: {exc}'])
+                                        state['view'] = 'local-output'
+                                        hint = ''
+                                        continue
+                                    if not members:
+                                        state['local_output'] = ('room dispatch', [_no_room_members_message()])
+                                        state['view'] = 'local-output'
+                                        hint = ''
+                                        continue
                             elif body.startswith('--global '):
                                 body = body[len('--global '):].strip()
                             elif state.get('current_room'):
@@ -3367,10 +3707,10 @@ def _main(stdscr):
                             _start_async_multi_send(state, base, targets_list, body)
                     continue
 
-                # ── in-room plain text → broadcast to room ────────────
+                # ── in-room plain text → local room note ──────────────
                 if state.get('current_room') and raw and not raw.startswith(('/', '@', '#')):
                     name = state['current_room']
-                    _start_async_send(state, base, f'room:{name}', raw, f'#{name}')
+                    _start_async_room_note(state, base, name, raw)
                     continue
 
                 # ── chat-view plain text → continues the conversation ─
