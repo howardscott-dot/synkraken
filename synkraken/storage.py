@@ -664,7 +664,19 @@ class Storage:
                 ),
             )
 
-    def save_delivery(self, message_id: str, reply: AdapterReply, created_at: str, attempts: int = 1) -> None:
+    def save_delivery(
+        self,
+        message_id: str,
+        reply: AdapterReply,
+        created_at: str,
+        attempts: int = 1,
+        status: str | None = None,
+        quality: str | None = None,
+    ) -> None:
+        delivery_status = status or ("acknowledged" if reply.ok else "failed")
+        raw = dict(reply.raw or {})
+        if quality:
+            raw["quality"] = quality
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -676,14 +688,14 @@ class Storage:
                 (
                     message_id,
                     reply.adapter_id,
-                    "acknowledged" if reply.ok else "failed",
+                    delivery_status,
                     1 if reply.ok else 0,
-                    reply.body,
+                    reply.body or "",
                     reply.error,
                     reply.duration_ms,
                     reply.external_reference,
                     attempts,
-                    json.dumps(reply.raw, ensure_ascii=False),
+                    json.dumps(raw, ensure_ascii=False),
                     created_at,
                 ),
             )
@@ -857,7 +869,7 @@ class Storage:
                        message_id, adapter_id, COALESCE(error, status) AS reason,
                        created_at
                 FROM deliveries
-                WHERE ok = 0 OR status IN ('failed', 'timeout')
+                WHERE ok = 0 OR status IN ('failed', 'timeout', 'empty_reply')
                 ORDER BY created_at DESC, delivery_id DESC
                 LIMIT 1
                 """

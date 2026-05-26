@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -379,7 +380,9 @@ def print_result(data: dict, raw: bool) -> None:
     for delivery in deliveries:
         label = delivery.get('runtime_name') or delivery.get('adapter_id', 'unknown')
         ok = bool(delivery.get('ok'))
-        print(f"{marker(ok)} {label} [{delivery.get('adapter_id', 'unknown')}]  attempts={delivery.get('attempts', 1)}  duration_ms={delivery.get('duration_ms')}")
+        print(f"{marker(ok)} {label} [{delivery.get('adapter_id', 'unknown')}]  status={delivery.get('status')}  attempts={delivery.get('attempts', 1)}  duration_ms={delivery.get('duration_ms')}")
+        if delivery.get("quality"):
+            print(f"   quality: {delivery.get('quality')}")
         if delivery.get("error"):
             print(f"   error: {delivery.get('error')}")
         body = (delivery.get("body") or "").strip()
@@ -436,7 +439,24 @@ def _print_daemon_health(base: str) -> None:
     print(f"Daemon health: {'OK' if bool(data.get('ok', False)) else 'NOT OK'}")
 
 
-def handle_lifecycle_command(action: str, base: str) -> int:
+def _wait_for_daemon_health(base: str, timeout_seconds: int) -> bool:
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            data = get_json(f"{base}/health")
+            if bool(data.get("ok", False)):
+                return True
+            last_error = "health endpoint returned NOT OK"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    detail = f" ({last_error})" if last_error else ""
+    print(f"Daemon did not become healthy within {timeout_seconds}s at {base}/health{detail}", file=sys.stderr)
+    return False
+
+
+def handle_lifecycle_command(action: str, base: str, wait_seconds: int = 15) -> int:
     if not _systemd_service_installed():
         _print_service_install_help()
         if action == "status":
@@ -444,6 +464,9 @@ def handle_lifecycle_command(action: str, base: str) -> int:
         return 1
 
     returncode = _run_systemctl(action)
+    if action in {"start", "restart"} and returncode == 0:
+        if not _wait_for_daemon_health(base, wait_seconds):
+            return 1
     if action == "status":
         _print_daemon_health(base)
     return returncode
@@ -458,6 +481,8 @@ def add_lifecycle_parser(sub: argparse._SubParsersAction, action: str) -> None:
     }[action]
     parser = sub.add_parser(action, help=help_text)
     parser.add_argument("target", nargs="?", choices=["daemon"], help="Optional explicit target")
+    if action in {"start", "restart"}:
+        parser.add_argument("--wait-seconds", type=int, default=15, help="Seconds to wait for daemon health")
     add_base_url_arg(parser)
 
 
@@ -639,7 +664,7 @@ def main() -> None:
         return
     base = args.url.rstrip("/")
     if args.command in {"start", "stop", "restart", "status"}:
-        raise SystemExit(handle_lifecycle_command(args.command, base))
+        raise SystemExit(handle_lifecycle_command(args.command, base, getattr(args, "wait_seconds", 15)))
     try:
         if args.command == "health":
             data = get_json(f"{base}/health")

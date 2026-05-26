@@ -426,12 +426,20 @@ class AgentFabric:
 
     def _reply_status(self, reply: AdapterReply) -> str:
         if reply.ok:
+            if not (reply.body or '').strip():
+                return 'empty_reply'
             return 'replied'
         if reply.error:
             err = reply.error.lower()
             if 'timeout' in err or 'timed out' in err:
                 return 'timeout'
         return 'failed'
+
+    def _reply_quality(self, reply: AdapterReply) -> str | None:
+        body = (reply.body or '').lower()
+        if '<tool_code>' in body or '</tool_code>' in body:
+            return 'suspicious_output'
+        return None
 
     def _adapter_exception_reply(self, adapter_id: str, exc: Exception) -> tuple[AdapterReply, str]:
         err = str(exc) or exc.__class__.__name__
@@ -509,11 +517,14 @@ class AgentFabric:
     def _record_delivery(self, message: FabricMessage, reply: AdapterReply, *,
                          attempt: int, original_target: str, delivery_target: str,
                          reply_context: str | None, status: str) -> dict[str, Any]:
+        quality = self._reply_quality(reply)
         self.storage.save_delivery(
             message.message_id,
             reply,
             created_at=datetime.now(timezone.utc).isoformat(),
             attempts=attempt,
+            status=status,
+            quality=quality,
         )
         delivery_payload = reply.to_dict() | {
             'attempts': attempt,
@@ -526,6 +537,8 @@ class AgentFabric:
             'duration_ms': reply.duration_ms,
             'body_preview': (reply.body or '')[:160],
         }
+        if quality:
+            delivery_payload['quality'] = quality
         self.event_bus.publish('delivery.recorded', delivery_payload)
         return delivery_payload
 
