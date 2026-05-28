@@ -7,6 +7,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Approval & Execution Governance v0.1: first-class proposals with append-only
+  proposal events, deterministic hardcoded governance rules, approval/rejection/
+  cancellation/simulated-execution lifecycle APIs, CLI/TUI/Web controls, replay
+  and trace integration, and simple runtime reputation counters. Workers may
+  propose sensitive actions; operators approve; SynKraken records execution as
+  simulated in v0.1.
+- Runtime Reputation + Workforce Health v0.1: SynKraken now persists
+  deterministic per-runtime reputation derived from delivery history, including
+  successful replies, empty replies, timeouts, failures, wrong identity,
+  suspicious output, average duration, trust score, health status, and
+  lightweight incident summaries. Added workforce health APIs, CLI commands,
+  TUI `/workforce` and `/health workforce` output, stress report reputation
+  sections, and health-aware goal/team selection bias without disabling
+  workers.
+- Stable Honest TUI v0.1: `/workforce` exposes all enabled daemon-reported
+  workers with latest delivery status, quality, cost tier, usage risk, and
+  recent weak-output counts; broadcast result panels now show target/replied/
+  empty/failed/timeout/degraded counts and still list every target; empty room
+  replies persist and render as `[empty reply]`; suspicious delivery quality is
+  visible in replies, transcripts, events, and latest reply rows; `/stress
+  latest` summarizes the newest CLI stress report when available.
+- CLI stress reports now document `wrong_identity` classifications for direct
+  or broadcast replies that return another adapter's identity marker.
 - Dynamic agents in the TUI v0.1: the command deck no longer hard-codes the
   goose/hermes/openclaw runtime names. Agent colors are assigned from a palette
   by hashing the adapter id, enabled agents are listed and sorted by presence

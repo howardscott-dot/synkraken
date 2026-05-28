@@ -132,6 +132,21 @@ memory mining.
 Operational records attached to messages. These preserve the distinction
 between "what was asked" and "what happened when it was sent."
 
+### Runtime reputation
+
+Runtime Reputation v0.1 is a persisted deterministic read model over delivery
+history. It tracks total deliveries, successful replies, empty replies,
+timeouts, failures, wrong identity markers, suspicious output, average
+duration, last seen, last success, last failure, trust score, health status,
+and lightweight incident summaries. The model is additive and recalculable
+from delivery records; it does not use embeddings, AI scoring, or probabilistic
+inference.
+
+Workforce health statuses are `healthy`, `degraded`, `unstable`, and
+`failing`. Goal and team selection may use them as a bias to prefer healthy
+workers and push failing workers behind available alternatives, but the
+control plane does not mutate config or silently disable workers.
+
 ### Flight records
 
 Flight Recorder v0.1 is a read model assembled from existing persisted data.
@@ -206,6 +221,20 @@ what context and risks were attached, and whether the receiving worker accepted,
 rejected, or completed the transfer. They are not approval chains, voting,
 policy enforcement, scheduling, or autonomous workflow automation.
 
+### Proposals
+
+Durable records of execution-authority requests. A proposal stores status,
+type, title, summary, details, proposer, approval/rejection/execution actors,
+optional room/task/goal links, JSON links to decisions/handoffs/messages,
+execution payload, deterministic risk level, approval requirement, approval
+reason, and terminal timestamps. `proposal_events` records proposed, approved,
+rejected, executed, expired, and cancelled transitions.
+
+Proposals are the authority layer for sensitive actions. Workers may propose;
+operators approve or reject; SynKraken records simulated execution in v0.1.
+They are not autonomous execution, RBAC, enterprise IAM, a policy DSL, or a
+permission system for hidden agent loops.
+
 ## Entity relationships
 
 ```text
@@ -241,7 +270,15 @@ handoff ──────────── handoff_events
     ├─────────────── optional goal
     └─────────────── linked message/decision ids as JSON
 
+proposal ─────────── proposal_events
+    ├─────────────── optional room
+    ├─────────────── optional task
+    ├─────────────── optional goal
+    └─────────────── linked decision/handoff/message ids as JSON
+
 conversation_id groups related messages across direct, broadcast, or room flow
+
+runtime_reputation summarizes delivery-derived operational health per runtime
 
 flight replay reads across the existing tables above; it does not own a table
 ```

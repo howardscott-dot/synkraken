@@ -39,6 +39,13 @@ INDEX_HTML = """<!doctype html>
       <form id="room-form" class="compact hidden">
         <label for="room-name">Create room</label>
         <input id="room-name" placeholder="general">
+        <label for="room-preset">Preset</label>
+        <select id="room-preset">
+          <option value="">plain</option>
+          <option value="review">review</option>
+          <option value="planning">planning</option>
+          <option value="ops">ops</option>
+        </select>
         <div id="room-members" class="checks"></div>
         <button type="submit">Create room</button>
       </form>
@@ -70,6 +77,11 @@ INDEX_HTML = """<!doctype html>
         <h2 id="room-title">Select a target</h2>
         <button id="refresh-room" type="button">Refresh</button>
       </div>
+      <form id="room-tools" class="compact room-tools">
+        <input id="room-search" placeholder="Search current room">
+        <button id="search-room" type="button">Search</button>
+        <button id="summarize-room" type="button">Summarize</button>
+      </form>
       <div id="flight-cards" class="flight-cards"></div>
       <div id="messages" class="messages empty">Choose a room to view its transcript, or an agent to send a direct message.</div>
       <form id="composer">
@@ -116,15 +128,50 @@ INDEX_HTML = """<!doctype html>
         <h2>Handoffs</h2>
         <div id="handoffs-list" class="stack"></div>
       </section>
+      <section class="proposals-box">
+        <div class="panel-head tight">
+          <h2>Proposals</h2>
+          <button id="refresh-proposals" type="button">Refresh</button>
+        </div>
+        <form id="proposal-form" class="compact">
+          <label for="proposal-type">Type</label>
+          <select id="proposal-type">
+            <option value="shell">shell</option>
+            <option value="git">git</option>
+            <option value="restart">restart</option>
+            <option value="delete">delete</option>
+            <option value="write">write</option>
+            <option value="retry">retry</option>
+            <option value="replay">replay</option>
+            <option value="room_summarize">room_summarize</option>
+          </select>
+          <label for="proposal-title">Title</label>
+          <input id="proposal-title" placeholder="Restart daemon">
+          <label for="proposal-summary">Summary</label>
+          <textarea id="proposal-summary" rows="2"></textarea>
+          <button type="submit">Propose</button>
+        </form>
+        <h3>Pending</h3>
+        <div id="pending-proposals-list" class="stack"></div>
+        <h3>Recent</h3>
+        <div id="proposals-list" class="stack"></div>
+      </section>
       <section class="flight-recorder-box">
-        <h2>Flight Recorder</h2>
+        <h2>Trace</h2>
         <form id="replay-form" class="compact">
-          <label for="replay-id">Replay id</label>
+          <label for="replay-id">Trace id</label>
           <input id="replay-id" placeholder="conversation, task, goal, decision, handoff">
-          <button type="submit">Replay</button>
+          <button type="submit">Trace</button>
         </form>
         <div id="incident-panel" class="stack"></div>
         <div id="replay-panel" class="stack"></div>
+      </section>
+      <section class="memory-review-box">
+        <div class="panel-head tight">
+          <h2>Memory Review</h2>
+          <button id="refresh-memory-review" type="button">Refresh</button>
+        </div>
+        <div id="memory-review-list" class="stack"></div>
       </section>
       <form id="task-form" class="compact task-form">
         <label for="task-title">Create task</label>
@@ -424,6 +471,9 @@ const state = {
   goalRuns: [],
   decisions: [],
   handoffs: [],
+  proposals: [],
+  pendingProposals: [],
+  memoryQueue: [],
   flight: null,
   latestIncident: null,
   replay: null,
@@ -696,6 +746,8 @@ async function selectRoom(name) {
   await refreshGoalRuns();
   await refreshDecisions();
   await refreshHandoffs();
+  await refreshProposals();
+  await refreshMemoryReview();
   await refreshTasks();
 }
 
@@ -719,6 +771,8 @@ async function selectAgent(adapterId) {
   await refreshGoalRuns();
   await refreshDecisions();
   await refreshHandoffs();
+  await refreshProposals();
+  await refreshMemoryReview();
   await refreshTasks();
 }
 
@@ -773,12 +827,78 @@ async function saveMemory() {
   setNotice(`saved memory for #${state.currentRoom}`);
 }
 
+async function refreshMemoryReview() {
+  const suffix = state.currentRoom ? `&room=${encodeURIComponent(state.currentRoom)}` : "";
+  const data = await api(`/v1/memory?status=proposed&limit=25${suffix}`);
+  state.memoryQueue = data.memories || [];
+  $("memory-review-list").innerHTML = state.memoryQueue.map((memory) => `
+    <article class="item memory status-${esc(memory.status)}">
+      <strong>${esc(memory.memory_type)} · ${esc(memory.memory_id)}</strong>
+      <span class="meta">by ${esc(memory.created_by || "unknown")} · conf ${esc(memory.confidence || 0)} · ${esc(memory.room_name ? `#${memory.room_name}` : "workspace")}</span>
+      <span class="meta">${esc((memory.content || "").slice(0, 180))}</span>
+      <textarea data-memory-edit="${esc(memory.memory_id)}" rows="2">${esc(memory.content || "")}</textarea>
+      <div class="actions compact-actions">
+        <button type="button" data-memory-action="edit" data-memory-id="${esc(memory.memory_id)}">Save Edit</button>
+        <button type="button" data-memory-action="approve" data-memory-id="${esc(memory.memory_id)}">Approve</button>
+        <button type="button" data-memory-action="reject" data-memory-id="${esc(memory.memory_id)}">Reject</button>
+        <button type="button" data-trace-id="${esc(memory.memory_id)}">Trace</button>
+      </div>
+    </article>
+  `).join("") || `<div class="meta">No pending memory${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+  document.querySelectorAll("[data-memory-action]").forEach((el) => {
+    el.addEventListener("click", () => governMemory(el.dataset.memoryId, el.dataset.memoryAction));
+  });
+  document.querySelectorAll("[data-trace-id]").forEach((el) => {
+    el.addEventListener("click", () => loadReplay(el.dataset.traceId));
+  });
+}
+
+async function governMemory(memoryId, action) {
+  const payload = { actor: "synkraken-web" };
+  if (action === "edit") {
+    const input = [...document.querySelectorAll("[data-memory-edit]")]
+      .find((item) => item.dataset.memoryEdit === memoryId);
+    payload.content = input ? input.value : "";
+  }
+  await api(`/v1/memory/${encodeURIComponent(memoryId)}/${action}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  await refreshMemoryReview();
+  await refreshFlight();
+  setNotice(`${action}d memory ${memoryId}`);
+}
+
 async function refreshMessages() {
   if (!state.currentRoom) return;
   const data = await api(`/v1/rooms/${encodeURIComponent(state.currentRoom)}/messages?limit=100`);
   const messages = data.messages || [];
   state.visibleRows = messages;
   renderMessageRows(messages, { taskButtons: true });
+}
+
+async function searchCurrentRoom() {
+  if (!state.currentRoom) throw new Error("Select a room first.");
+  const query = $("room-search").value.trim();
+  if (!query) {
+    await refreshMessages();
+    return;
+  }
+  const data = await api(`/v1/rooms/${encodeURIComponent(state.currentRoom)}/messages?q=${encodeURIComponent(query)}&limit=100`);
+  state.visibleRows = data.messages || [];
+  renderMessageRows(state.visibleRows, { taskButtons: true });
+  setNotice(`${state.visibleRows.length} match${state.visibleRows.length === 1 ? "" : "es"} in #${state.currentRoom}`);
+}
+
+async function summarizeCurrentRoom() {
+  if (!state.currentRoom) throw new Error("Select a room first.");
+  const result = await api(`/v1/rooms/${encodeURIComponent(state.currentRoom)}/summary`, {
+    method: "POST",
+    body: JSON.stringify({ actor: "synkraken-web", limit: 100 }),
+  });
+  await refreshMemory();
+  await refreshMessages();
+  setNotice(`summary recorded for #${state.currentRoom}: ${(result.summary || "").slice(0, 90)}`);
 }
 
 function renderConversation(data) {
@@ -989,9 +1109,87 @@ async function refreshHandoffs() {
   `).join("") || `<div class="meta">No handoffs${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
 }
 
+async function refreshProposals() {
+  const suffix = state.currentRoom ? `?room=${encodeURIComponent(state.currentRoom)}&limit=25` : "?limit=25";
+  const [data, pendingData] = await Promise.all([
+    api(`/v1/proposals${suffix}`),
+    api("/v1/proposals/pending"),
+  ]);
+  state.proposals = data.proposals || [];
+  state.pendingProposals = state.currentRoom
+    ? (pendingData.proposals || []).filter((proposal) => proposal.room_id === state.currentRoom)
+    : (pendingData.proposals || []);
+  $("pending-proposals-list").innerHTML = state.pendingProposals.slice(0, 10).map((proposal) => `
+    <article class="item proposal status-${esc(proposal.status)}">
+      <strong>${esc(proposal.proposal_id)}</strong>
+      <span class="meta">risk: ${esc(proposal.risk_level)} · type: ${esc(proposal.proposal_type)} · approval: ${proposal.requires_approval ? "yes" : "no"}</span>
+      <span class="meta">by ${esc(proposal.proposed_by || "unknown")} · ${esc(proposal.title || "Untitled proposal")}</span>
+      <div class="actions compact-actions">
+        <button type="button" data-proposal-detail="${esc(proposal.proposal_id)}">Details</button>
+        <button type="button" data-proposal-action="approve" data-proposal-id="${esc(proposal.proposal_id)}">Approve</button>
+        <button type="button" data-proposal-action="reject" data-proposal-id="${esc(proposal.proposal_id)}">Reject</button>
+        ${!proposal.requires_approval ? `<button type="button" data-proposal-action="execute" data-proposal-id="${esc(proposal.proposal_id)}">Execute</button>` : ""}
+      </div>
+    </article>
+  `).join("") || `<div class="meta">No pending proposals${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+  $("proposals-list").innerHTML = state.proposals.map((proposal) => `
+    <article class="item proposal status-${esc(proposal.status)}">
+      <strong>${esc(proposal.status)} · ${esc(proposal.proposal_id)}</strong>
+      <span class="meta">risk: ${esc(proposal.risk_level)} · type: ${esc(proposal.proposal_type)} · approval: ${proposal.requires_approval ? "yes" : "no"}</span>
+      <span class="meta">by ${esc(proposal.proposed_by || "unknown")} · ${esc((proposal.created_at || "").slice(0, 16).replace("T", " "))}</span>
+      <span class="meta">${esc(proposal.title || "Untitled proposal")}</span>
+      <span class="meta">${esc((proposal.summary || proposal.approval_reason || "").slice(0, 130))}</span>
+      <div class="actions compact-actions">
+        <button type="button" data-proposal-detail="${esc(proposal.proposal_id)}">Details</button>
+        ${proposal.status === "proposed" ? `<button type="button" data-proposal-action="approve" data-proposal-id="${esc(proposal.proposal_id)}">Approve</button>` : ""}
+        ${["proposed", "approved"].includes(proposal.status) ? `<button type="button" data-proposal-action="reject" data-proposal-id="${esc(proposal.proposal_id)}">Reject</button>` : ""}
+        ${proposal.status === "approved" || (!proposal.requires_approval && proposal.status === "proposed") ? `<button type="button" data-proposal-action="execute" data-proposal-id="${esc(proposal.proposal_id)}">Execute</button>` : ""}
+      </div>
+    </article>
+  `).join("") || `<div class="meta">No proposals${state.currentRoom ? ` for #${esc(state.currentRoom)}` : ""}.</div>`;
+  document.querySelectorAll("[data-proposal-action]").forEach((el) => {
+    el.addEventListener("click", () => governProposal(el.dataset.proposalId, el.dataset.proposalAction));
+  });
+  document.querySelectorAll("[data-proposal-detail]").forEach((el) => {
+    el.addEventListener("click", () => loadReplay(el.dataset.proposalDetail));
+  });
+}
+
+async function governProposal(proposalId, action) {
+  const result = await api(`/v1/proposal/${action}`, {
+    method: "POST",
+    body: JSON.stringify({ proposal_id: proposalId, actor: "synkraken-web" }),
+  });
+  await Promise.all([refreshProposals(), refreshFlight()]);
+  if (action === "execute") await loadReplay(proposalId);
+  setNotice(`proposal ${action}: ${result.proposal?.proposal_id || proposalId}`);
+}
+
+async function createProposal() {
+  const title = $("proposal-title").value.trim();
+  if (!title) return;
+  const payload = {
+    proposal_type: $("proposal-type").value,
+    title,
+    summary: $("proposal-summary").value,
+    proposed_by: "synkraken-web",
+    room_id: state.currentRoom || null,
+  };
+  const result = await api("/v1/proposal/create", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  $("proposal-title").value = "";
+  $("proposal-summary").value = "";
+  await refreshProposals();
+  setNotice(`proposal created: ${result.proposal?.proposal_id || ""}`);
+}
+
 function replayHtml(replay, title = "Replay") {
   if (!replay) return "";
   const summary = replay.summary || {};
+  const failedDeliveries = (replay.deliveries || []).filter((item) => !item.ok || ["failed", "timeout", "empty_reply", "blocked"].includes(item.status));
+  const deadLetters = replay.dead_letters || [];
   const rows = (replay.timeline || []).slice(-12).map((event) => `
     <div class="timeline-row ${esc(event.status || "")}">
       <span class="meta">${esc((event.timestamp || "").slice(0, 16).replace("T", " "))} · ${esc(event.source || "")}</span>
@@ -999,13 +1197,53 @@ function replayHtml(replay, title = "Replay") {
       <div>${esc(event.summary || event.event_type || "event")}</div>
     </div>
   `).join("");
+  const memoryRows = (replay.memory_injections || []).map((item) => `
+    <div class="meta">memory injected · ${esc(item.source || "")} → ${esc(item.target || "")} · ${esc(item.message_id || "")}</div>
+  `).join("");
+  const retryRows = [
+    ...failedDeliveries.map((item) => `
+      <button type="button" data-retry-kind="delivery" data-retry-id="${esc(item.delivery_id)}">Retry delivery ${esc(item.delivery_id)}</button>
+    `),
+    ...deadLetters.map((item) => `
+      <button type="button" data-retry-kind="dead-letter" data-retry-id="${esc(item.dead_letter_id)}">Replay dead letter ${esc(item.dead_letter_id)}</button>
+    `),
+  ].join("");
+  const anchor = replay.incident_anchor || {};
+  const anchorRetry = anchor.incident_type === "delivery"
+    ? `<button type="button" data-retry-kind="delivery" data-retry-id="${esc(anchor.incident_id)}">Retry latest delivery</button>`
+    : anchor.incident_type === "dead_letter"
+      ? `<button type="button" data-retry-kind="dead-letter" data-retry-id="${esc(anchor.incident_id)}">Replay latest dead letter</button>`
+      : "";
   return `
     <article class="item">
       <strong>${esc(title)}: ${esc(replay.id)}</strong>
       <span class="meta">${esc(replay.kind)} · ${esc(summary.outcome || "unknown")} · messages ${esc(summary.message_count || 0)} · failures ${esc(summary.failure_count || 0)}</span>
       <div class="timeline">${rows || `<div class="meta">No timeline events.</div>`}</div>
+      ${memoryRows ? `<div class="timeline">${memoryRows}</div>` : ""}
+      ${retryRows || anchorRetry ? `<div class="actions compact-actions">${retryRows || anchorRetry}</div>` : ""}
     </article>
   `;
+}
+
+function bindRetryButtons() {
+  document.querySelectorAll("[data-retry-kind]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      try {
+        const kind = el.dataset.retryKind;
+        const id = el.dataset.retryId;
+        const path = kind === "delivery" ? `/v1/deliveries/${id}/retry` : `/v1/dead-letters/${id}/replay`;
+        const result = await api(path, {
+          method: "POST",
+          body: JSON.stringify({ actor: "synkraken-web" }),
+        });
+        setNotice(`${kind === "delivery" ? "retried delivery" : "replayed dead letter"} ${id}`);
+        if (result.message?.conversation_id) await loadReplay(result.message.conversation_id);
+        await Promise.all([refreshIncident(), refreshFlight(), state.currentRoom ? refreshMessages() : Promise.resolve()]);
+      } catch (error) {
+        setNotice(`retry failed: ${error.message}`);
+      }
+    });
+  });
 }
 
 async function refreshIncident() {
@@ -1014,12 +1252,14 @@ async function refreshIncident() {
   $("incident-panel").innerHTML = state.latestIncident
     ? replayHtml(state.latestIncident, "Latest incident")
     : `<div class="meta">${esc(result.message || "No incidents recorded.")}</div>`;
+  bindRetryButtons();
 }
 
 async function loadReplay(id) {
-  const replay = await api(`/v1/replay/${encodeURIComponent(id)}`);
+  const replay = await api(`/v1/trace/${encodeURIComponent(id)}`);
   state.replay = replay;
-  $("replay-panel").innerHTML = replayHtml(replay, "Replay");
+  $("replay-panel").innerHTML = replayHtml(replay, "Trace");
+  bindRetryButtons();
 }
 
 async function toggleGoalRunDetails(goalRunId) {
@@ -1328,25 +1568,70 @@ $("start-goal").addEventListener("click", async () => {
   }
 });
 $("refresh-room").addEventListener("click", refreshMessages);
+$("search-room").addEventListener("click", async () => {
+  try {
+    await searchCurrentRoom();
+  } catch (error) {
+    setNotice(`room search failed: ${error.message}`);
+  }
+});
+$("summarize-room").addEventListener("click", async () => {
+  try {
+    await summarizeCurrentRoom();
+  } catch (error) {
+    setNotice(`room summary failed: ${error.message}`);
+  }
+});
 $("send-target").disabled = true;
 $("toggle-room-form").addEventListener("click", () => $("room-form").classList.toggle("hidden"));
 $("room-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const name = $("room-name").value.trim().toLowerCase();
+  const preset = $("room-preset").value;
   const members = [...document.querySelectorAll("#room-members input:checked")].map((el) => el.value);
   if (!name) return;
   try {
-    await api("/v1/rooms", {
-      method: "POST",
-      body: JSON.stringify({ name, description: "", members }),
-    });
+    if (preset) {
+      await api("/v1/rooms/preset", {
+        method: "POST",
+        body: JSON.stringify({ name, preset, actor: "synkraken-web" }),
+      });
+    } else {
+      await api("/v1/rooms", {
+        method: "POST",
+        body: JSON.stringify({ name, description: "", members }),
+      });
+    }
     $("room-name").value = "";
+    $("room-preset").value = "";
     $("room-form").classList.add("hidden");
     await refreshRooms();
     await selectRoom(name);
     setNotice(`created #${name}`);
   } catch (error) {
     setNotice(`room creation failed: ${error.message}`);
+  }
+});
+$("refresh-memory-review").addEventListener("click", async () => {
+  try {
+    await refreshMemoryReview();
+  } catch (error) {
+    setNotice(`memory queue refresh failed: ${error.message}`);
+  }
+});
+$("refresh-proposals").addEventListener("click", async () => {
+  try {
+    await refreshProposals();
+  } catch (error) {
+    setNotice(`proposal refresh failed: ${error.message}`);
+  }
+});
+$("proposal-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await createProposal();
+  } catch (error) {
+    setNotice(`proposal creation failed: ${error.message}`);
   }
 });
 $("task-form").addEventListener("submit", async (event) => {
@@ -1386,19 +1671,19 @@ $("replay-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const id = $("replay-id").value.trim();
   if (!id) {
-    setNotice("replay needs an id");
+    setNotice("trace needs an id");
     return;
   }
   try {
     await loadReplay(id);
   } catch (error) {
-    setNotice(`replay failed: ${error.message}`);
+    setNotice(`trace failed: ${error.message}`);
   }
 });
 
 async function bootstrap() {
   clearMemoryForm();
-  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions(), refreshHandoffs(), refreshIncident()]);
+  await Promise.all([refreshHealth(), refreshFlight(), refreshAgents(), refreshRooms(), refreshTasks(), refreshTeamRuns(), refreshGoalRuns(), refreshDecisions(), refreshHandoffs(), refreshProposals(), refreshMemoryReview(), refreshIncident()]);
   if (state.rooms[0]) await selectRoom(state.rooms[0].name);
   const events = new EventSource("/api/v1/events/stream");
   events.onmessage = async (event) => {
@@ -1428,6 +1713,8 @@ async function bootstrap() {
       if (payload.event.startsWith("goal.")) await refreshGoalRuns();
       if (payload.event.startsWith("decision.")) await refreshDecisions();
       if (payload.event.startsWith("handoff.")) await refreshHandoffs();
+      if (payload.event.startsWith("proposal.")) await refreshProposals();
+      if (payload.event.startsWith("memory.")) await refreshMemoryReview();
       if (payload.event === "dead-letter.recorded" || payload.event === "delivery.recorded") await refreshIncident();
       if (payload.event.startsWith("goal.") || payload.event.startsWith("team.") || payload.event.startsWith("memory.") || payload.event.startsWith("room.") || payload.event === "dead-letter.recorded") await refreshFlight();
       if (payload.event === "room.memory.updated" && data.room === state.currentRoom) await refreshMemory();

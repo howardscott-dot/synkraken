@@ -47,6 +47,9 @@ Synkraken gives you:
   leaving as you please (Slack-style)
 - **A TUI dashboard** showing live activity, who's typing, latest replies, and
   recent conversations — all updating in real time over SSE
+- **Runtime Reputation + Workforce Health v0.1** that uses deterministic
+  delivery history signals to show which workers are reliable, degraded,
+  expensive, failure-prone, or drifting from expected output.
 - **Visible per-agent activity rows** in chat while deliveries are queued,
   sent, thinking, replied, failed, or timed out, including one row per
   recipient for `@everyone` and room broadcasts
@@ -77,6 +80,11 @@ Synkraken gives you:
 - **Decision Records v0.1** for durable workforce decisions: what was decided,
   who proposed it, who approved or rejected it, why, and what messages or
   runtimes it relates to.
+- **Approval & Execution Governance v0.1** for operator-controlled execution
+  authority. Workers may propose sensitive actions, operators approve or
+  reject them, and SynKraken records simulated execution events for traceable
+  governance without granting autonomous shell, git, file, replay, retry, or
+  restart authority.
 - **Handoffs v0.1** for durable workforce transfers: what work was handed off,
   who handed it off, who received it, what context, risks, and next steps were
   attached, and whether the receiving worker accepted, rejected, or completed
@@ -103,6 +111,27 @@ SynKraken is:
 SynKraken is not another coding agent, an orchestration LLM, a chatbot, a
 CrewAI clone, or a hidden autonomous swarm.
 
+## Authority Model
+
+Workers do not directly execute sensitive actions through SynKraken. They may
+propose actions. Human operators approve or reject those proposals. SynKraken
+records the governance trail and, in v0.1, records execution as simulated
+execution only.
+
+The rule is:
+
+```text
+Agents may propose.
+Humans approve.
+SynKraken executes.
+Everything is traceable.
+```
+
+Approval & Execution Governance v0.1 is deliberately deterministic and simple.
+Shell, git, restart, delete, write, replay, and retry proposals require human
+approval. Low-risk proposals such as room summarization are still recorded as
+proposals, but v0.1 does not auto-execute any proposal in the background.
+
 Architecture and category lock docs:
 
 - [`docs/VISION_01.md`](docs/VISION_01.md)
@@ -127,12 +156,14 @@ Architecture and category lock docs:
 ╭─ BRIDGE ●─────────────────────────────────╮ ╭─ CHAT TARGETS ────────────────────────────╮
 │  ● healthy                                │  │  type @name (or @everyone) to chat       │
 │    started 12s ago                        │  │                                          │
-│                                           │  │  @goose         →  Goose                 │
-│  agents                                   │  │  @hermes        →  Hermes                │
-│    ● Goose      [goose]                   │  │  @claude        →  Claude                │
-│    ● Hermes     [hermes]                  │  │  @openclaw      →  OpenClaw main         │
-│    ● OpenClaw   [openclaw-main]           │  │  @everyone      →  broadcast             │
-│    ● Claude     [claude]                  │  │                                          │
+│                                           │  │  @claude             →  claude           │
+│  agents                                   │  │  @goose              →  goose            │
+│    claude             ○ idle        2s    │  │  @hermes             →  hermes           │
+│    goose              ○ idle        4s    │  │  @openclaw-main      →  openclaw-main    │
+│    hermes             ○ idle        5s    │  │  @crush              →  crush            │
+│    openclaw-main      ○ idle        7s    │  │  @google-antigravity →  google-antigravity│
+│    crush              ○ idle        8s    │  │  @everyone           →  broadcast        │
+│    google-antigravity ○ idle        9s    │  │                                          │
 ╰───────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ╭─ LATEST REPLIES  ·  inbox ────────────────────────────────────────────────────────────────╮
 │  (no replies yet — send something with @<agent> or #<room>)                              │
@@ -140,13 +171,14 @@ Architecture and category lock docs:
 ╭─ RECENT CONVERSATIONS ────────────────────────────────────────────────────────────────────╮
 │  (no conversations yet — say something like @goose hello)                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────╯
- SYNKRAKEN  │  view: dashboard  │  agents: 4  │  filter: all  │  refresh: 3s
+ SYNKRAKEN  │  view: dashboard  │  agents: 6  │  filter: all  │  refresh: 3s
  ›
 ```
 
 The kraken sigil and SYNKRAKEN wordmark fade vertically from bright aqua at
 the top (sunlit ocean surface) down through teal and navy to a deep abyssal
-blue at the tentacle tips. Each agent gets a distinct color.
+blue at the tentacle tips. Agent rows are generated from daemon data; unknown
+adapter ids use deterministic fallback colors.
 
 ## Install
 
@@ -227,7 +259,15 @@ command.
 While a send is active, the chat panel shows transient rows such as
 `goose thinking…`, `hermes thinking…`, and `claude thinking…`. Successful rows
 collapse into the actual replies as they arrive; failed or timed-out deliveries
-remain visible inline instead of only appearing in the bottom status bar.
+remain visible inline instead of only appearing in the bottom status bar. The
+TUI renders enabled workers from daemon data rather than a fixed agent list;
+empty replies render as `[empty reply]`, delivery quality such as
+`suspicious_output` remains visible, and broadcast results list every target
+with reply, empty, failure, timeout, and degraded counts. `/workforce` shows
+the current enabled workforce with trust score, health status, cost tier,
+latest delivery quality, weak reply counts, and average duration. `/health
+workforce` shows aggregate healthy/degraded/unstable/failing counts, top
+trusted runtimes, unstable runtimes, and recent incidents.
 
 Discussion Mode is a bounded, human-started agent exchange. Use
 `/discuss <agent1> <agent2> "topic"` to have SynKraken alternate turns between
@@ -392,6 +432,11 @@ task lifecycle updates, shared memory, and a clean fake-agent failure.
 Each run writes a local audit bundle under `audits/live-test-YYYYMMDD-HHMMSS/`
 with `report.md`, `raw.json`, and `commands.log`.
 
+For adapter quality stress checks, `scripts/cli_stress_test.py --skip-restart`
+writes `audits/cli-stress-*/report.md`. The TUI command `/stress latest`
+summarizes the latest report path, final status, degraded adapters, direct send
+rows, and broadcast rows.
+
 ## Adapters (runtime integrations)
 
 | Adapter id  | Type       | Runtime                                                  | Default invocation |
@@ -471,6 +516,9 @@ extend one model rather than several.
 | GET    | `/v1/conversations/{id}`                        | full conversation thread             |
 | GET    | `/v1/deliveries?limit=N`                        | recent deliveries                    |
 | GET    | `/v1/dead-letters?limit=N`                      | failed deliveries                    |
+| GET    | `/v1/workforce`                                 | workforce reputation and health      |
+| GET    | `/v1/workforce/health`                          | aggregate workforce health summary   |
+| GET    | `/v1/runtime/{id}/reputation`                   | one runtime reputation record        |
 | GET    | `/v1/events/stream`                             | SSE stream of bridge events          |
 | GET    | `/v1/rooms`                                     | list rooms                           |
 | POST   | `/v1/rooms`                                     | create a room                        |

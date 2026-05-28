@@ -11,11 +11,15 @@ SynKraken is responsible for:
 
 - visibility into agents, rooms, tasks, memory, deliveries, and failures
 - governance over bounded workflows, approvals, roles, and audit trails
+- execution authority through explicit proposals, approvals, rejections,
+  cancellations, simulated execution records, and proposal audit events
 - coordination across direct messages, broadcasts, rooms, discussions, team
   tasks, and goals
 - recovery through durable storage, blocked states, dead letters, and
   inspectable partial transcripts
 - observability through append-only events and operator surfaces
+- deterministic workforce health through delivery-derived runtime reputation,
+  trust scores, health statuses, and lightweight incident summaries
 - runtime discovery that inventories local tools without executing work,
   inferring subscriptions, or storing secrets
 
@@ -45,6 +49,23 @@ collapse into one runtime's assumptions.
 The daemon owns durable concepts. Runtimes own their model behavior, provider
 accounts, prompt handling, and execution costs.
 
+Operator surfaces are part of runtime neutrality. They must render the actual
+enabled workforce reported by the daemon and must not encode fixed worker
+slots, fixed adapter counts, or hidden allowlists. Unknown adapter ids should
+remain visible with generic presentation.
+
+Visibility includes weak behavior. Empty replies, suspicious or unexpected
+output, wrong identity replies, timeouts, blocked deliveries, and failures are
+control-plane facts; clients must surface them plainly instead of suppressing
+or smoothing them away.
+
+Runtime reputation is part of visibility and governance. SynKraken does not
+assume all AI workers are equally reliable; it continuously evaluates
+operational quality with deterministic counters and explicit health rules. It
+must not become hidden AI scoring, an opaque scheduler, or a reason to silently
+disable runtimes. Any routing effect must remain a visible bias under operator
+authority.
+
 Runtime discovery must remain neutral. It may find commands, safe version
 strings, capabilities declared by SynKraken's registry, and supported adapter
 modes. It must not imply that SynKraken owns the runtime, pays for it, can use
@@ -62,3 +83,31 @@ permissionless execution are outside the doctrine.
 Discovery and onboarding must preserve operator authority. `merge` keeps
 existing adapter settings, `replace` rewrites only after an explicit choice,
 and `skip` leaves local configuration unchanged.
+
+## Approval And Execution Authority
+
+SynKraken's execution authority model is:
+
+```text
+Agents may propose.
+Humans approve.
+SynKraken executes.
+Everything is traceable.
+```
+
+Workers do not directly execute sensitive actions through SynKraken. A worker
+may create a proposal for an action such as shell execution, git operations,
+restart, delete, write, replay, retry, memory promotion, or room summary
+promotion. The proposal records risk, approval requirement, links to related
+rooms/tasks/goals/decisions/handoffs/messages, and the execution payload.
+
+Approval & Execution Governance v0.1 is deterministic and hardcoded rather
+than policy-scripted. It classifies action risk, records whether approval is
+required, and explains why. Approval changes proposal status only. Execution is
+not autonomous and does not run dangerous shell, git, file, or daemon actions
+in v0.1; it records simulated execution so the authority trail is durable and
+replayable.
+
+This governance layer is not RBAC, enterprise IAM, a policy DSL, hidden
+autonomy, or an agent permission system. It is the local authority ledger for
+operator-controlled execution flow.

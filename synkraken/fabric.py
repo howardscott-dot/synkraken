@@ -15,7 +15,7 @@ import time
 from .adapters import build_adapter
 from .models import AdapterReply, FabricMessage, new_id, utc_now_iso
 from .router import resolve_targets
-from .storage import SHARED_MEMORY_TYPES, Storage
+from .storage import PROPOSAL_TYPES, SHARED_MEMORY_TYPES, Storage
 
 
 class EventBus:
@@ -116,6 +116,28 @@ class AgentFabric:
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self.storage.list_agents()
+
+    def workforce(self) -> dict[str, Any]:
+        agents = {agent["adapter_id"]: agent for agent in self.storage.list_agents()}
+        runtimes = {runtime["runtime_id"]: runtime for runtime in self.storage.list_runtimes()}
+        summary = self.storage.workforce_summary()
+        rows = []
+        for reputation in summary["runtimes"]:
+            runtime_id = reputation["runtime_id"]
+            agent = agents.get(runtime_id, {})
+            runtime = runtimes.get(runtime_id, {})
+            rows.append({
+                "runtime_id": runtime_id,
+                "adapter_id": runtime_id,
+                "runtime_name": agent.get("runtime_name") or runtime.get("runtime_id") or runtime_id,
+                "status": agent.get("status") or ("enabled" if runtime.get("enabled") else "disabled"),
+                "enabled": bool(agent.get("enabled", runtime.get("enabled", True))),
+                "cost_tier": agent.get("cost_tier") or runtime.get("cost_tier") or "medium",
+                "usage_risk": agent.get("usage_risk") or runtime.get("usage_risk") or "medium",
+                "reputation": reputation,
+            })
+        summary["workforce"] = rows
+        return summary
 
     def update_agent_profile(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         actor = str(payload.get("actor", "operator")).strip() or "operator"
@@ -249,6 +271,81 @@ class AgentFabric:
         self.event_bus.publish("room.member_removed", {"room_name": room_name, "agent_id": adapter_id, "actor": actor})
         return self.storage.get_room(room_name) or {"name": room_name, "members": []}
 
+    def create_room_preset(self, name: str, preset: str, actor: str = "operator") -> dict:
+        presets = {
+            "review": {
+                "description": "Implementation review room",
+                "memory": {
+                    "purpose": "Review implementation changes and surface risks.",
+                    "rules": "Prioritize correctness, regressions, missing tests, and operational risk.",
+                    "current_focus": "Review queue",
+                },
+            },
+            "planning": {
+                "description": "Planning and design room",
+                "memory": {
+                    "purpose": "Shape implementation plans before work starts.",
+                    "rules": "Keep plans bounded, auditable, and aligned with SynKraken control-plane doctrine.",
+                    "current_focus": "Plan next concrete slice",
+                },
+            },
+            "ops": {
+                "description": "Operations and incident room",
+                "memory": {
+                    "purpose": "Coordinate runtime health, delivery failures, and operator recovery.",
+                    "rules": "Track incidents visibly and prefer replayable operator actions.",
+                    "current_focus": "Operational readiness",
+                },
+            },
+        }
+        preset_key = preset.strip().lower()
+        if preset_key not in presets:
+            raise ValueError(f"unknown room preset: {preset}")
+        room_name = name.strip().lower()
+        if not room_name:
+            room_name = preset_key
+        if self.storage.room_exists(room_name):
+            room = self.storage.get_room(room_name)
+        else:
+            now = utc_now_iso()
+            self.storage.create_room(room_name, presets[preset_key]["description"], now, members=list(self.adapters.keys()))
+            room = self.storage.get_room(room_name)
+        memory = self.storage.upsert_room_memory(room_name, presets[preset_key]["memory"], actor, utc_now_iso())
+        self.event_bus.publish("room.preset_applied", {"room_name": room_name, "preset": preset_key, "actor": actor})
+        return {"room": room, "memory": memory, "preset": preset_key}
+
+    def summarize_room(self, room_name: str, actor: str = "operator", limit: int = 50) -> dict[str, Any]:
+        if not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        messages = self.storage.get_room_messages(room_name, limit=limit)
+        if not messages:
+            summary = "No room transcript messages yet."
+        else:
+            participants = sorted({str(message.get("source") or "") for message in messages if message.get("source")})
+            latest = messages[-5:]
+            bullets = [
+                f"- {message.get('source')}: {self._summarize(message.get('body'), 140)}"
+                for message in latest
+            ]
+            summary = (
+                f"Room summary from last {len(messages)} messages. "
+                f"Participants: {', '.join(participants) or '(none)'}.\n"
+                + "\n".join(bullets)
+            )
+        memory = self.storage.get_room_memory(room_name) or {}
+        existing_notes = str(memory.get("notes") or "").strip()
+        notes = f"{existing_notes}\n\n{summary}".strip() if existing_notes else summary
+        updated = self.storage.upsert_room_memory(room_name, {"notes": notes[-2000:]}, actor, utc_now_iso())
+        self._save_visible_message(
+            "synkraken-room",
+            f"room:{room_name}",
+            f"Room summary recorded.\n{summary}",
+            conversation_id=f"room:{room_name}",
+            metadata={"room_event": True, "event": "room_summary", "actor": actor},
+        )
+        self.event_bus.publish("room.summary_recorded", {"room_name": room_name, "actor": actor})
+        return {"room": room_name, "summary": summary, "memory": updated}
+
     def flight_summary(self) -> dict[str, Any]:
         agents = self.list_agents()
         goals = self.storage.list_goal_runs(limit=100)
@@ -263,6 +360,7 @@ class AgentFabric:
         token_risk = "high" if len(active_goals) > 2 else "medium" if active_goals else "low"
         pending_reviews = len([run for run in self.storage.list_team_runs(limit=100) if run.get("status") == "awaiting_approval"])
         pending_reviews += self.storage.count_shared_memory("proposed")
+        pending_reviews += len(self.storage.list_proposals(status="proposed", limit=1000))
         return {
             "agents_online": len([agent for agent in agents if agent.get("enabled") and agent.get("status") in {"online", "idle", "working"}]),
             "agents_total": len(agents),
@@ -279,6 +377,7 @@ class AgentFabric:
             },
             "memory_count": self.storage.count_shared_memory(),
             "pending_reviews": pending_reviews,
+            "pending_proposals": len(self.storage.list_proposals(status="proposed", limit=1000)),
         }
 
     def init_workspace(self, name: str | None = None) -> dict[str, Any]:
@@ -436,6 +535,12 @@ class AgentFabric:
         return 'failed'
 
     def _reply_quality(self, reply: AdapterReply) -> str | None:
+        raw_quality = str((reply.raw or {}).get("quality") or "").strip()
+        if raw_quality in {"wrong_identity", "suspicious_output", "unexpected_output"}:
+            return raw_quality
+        marker_ids = re.findall(r"\b(?:ADAPTER_OK|BROADCAST_OK):\s*([^\s,.;:]+)", reply.body or "")
+        if marker_ids and any(marker_id != reply.adapter_id for marker_id in marker_ids):
+            return "wrong_identity"
         body = (reply.body or '').lower()
         if '<tool_code>' in body or '</tool_code>' in body:
             return 'suspicious_output'
@@ -560,8 +665,12 @@ class AgentFabric:
 
     def _persist_reply_message(self, message: FabricMessage, delivery_target: str,
                                reply: AdapterReply, transcript_target: str | None) -> FabricMessage | None:
-        if not reply.ok or not transcript_target or not (reply.body or '').strip():
+        if not reply.ok or not transcript_target:
             return None
+        quality = self._reply_quality(reply)
+        metadata = {}
+        if quality:
+            metadata["quality"] = quality
         transcript_msg = FabricMessage(
             source=delivery_target,
             target=transcript_target,
@@ -569,6 +678,7 @@ class AgentFabric:
             conversation_id=message.conversation_id,
             reply_to=message.message_id,
             hop_count=message.hop_count + 1,
+            metadata=metadata,
         ).normalized()
         self.storage.save_message(transcript_msg)
         self.event_bus.publish('message.accepted', {
@@ -628,6 +738,34 @@ class AgentFabric:
         })
         return message
 
+    def record_room_note(self, room_name: str, source: str, body: str) -> dict[str, Any]:
+        room_name = room_name.strip().lower()
+        if not room_name:
+            raise ValueError("room required")
+        if not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        body = body.strip()
+        if not body:
+            raise ValueError("body required")
+        message = self._save_visible_message(
+            source,
+            f"room:{room_name}",
+            body,
+            conversation_id=f"room:{room_name}",
+            metadata={"room_note": True},
+        )
+        return {
+            "message": message.to_dict(),
+            "routing": {
+                "requested_target": f"room:{room_name}",
+                "resolved_targets": [],
+                "reply_context": f"room:{room_name}",
+                "transcript_target": f"room:{room_name}",
+            },
+            "deliveries": [],
+            "dead_letters": [],
+        }
+
     def _task_title(self, question: str) -> str:
         title = " ".join(question.split())
         return title[:117] + "..." if len(title) > 120 else title
@@ -645,6 +783,7 @@ class AgentFabric:
     def _agent_profile(self, agent_id: str) -> dict[str, Any]:
         agent = self.storage.get_agent(agent_id) or {}
         config = self.config.get("adapters", {}).get(agent_id, {})
+        reputation = self.storage.get_runtime_reputation(agent_id) or {}
         preferred_roles = list(agent.get("preferred_roles") or config.get("preferred_roles") or [])
         avoid_roles = list(agent.get("avoid_roles") or config.get("avoid_roles") or [])
         capabilities = list(agent.get("capabilities") or config.get("capabilities") or [])
@@ -656,6 +795,8 @@ class AgentFabric:
             "capabilities": [str(item).lower() for item in capabilities],
             "speed": int(agent.get("speed") or config.get("speed") or 5),
             "trust": int(agent.get("trust") or config.get("trust") or 5),
+            "runtime_trust": int(reputation.get("trust_score") if reputation.get("trust_score") is not None else 100),
+            "health_status": str(reputation.get("health_status") or "healthy"),
             "config_role": str(config.get("role", "")).lower(),
         }
 
@@ -728,6 +869,15 @@ class AgentFabric:
         score += profile["trust"] * 2
         if role in {"token_police", "summary"}:
             score += profile["speed"]
+        score += max(-20, min(20, (profile["runtime_trust"] - 70) // 2))
+        if profile["health_status"] == "healthy":
+            score += 12
+        elif profile["health_status"] == "degraded":
+            score -= 6
+        elif profile["health_status"] == "unstable":
+            score -= 18
+        elif profile["health_status"] == "failing":
+            score -= 35
         return score
 
     def _team_prompt(
@@ -1839,6 +1989,43 @@ class AgentFabric:
             event_type="human_overridden",
         )
         self._memory_visible(memory.get("room_name"), f"Shared memory approved by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        self.event_bus.publish("memory.approved", {"memory_id": memory_id, "actor": actor})
+        return {"memory": updated}
+
+    def edit_memory(self, memory_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        memory = self.storage.get_shared_memory(memory_id)
+        if not memory:
+            raise ValueError(f"memory not found: {memory_id}")
+        actor = str(payload.get("actor", "operator")).strip() or "operator"
+        fields: dict[str, Any] = {}
+        if "content" in payload:
+            content = " ".join(str(payload.get("content") or "").split())
+            if not content:
+                raise ValueError("content cannot be empty")
+            if len(content) > self.memory_max_memory_chars:
+                raise ValueError(f"content too long ({len(content)} > {self.memory_max_memory_chars})")
+            fields["content"] = content
+        if "memory_type" in payload:
+            memory_type = str(payload.get("memory_type") or "").strip()
+            if memory_type not in SHARED_MEMORY_TYPES:
+                raise ValueError(f"invalid memory_type: {memory_type}")
+            fields["memory_type"] = memory_type
+        if "confidence" in payload:
+            fields["confidence"] = max(0, min(100, int(payload.get("confidence") or 0)))
+        if memory.get("status") == "peer_approved" and fields:
+            fields["status"] = "proposed"
+            fields["approved_by"] = None
+            fields["approved_at"] = None
+            fields["review_result"] = None
+            fields["review_reason"] = None
+        updated = self.storage.update_shared_memory(
+            memory_id,
+            fields,
+            actor=actor,
+            event_type="memory_edited",
+        )
+        self._memory_visible(memory.get("room_name"), f"Shared memory edited: {memory_id}", memory_id=memory_id, actor=actor, event="memory_edited")
+        self.event_bus.publish("memory.edited", {"memory_id": memory_id, "actor": actor})
         return {"memory": updated}
 
     def reject_memory(self, memory_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
@@ -1852,6 +2039,7 @@ class AgentFabric:
             event_type="human_overridden",
         )
         self._memory_visible(memory.get("room_name"), f"Shared memory rejected by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        self.event_bus.publish("memory.rejected", {"memory_id": memory_id, "actor": actor})
         return {"memory": updated}
 
     def archive_memory(self, memory_id: str, actor: str = "operator") -> dict[str, Any]:
@@ -1865,6 +2053,7 @@ class AgentFabric:
             event_type="memory_archived",
         )
         self._memory_visible(memory.get("room_name"), f"Shared memory archived: {memory_id}", memory_id=memory_id, actor=actor, event="memory_archived")
+        self.event_bus.publish("memory.archived", {"memory_id": memory_id, "actor": actor})
         return {"memory": updated}
 
     # ── Goal Mode ────────────────────────────────────────────────────────
@@ -1893,17 +2082,28 @@ class AgentFabric:
         return profiles[mode]
 
     def _goal_mode_agents(self, agents: list[str], mode: str, goal: str) -> list[str]:
-        if mode == "full":
-            return agents[: self.goal_max_agents]
         tier_rank = {"local": 0, "cheap": 1, "medium": 2, "premium": 3}
         risk_rank = {"low": 0, "medium": 1, "high": 2}
+        health_rank = {"healthy": 0, "degraded": 1, "unstable": 2, "failing": 3}
         order = {agent: index for index, agent in enumerate(agents)}
+        if mode == "full":
+            return sorted(
+                agents,
+                key=lambda agent: (
+                    health_rank.get(self._agent_profile(agent)["health_status"], 0),
+                    -self._agent_profile(agent)["runtime_trust"],
+                    -self._profile_score(agent, "owner", goal),
+                    order[agent],
+                ),
+            )[: self.goal_max_agents]
         if mode == "cheap":
             return sorted(
                 agents,
                 key=lambda agent: (
+                    health_rank.get(self._agent_profile(agent)["health_status"], 0),
                     tier_rank.get(self._agent_profile(agent)["cost_tier"], 2),
                     risk_rank.get(self._agent_profile(agent)["usage_risk"], 1),
+                    -self._agent_profile(agent)["runtime_trust"],
                     -self._profile_score(agent, "reviewer", goal),
                     order[agent],
                 ),
@@ -1917,8 +2117,10 @@ class AgentFabric:
         selected.extend(sorted(
             remaining,
             key=lambda agent: (
+                health_rank.get(self._agent_profile(agent)["health_status"], 0),
                 tier_rank.get(self._agent_profile(agent)["cost_tier"], 2),
                 risk_rank.get(self._agent_profile(agent)["usage_risk"], 1),
+                -self._agent_profile(agent)["runtime_trust"],
                 -max(
                     self._profile_score(agent, "token_police", goal),
                     self._profile_score(agent, "reviewer", goal),
@@ -1947,16 +2149,26 @@ class AgentFabric:
             "max_rounds": max_rounds,
             "estimated_call_count": estimated_calls,
             "risk_level": risk_level,
+            "selection_reasoning": [
+                (
+                    f"{agent}: {self._agent_profile(agent)['cost_tier']} cost, "
+                    f"{self._agent_profile(agent)['health_status']}, "
+                    f"trust {self._agent_profile(agent)['runtime_trust']}"
+                )
+                for agent in agents
+            ],
         }
 
     def _format_goal_execution_profile(self, profile: dict[str, Any]) -> str:
+        reasoning = "\n".join(f"- {item}" for item in profile.get("selection_reasoning", []))
         return (
             "Goal execution profile:\n"
             f"Mode: {profile['mode']}\n"
             f"Agents: {', '.join(profile['agents']) or '(none)'}\n"
             f"Max rounds: {profile['max_rounds']}\n"
             f"Estimated call count: {profile['estimated_call_count']}\n"
-            f"Risk level: {profile['risk_level']}"
+            f"Risk level: {profile['risk_level']}\n"
+            f"Selection:\n{reasoning or '- (none)'}"
         )
 
     def _choose_control_roles(self, agents: list[str], owner: str, reviewers: list[str], goal: str) -> tuple[str | None, str | None]:
@@ -2790,6 +3002,217 @@ class AgentFabric:
             "dead_letters": dead_letters,
         }
 
+    def replay_delivery(self, delivery_id: int, actor: str = "operator") -> dict[str, Any]:
+        delivery = self.storage.get_delivery(delivery_id)
+        if not delivery:
+            raise ValueError(f"delivery not found: {delivery_id}")
+        message = self.storage.get_message(str(delivery.get("message_id") or ""))
+        if not message:
+            raise ValueError(f"source message not found: {delivery.get('message_id')}")
+        metadata = dict(message.get("metadata") or {})
+        if str(message.get("target") or "").startswith("room:"):
+            metadata["room_context"] = message["target"]
+        metadata["replay_of_delivery_id"] = delivery_id
+        return self.dispatch({
+            "source": actor,
+            "target": delivery["adapter_id"],
+            "body": message.get("body") or "",
+            "subject": message.get("subject"),
+            "priority": message.get("priority") or "normal",
+            "conversation_id": message.get("conversation_id"),
+            "reply_to": message.get("message_id"),
+            "metadata": metadata,
+        })
+
+    def replay_dead_letter(self, dead_letter_id: int, actor: str = "operator") -> dict[str, Any]:
+        dead_letter = self.storage.get_dead_letter(dead_letter_id)
+        if not dead_letter:
+            raise ValueError(f"dead letter not found: {dead_letter_id}")
+        payload_message = (dead_letter.get("payload") or {}).get("message") or {}
+        message = self.storage.get_message(str(dead_letter.get("message_id") or "")) or payload_message
+        if not message:
+            raise ValueError(f"source message not found: {dead_letter.get('message_id')}")
+        metadata = dict(message.get("metadata") or {})
+        if str(message.get("target") or "").startswith("room:"):
+            metadata["room_context"] = message["target"]
+        metadata["replay_of_dead_letter_id"] = dead_letter_id
+        return self.dispatch({
+            "source": actor,
+            "target": dead_letter["adapter_id"],
+            "body": message.get("body") or "",
+            "subject": message.get("subject"),
+            "priority": message.get("priority") or "normal",
+            "conversation_id": message.get("conversation_id"),
+            "reply_to": message.get("message_id"),
+            "metadata": metadata,
+        })
+
+    # ── Proposals ─────────────────────────────────────────────────────────
+
+    def _normalize_proposal_type(self, proposal_type: str) -> str:
+        normalized = str(proposal_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "file": "file_write",
+            "write_file": "file_write",
+            "dead_letter_retry": "retry",
+            "delivery_replay": "replay",
+            "room_summary": "room_summarize",
+            "memory": "memory_promotion",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in PROPOSAL_TYPES:
+            raise ValueError(f"invalid proposal_type: {proposal_type}")
+        return normalized
+
+    def evaluate_governance(self, proposal_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        kind = self._normalize_proposal_type(proposal_type)
+        high = {"shell", "git", "restart", "delete", "write", "file_write", "delete_file"}
+        medium = {"replay", "retry", "memory_promotion", "room_summary_promotion"}
+        approval_reasons = {
+            "shell": "shell execution requires human approval",
+            "git": "git operations require human approval",
+            "restart": "restart actions require human approval",
+            "delete": "delete actions require human approval",
+            "write": "write actions require human approval",
+            "file_write": "file writes require human approval",
+            "delete_file": "file deletion requires human approval",
+            "replay": "delivery replay requires human approval",
+            "retry": "delivery retry requires human approval",
+            "memory_promotion": "memory promotion requires human approval",
+            "room_summary_promotion": "room summary promotion requires human approval",
+            "room_summarize": "room summary is low risk but remains proposal-tracked in v0.1",
+        }
+        return {
+            "proposal_type": kind,
+            "risk_level": "high" if kind in high else "medium" if kind in medium else "low",
+            "requires_approval": kind in high or kind in medium,
+            "approval_reason": approval_reasons.get(kind, "proposal requires governance review"),
+        }
+
+    def create_proposal(self, payload: dict[str, Any]) -> dict[str, Any]:
+        proposal_type = self._normalize_proposal_type(str(payload.get("proposal_type") or payload.get("type") or ""))
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("title required")
+        proposed_by = str(payload.get("proposed_by") or payload.get("actor") or "operator").strip() or "operator"
+        room_id = str(payload.get("room_id") or payload.get("room_name") or "").strip() or None
+        task_id = str(payload.get("task_id") or "").strip() or None
+        goal_id = str(payload.get("goal_id") or "").strip() or None
+        if room_id and not self.storage.room_exists(room_id):
+            raise ValueError(f"room not found: {room_id}")
+        if task_id and not self.storage.get_task(task_id):
+            raise ValueError(f"task not found: {task_id}")
+        if goal_id and not self.storage.get_goal_run(goal_id):
+            raise ValueError(f"goal run not found: {goal_id}")
+        linked_decision_ids = [str(item) for item in (payload.get("linked_decision_ids") or [])]
+        linked_handoff_ids = [str(item) for item in (payload.get("linked_handoff_ids") or [])]
+        linked_message_ids = [str(item) for item in (payload.get("linked_message_ids") or [])]
+        for message_id in linked_message_ids:
+            if not self.storage.message_exists(message_id):
+                raise ValueError(f"linked message not found: {message_id}")
+        governance = self.evaluate_governance(proposal_type, payload)
+        now = utc_now_iso()
+        proposal_id = str(payload.get("proposal_id") or payload.get("id") or "").strip() or new_id()
+        proposal = self.storage.create_proposal(
+            proposal_id=proposal_id,
+            created_at=now,
+            proposal_type=governance["proposal_type"],
+            title=title,
+            summary=str(payload.get("summary") or "").strip(),
+            details=str(payload.get("details") or "").strip(),
+            proposed_by=proposed_by,
+            room_id=room_id,
+            task_id=task_id,
+            goal_id=goal_id,
+            linked_decision_ids=linked_decision_ids,
+            linked_handoff_ids=linked_handoff_ids,
+            linked_message_ids=linked_message_ids,
+            execution_payload=dict(payload.get("execution_payload") or {}),
+            risk_level=governance["risk_level"],
+            requires_approval=bool(governance["requires_approval"]),
+            approval_reason=governance["approval_reason"],
+        )
+        self.event_bus.publish("proposal.proposed", {"proposal_id": proposal_id, "proposed_by": proposed_by})
+        return {"proposal": proposal, "events": self.storage.list_proposal_events(proposal_id) or []}
+
+    def approve_proposal(self, proposal_id: str, actor: str = "operator") -> dict[str, Any]:
+        proposal = self.storage.get_proposal(proposal_id)
+        if not proposal:
+            raise ValueError(f"proposal not found: {proposal_id}")
+        if proposal["status"] != "proposed":
+            raise ValueError(f"proposal cannot be approved in status: {proposal['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_proposal(
+            proposal_id,
+            {"status": "approved", "approved_by": actor, "updated_at": now},
+            actor=actor,
+            event_type="approved",
+            details={"status": "approved"},
+        )
+        self.event_bus.publish("proposal.approved", {"proposal_id": proposal_id, "approved_by": actor})
+        return {"proposal": updated, "events": self.storage.list_proposal_events(proposal_id) or []}
+
+    def reject_proposal(self, proposal_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
+        proposal = self.storage.get_proposal(proposal_id)
+        if not proposal:
+            raise ValueError(f"proposal not found: {proposal_id}")
+        if proposal["status"] not in {"proposed", "approved"}:
+            raise ValueError(f"proposal cannot be rejected in status: {proposal['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_proposal(
+            proposal_id,
+            {"status": "rejected", "rejected_by": actor, "rejected_at": now, "updated_at": now},
+            actor=actor,
+            event_type="rejected",
+            details={"reason": reason or "operator rejected"},
+        )
+        self.event_bus.publish("proposal.rejected", {"proposal_id": proposal_id, "rejected_by": actor})
+        return {"proposal": updated, "events": self.storage.list_proposal_events(proposal_id) or []}
+
+    def cancel_proposal(self, proposal_id: str, actor: str = "operator", reason: str | None = None) -> dict[str, Any]:
+        proposal = self.storage.get_proposal(proposal_id)
+        if not proposal:
+            raise ValueError(f"proposal not found: {proposal_id}")
+        if proposal["status"] in {"executed", "rejected", "cancelled", "expired"}:
+            raise ValueError(f"proposal cannot be cancelled in status: {proposal['status']}")
+        now = utc_now_iso()
+        updated = self.storage.update_proposal(
+            proposal_id,
+            {"status": "cancelled", "updated_at": now},
+            actor=actor,
+            event_type="cancelled",
+            details={"reason": reason or "operator cancelled"},
+        )
+        self.event_bus.publish("proposal.cancelled", {"proposal_id": proposal_id, "cancelled_by": actor})
+        return {"proposal": updated, "events": self.storage.list_proposal_events(proposal_id) or []}
+
+    def execute_proposal(self, proposal_id: str, actor: str = "operator") -> dict[str, Any]:
+        proposal = self.storage.get_proposal(proposal_id)
+        if not proposal:
+            raise ValueError(f"proposal not found: {proposal_id}")
+        if proposal["status"] in {"rejected", "cancelled", "expired"}:
+            raise ValueError(f"proposal cannot be executed in status: {proposal['status']}")
+        if proposal["requires_approval"] and proposal["status"] != "approved":
+            raise ValueError("proposal requires approval before execution")
+        if proposal["status"] == "executed":
+            raise ValueError("proposal already executed")
+        now = utc_now_iso()
+        execution_result = {
+            "ok": True,
+            "mode": "simulated",
+            "result": "simulated execution",
+            "proposal_type": proposal["proposal_type"],
+        }
+        updated = self.storage.update_proposal(
+            proposal_id,
+            {"status": "executed", "executed_by": actor, "executed_at": now, "updated_at": now},
+            actor=actor,
+            event_type="executed",
+            details=execution_result,
+        )
+        self.event_bus.publish("proposal.executed", {"proposal_id": proposal_id, "executed_by": actor, "result": execution_result})
+        return {"proposal": updated, "events": self.storage.list_proposal_events(proposal_id) or [], "execution_result": execution_result}
+
     # ── Decisions ─────────────────────────────────────────────────────────
 
     def propose_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3093,12 +3516,61 @@ class AgentFabric:
                     "handoffs",
                 ))
 
+        for proposal in context["proposals"]:
+            timeline.append(self._timeline_event(
+                proposal.get("created_at"),
+                "proposal",
+                proposal.get("proposed_by"),
+                proposal.get("room_id") or proposal.get("task_id") or proposal.get("goal_id"),
+                self._summarize(proposal.get("summary") or proposal.get("title") or "proposal recorded"),
+                proposal.get("status"),
+                "proposals",
+            ))
+            for event in self.storage.list_proposal_events(proposal["proposal_id"]) or []:
+                timeline.append(self._timeline_event(
+                    event.get("created_at"),
+                    f"proposal_{event.get('event_type')}",
+                    event.get("actor"),
+                    proposal.get("proposal_id"),
+                    self._summarize(event.get("details") or event.get("event_type") or "proposal event"),
+                    proposal.get("status"),
+                    "proposals",
+                ))
+
         timeline.sort(key=lambda item: (item.get("timestamp") or "", item.get("source") or "", item.get("event_type") or ""))
         return {
             "id": replay_id,
             "kind": context["kind"],
             "timeline": timeline,
             "summary": self._flight_summary(context, timeline, messages, deliveries, dead_letters),
+        }
+
+    def get_trace(self, trace_id: str) -> dict[str, Any]:
+        context = self._flight_context(trace_id)
+        message_ids = [message["message_id"] for message in context["messages"]]
+        deliveries = self.storage.list_deliveries_for_messages(message_ids)
+        dead_letters = self.storage.list_dead_letters_for_messages(message_ids)
+        replay = self.get_replay(trace_id)
+        injected_memory = []
+        for message in context["messages"]:
+            metadata = message.get("metadata") or {}
+            if metadata.get("room_memory_injected"):
+                injected_memory.append({
+                    "message_id": message.get("message_id"),
+                    "conversation_id": message.get("conversation_id"),
+                    "source": message.get("source"),
+                    "target": message.get("target"),
+                })
+        return replay | {
+            "messages": context["messages"],
+            "deliveries": deliveries,
+            "dead_letters": dead_letters,
+            "decisions": context["decisions"],
+            "handoffs": context["handoffs"],
+            "proposals": context["proposals"],
+            "task": context.get("task"),
+            "goal": context.get("goal"),
+            "memory_injections": injected_memory,
         }
 
     def get_incident(self, incident_id: str) -> dict[str, Any]:
@@ -3119,6 +3591,7 @@ class AgentFabric:
         goal = self.storage.get_goal_run(replay_id)
         decision = self.storage.get_decision(replay_id)
         handoff = self.storage.get_handoff(replay_id)
+        proposal = self.storage.get_proposal(replay_id)
         conversation = self.storage.get_conversation(replay_id)
         messages = conversation.get("messages", [])
         kind = "conversation" if messages else "unknown"
@@ -3147,17 +3620,26 @@ class AgentFabric:
                 task = task or self.storage.get_task(handoff["task_id"])
             if handoff.get("goal_id"):
                 goal = goal or self.storage.get_goal_run(handoff["goal_id"])
+        if proposal:
+            kind = "proposal"
+            messages.extend(self.storage.list_messages_by_ids(proposal.get("linked_message_ids") or []))
+            if proposal.get("task_id"):
+                task = task or self.storage.get_task(proposal["task_id"])
+            if proposal.get("goal_id"):
+                goal = goal or self.storage.get_goal_run(proposal["goal_id"])
 
         messages = self._unique_messages(messages)
         message_ids = {message["message_id"] for message in messages}
         decisions = self._linked_decisions(replay_id, kind, message_ids, task, goal, decision)
         handoffs = self._linked_handoffs(replay_id, kind, message_ids, task, goal, decision, handoff)
+        proposals = self._linked_proposals(replay_id, kind, message_ids, task, goal, decisions, handoffs, proposal)
         return {
             "kind": kind,
             "task": task,
             "goal": goal,
             "decisions": decisions,
             "handoffs": handoffs,
+            "proposals": proposals,
             "messages": messages,
         }
 
@@ -3209,6 +3691,38 @@ class AgentFabric:
                 handoffs.append(item)
         return self._unique_records(handoffs)
 
+    def _linked_proposals(
+        self,
+        replay_id: str,
+        kind: str,
+        message_ids: set[str],
+        task: dict | None,
+        goal: dict | None,
+        decisions: list[dict],
+        handoffs: list[dict],
+        proposal: dict | None,
+    ) -> list[dict]:
+        proposals: list[dict] = [proposal] if proposal else []
+        task_id = (task or {}).get("task_id") or (replay_id if kind == "task" else None)
+        goal_id = (goal or {}).get("goal_run_id") or (replay_id if kind == "goal" else None)
+        decision_ids = {str(item.get("id") or item.get("decision_id")) for item in decisions if item}
+        handoff_ids = {str(item.get("id") or item.get("handoff_id")) for item in handoffs if item}
+        for item in self.storage.list_proposals(limit=500):
+            linked_messages = set(item.get("linked_message_ids") or [])
+            linked_decisions = set(item.get("linked_decision_ids") or [])
+            linked_handoffs = set(item.get("linked_handoff_ids") or [])
+            if item in proposals:
+                continue
+            if (
+                (task_id and item.get("task_id") == task_id)
+                or (goal_id and item.get("goal_id") == goal_id)
+                or (message_ids and linked_messages.intersection(message_ids))
+                or (decision_ids and linked_decisions.intersection(decision_ids))
+                or (handoff_ids and linked_handoffs.intersection(handoff_ids))
+            ):
+                proposals.append(item)
+        return self._unique_records(proposals)
+
     def _flight_summary(
         self,
         context: dict[str, Any],
@@ -3230,6 +3744,7 @@ class AgentFabric:
             "message_count": len(messages),
             "decision_count": len(context["decisions"]),
             "handoff_count": len(context["handoffs"]),
+            "proposal_count": len(context["proposals"]),
             "failure_count": failure_count,
             "outcome": self._flight_outcome(context, failure_count),
         }
@@ -3246,6 +3761,8 @@ class AgentFabric:
             values.update(str(value) for value in (decision.get("linked_runtime_ids") or []) if value)
         for handoff in context.get("handoffs") or []:
             values.update(str(value) for value in (handoff.get("from_agent"), handoff.get("to_agent")) if value)
+        for proposal in context.get("proposals") or []:
+            values.update(str(value) for value in (proposal.get("proposed_by"), proposal.get("approved_by"), proposal.get("rejected_by"), proposal.get("executed_by")) if value)
         return sorted(
             value for value in values
             if value not in ignored and not value.startswith("room:")
@@ -3256,6 +3773,11 @@ class AgentFabric:
         goal = context.get("goal") or {}
         decisions = context.get("decisions") or []
         handoffs = context.get("handoffs") or []
+        proposals = context.get("proposals") or []
+        if any(proposal.get("status") == "rejected" for proposal in proposals):
+            return "failed"
+        if proposals and all(proposal.get("status") == "executed" for proposal in proposals):
+            return "completed"
         if task.get("status") == "done" or goal.get("status") in {"achieved", "partially_achieved", "completed"}:
             return "completed"
         if task.get("status") == "blocked" or goal.get("status") in {"blocked", "failed", "cancelled"}:
@@ -3319,7 +3841,7 @@ class AgentFabric:
     def _unique_records(self, records: list[dict]) -> list[dict]:
         by_id: dict[str, dict] = {}
         for record in records:
-            record_id = record.get("id") or record.get("decision_id") or record.get("handoff_id")
+            record_id = record.get("id") or record.get("decision_id") or record.get("handoff_id") or record.get("proposal_id")
             if record_id:
                 by_id[str(record_id)] = record
         return list(by_id.values())

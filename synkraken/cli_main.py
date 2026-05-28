@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
@@ -317,6 +318,91 @@ def print_runtime_doctor(data: dict) -> None:
         print(f"  bridge skill: {_bridge_skill_status(runtime)}")
 
 
+def print_workforce(data: dict) -> None:
+    print("Workforce")
+    rows = data.get("workforce") or []
+    if not rows:
+        print()
+        print("(no enabled adapter workers)")
+    for row in rows:
+        reputation = row.get("reputation") or {}
+        print()
+        print(row.get("runtime_id"))
+        print(f"  status: {row.get('status') or 'unknown'}")
+        print(f"  trust: {reputation.get('trust_score', 100)}")
+        print(f"  health: {reputation.get('health_status', 'healthy')}")
+        print(f"  cost tier: {row.get('cost_tier') or 'medium'}")
+        print(f"  latest delivery: {reputation.get('latest_delivery_status') or '(none)'}")
+        print(f"  latest quality: {reputation.get('latest_quality') or '(none)'}")
+        print(f"  recent failures: {reputation.get('failures', 0)}")
+        print(f"  recent timeouts: {reputation.get('timeouts', 0)}")
+        print(f"  recent empty replies: {reputation.get('empty_replies', 0)}")
+        avg = reputation.get("avg_duration_ms")
+        print(f"  avg duration: {avg}ms" if avg is not None else "  avg duration: (none)")
+        if reputation.get("incident_summary"):
+            print(f"  issue: {reputation.get('incident_summary')}")
+    inactive = data.get("available_but_inactive") or []
+    print()
+    print("Available but inactive:")
+    if inactive:
+        for item in inactive:
+            print(f"- {item.get('runtime_id')} ({item.get('reason') or 'inactive'})")
+    else:
+        print("- (none)")
+
+
+def print_workforce_health(data: dict) -> None:
+    summary = data.get("summary") or {}
+    print("Workforce Summary")
+    print()
+    for status in ("healthy", "degraded", "unstable", "failing"):
+        print(f"{status}: {summary.get(status, 0)}")
+    print()
+    print("Top trusted:")
+    for runtime_id in data.get("top_trusted") or []:
+        print(f"- {runtime_id}")
+    print()
+    print("Most unstable:")
+    unstable = data.get("most_unstable") or []
+    if unstable:
+        for runtime_id in unstable:
+            print(f"- {runtime_id}")
+    else:
+        print("- (none)")
+    print()
+    print("Recent incidents:")
+    incidents = data.get("recent_incidents") or []
+    if incidents:
+        for incident in incidents:
+            print(f"- {incident}")
+    else:
+        print("- (none)")
+    print()
+    print("Available but inactive:")
+    inactive = data.get("available_but_inactive") or []
+    if inactive:
+        for item in inactive:
+            print(f"- {item.get('runtime_id')} ({item.get('reason') or 'inactive'})")
+    else:
+        print("- (none)")
+
+
+def print_runtime_reputation(data: dict) -> None:
+    reputation = data.get("reputation") or data
+    print(f"runtime: {reputation.get('runtime_id')}")
+    print(f"trust: {reputation.get('trust_score', 100)}")
+    print(f"health: {reputation.get('health_status', 'healthy')}")
+    print(f"total deliveries: {reputation.get('total_deliveries', 0)}")
+    print(f"successful replies: {reputation.get('successful_replies', 0)}")
+    print(f"empty replies: {reputation.get('empty_replies', 0)}")
+    print(f"timeouts: {reputation.get('timeouts', 0)}")
+    print(f"failures: {reputation.get('failures', 0)}")
+    print(f"wrong identity: {reputation.get('wrong_identity', 0)}")
+    print(f"suspicious outputs: {reputation.get('suspicious_outputs', 0)}")
+    if reputation.get("incident_summary"):
+        print(f"issue: {reputation.get('incident_summary')}")
+
+
 def print_recent(data: dict) -> None:
     rows = data.get("conversations", [])
     if not rows:
@@ -362,6 +448,88 @@ def print_dead_letters(data: dict) -> None:
         print(f"   message_id: {item.get('message_id')}")
         print(f"   created_at: {item.get('created_at')}")
         print()
+
+
+def print_trace(data: dict) -> None:
+    summary = data.get("summary") or {}
+    print(f"Trace: {data.get('id')}")
+    print(f"kind: {data.get('kind')}  outcome: {summary.get('outcome')}  failures: {summary.get('failure_count', 0)}")
+    print(f"messages: {summary.get('message_count', 0)}  runtimes: {', '.join(summary.get('runtimes') or []) or '(none)'}")
+    print()
+    for item in data.get("timeline") or []:
+        timestamp = item.get("timestamp") or "(no time)"
+        actor = item.get("actor") or "system"
+        target = item.get("target") or ""
+        arrow = f" -> {target}" if target else ""
+        print(f"{timestamp}  {item.get('event_type')}  {actor}{arrow}")
+        print(f"  [{item.get('status')}] {item.get('summary')}")
+    injections = data.get("memory_injections") or []
+    if injections:
+        print()
+        print("Memory injections")
+        for item in injections:
+            print(f"- {item.get('message_id')}  {item.get('source')} -> {item.get('target')}")
+
+
+def print_memory(data: dict) -> None:
+    rows = data.get("memories", [])
+    if not rows:
+        print("No memory records.")
+        return
+    for item in rows:
+        print(f"[{item.get('status')}] {item.get('memory_type')} {item.get('memory_id')}")
+        print(f"  confidence: {item.get('confidence', 0)}  room: {item.get('room_name') or '(workspace)'}")
+        print(f"  {item.get('content')}")
+        print()
+
+
+def print_proposals(data: dict) -> None:
+    rows = data.get("proposals", [])
+    if not rows:
+        print("No proposals.")
+        return
+    print("Proposals")
+    print()
+    for item in rows:
+        approval = "yes" if item.get("requires_approval") else "no"
+        print(f"[{item.get('status')}] {item.get('proposal_id')}")
+        print(f"  risk: {item.get('risk_level')}  type: {item.get('proposal_type')}  requires_approval: {approval}")
+        print(f"  title: {item.get('title')}")
+        print(f"  proposed_by: {item.get('proposed_by')}  created_at: {item.get('created_at')}")
+        linked = []
+        for key in ("room_id", "task_id", "goal_id"):
+            if item.get(key):
+                linked.append(f"{key}={item.get(key)}")
+        if linked:
+            print(f"  links: {', '.join(linked)}")
+        if item.get("approval_reason"):
+            print(f"  reason: {item.get('approval_reason')}")
+        print()
+
+
+def print_proposal(data: dict) -> None:
+    proposal = data.get("proposal") or data
+    print(f"proposal_id: {proposal.get('proposal_id')}")
+    print(f"status: {proposal.get('status')}")
+    print(f"type: {proposal.get('proposal_type')}")
+    print(f"risk: {proposal.get('risk_level')}")
+    print(f"requires_approval: {'yes' if proposal.get('requires_approval') else 'no'}")
+    print(f"title: {proposal.get('title')}")
+    print(f"summary: {proposal.get('summary')}")
+    print(f"proposed_by: {proposal.get('proposed_by')}")
+    print(f"approved_by: {proposal.get('approved_by') or '-'}")
+    print(f"rejected_by: {proposal.get('rejected_by') or '-'}")
+    print(f"executed_by: {proposal.get('executed_by') or '-'}")
+    print(f"room_id: {proposal.get('room_id') or '-'}")
+    print(f"task_id: {proposal.get('task_id') or '-'}")
+    print(f"goal_id: {proposal.get('goal_id') or '-'}")
+    print(f"approval_reason: {proposal.get('approval_reason')}")
+    events = proposal.get("events") or data.get("events") or []
+    if events:
+        print()
+        print("events:")
+        for event in events:
+            print(f"- {event.get('created_at')} {event.get('event_type')} by {event.get('actor')}")
 
 
 def print_result(data: dict, raw: bool) -> None:
@@ -515,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
         add_lifecycle_parser(sub, action)
 
     p_health = sub.add_parser("health", help="Check bridge health")
+    p_health.add_argument("scope", nargs="?", choices=["workforce"], help="Optional health scope")
     add_base_url_arg(p_health)
 
     p_agents = sub.add_parser("agents", help="List registered adapters")
@@ -524,8 +693,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_base_url_arg(p_runtimes)
 
     p_runtime = sub.add_parser("runtime", help="Inspect one runtime or run runtime diagnostics")
-    p_runtime.add_argument("runtime_id", help="Runtime id or 'doctor'")
+    p_runtime.add_argument("runtime_args", nargs="+", help="Runtime id, 'doctor', or 'health <id>'")
     add_base_url_arg(p_runtime)
+
+    p_workforce = sub.add_parser("workforce", help="Show workforce reputation and health")
+    add_base_url_arg(p_workforce)
 
     p_send = sub.add_parser("send", help="Send a message through the bridge")
     p_send.add_argument("target", help="Target adapter id or 'broadcast'")
@@ -551,6 +723,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_dead = sub.add_parser("dead-letters", help="List recent dead letters")
     p_dead.add_argument("--limit", type=int, default=10)
     add_base_url_arg(p_dead)
+
+    p_retry = sub.add_parser("retry", help="Retry a failed delivery or dead letter")
+    p_retry.add_argument("kind", choices=["delivery", "dead-letter"])
+    p_retry.add_argument("id", type=int)
+    add_base_url_arg(p_retry)
 
     p_tui = sub.add_parser("tui", help="Launch the interactive TUI")
     p_tui.add_argument('--banner-only', action='store_true', help='Print banner and exit')
@@ -599,6 +776,50 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay = sub.add_parser("replay", help="Show a replay (goal run, team run, or decision)")
     p_replay.add_argument("id", help="Replay id")
     add_base_url_arg(p_replay)
+
+    p_trace = sub.add_parser("trace", help="Show an operational trace")
+    p_trace.add_argument("id", help="Conversation, task, goal, decision, or handoff id")
+    add_base_url_arg(p_trace)
+
+    p_rooms = sub.add_parser("rooms", help="List rooms, create presets, or search room history")
+    p_rooms.add_argument("action", nargs="?", choices=["preset", "search", "summarize"], help="Optional action")
+    p_rooms.add_argument("name", nargs="?", help="Room name")
+    p_rooms.add_argument("query", nargs="?", help="Search query")
+    p_rooms.add_argument("--preset", choices=["review", "planning", "ops"], help="Room preset")
+    p_rooms.add_argument("--limit", type=int, default=50)
+    add_base_url_arg(p_rooms)
+
+    p_memory = sub.add_parser("memory", help="List or govern shared memory")
+    p_memory.add_argument("action", nargs="?", choices=["list", "approve", "reject", "archive", "edit"], default="list")
+    p_memory.add_argument("id", nargs="?", help="Memory id for approve/reject/archive")
+    p_memory.add_argument("--content", default=None, help="Replacement memory content for edit")
+    p_memory.add_argument("--type", dest="memory_type", default=None, help="Replacement memory type for edit")
+    p_memory.add_argument("--confidence", type=int, default=None, help="Replacement confidence for edit")
+    p_memory.add_argument("--status", default=None, help="Filter by status")
+    p_memory.add_argument("--room", default=None, help="Filter by room")
+    p_memory.add_argument("--limit", type=int, default=50)
+    add_base_url_arg(p_memory)
+
+    p_proposals = sub.add_parser("proposals", help="List proposals")
+    p_proposals.add_argument("scope", nargs="?", choices=["pending"], help="Optional proposal scope")
+    p_proposals.add_argument("--status", default=None, help="Filter by status")
+    p_proposals.add_argument("--room", default=None, help="Filter by room")
+    p_proposals.add_argument("--limit", type=int, default=50)
+    add_base_url_arg(p_proposals)
+
+    p_proposal = sub.add_parser("proposal", help="Inspect or govern a proposal")
+    p_proposal.add_argument("action", nargs="?", help="Proposal id or action: create/approve/reject/cancel/execute")
+    p_proposal.add_argument("id", nargs="?", help="Proposal id for approve/reject/cancel/execute")
+    p_proposal.add_argument("--type", dest="proposal_type", help="Proposal type for create")
+    p_proposal.add_argument("--title", help="Proposal title for create")
+    p_proposal.add_argument("--summary", default="", help="Proposal summary for create")
+    p_proposal.add_argument("--details", default="", help="Proposal details for create")
+    p_proposal.add_argument("--proposed-by", default="operator", help="Proposal actor")
+    p_proposal.add_argument("--room", default=None, help="Linked room")
+    p_proposal.add_argument("--task", default=None, help="Linked task")
+    p_proposal.add_argument("--goal", default=None, help="Linked goal")
+    p_proposal.add_argument("--reason", default="", help="Reject/cancel reason")
+    add_base_url_arg(p_proposal)
 
     p_incident = sub.add_parser("incident", help="Show latest incident")
     p_incident.add_argument("action", nargs="?", choices=["latest"], default="latest", help="Show latest failure")
@@ -667,6 +888,13 @@ def main() -> None:
         raise SystemExit(handle_lifecycle_command(args.command, base, getattr(args, "wait_seconds", 15)))
     try:
         if args.command == "health":
+            if args.scope == "workforce":
+                data = get_json(f"{base}/v1/workforce/health")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print_workforce_health(data)
+                return
             data = get_json(f"{base}/health")
             if args.json:
                 print(json.dumps(data, indent=2, ensure_ascii=False))
@@ -687,17 +915,34 @@ def main() -> None:
             else:
                 print_runtimes(data)
             return
+        if args.command == "workforce":
+            data = get_json(f"{base}/v1/workforce")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print_workforce(data)
+            return
         if args.command == "runtime":
-            if args.runtime_id == "doctor":
+            runtime_args = list(args.runtime_args)
+            if runtime_args == ["doctor"]:
                 data = _runtime_doctor_data(base)
                 if args.json:
                     print(json.dumps(data, indent=2, ensure_ascii=False))
                 else:
                     print_runtime_doctor(data)
                 return
-            runtime = _runtime_detail_data(base, args.runtime_id)
+            if len(runtime_args) == 2 and runtime_args[0] == "health":
+                data = get_json(f"{base}/v1/runtime/{runtime_args[1]}/reputation")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print_runtime_reputation(data)
+                return
+            if len(runtime_args) != 1:
+                raise ValueError("usage: synkraken runtime <id>|doctor|health <id>")
+            runtime = _runtime_detail_data(base, runtime_args[0])
             if not runtime:
-                raise ValueError(f"runtime not found: {args.runtime_id}")
+                raise ValueError(f"runtime not found: {runtime_args[0]}")
             if args.json:
                 print(json.dumps(runtime, indent=2, ensure_ascii=False))
             else:
@@ -727,6 +972,13 @@ def main() -> None:
                 print(json.dumps(data, indent=2, ensure_ascii=False))
             else:
                 print_dead_letters(data)
+            return
+        if args.command == "retry":
+            if args.kind == "delivery":
+                result = post_json(f"{base}/v1/deliveries/{args.id}/retry", {"actor": "operator"})
+            else:
+                result = post_json(f"{base}/v1/dead-letters/{args.id}/replay", {"actor": "operator"})
+            print_result(result, raw=args.json)
             return
         if args.command == "send":
             body = args.message if args.message is not None else sys.stdin.read()
@@ -813,6 +1065,137 @@ def main() -> None:
         if args.command == "replay":
             data = get_json(f"{base}/v1/replay/{args.id}")
             print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        if args.command == "trace":
+            data = get_json(f"{base}/v1/trace/{args.id}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print_trace(data)
+            return
+        if args.command == "rooms":
+            if args.action == "preset":
+                preset = args.preset or args.name
+                if not preset:
+                    raise ValueError("usage: synkraken rooms preset <name> [--preset review|planning|ops]")
+                name = args.name or preset
+                data = post_json(f"{base}/v1/rooms/preset", {"name": name, "preset": preset, "actor": "operator"})
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print(f"room preset applied: {data.get('preset')} -> {data.get('room', {}).get('name')}")
+                return
+            if args.action == "search":
+                if not args.name or not args.query:
+                    raise ValueError("usage: synkraken rooms search <room> <query>")
+                query = urllib.parse.quote(args.query)
+                data = get_json(f"{base}/v1/rooms/{args.name}/messages?q={query}&limit={args.limit}")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    for message in data.get("messages", []):
+                        print(f"{message.get('timestamp')} {message.get('source')}: {message.get('body')}")
+                return
+            if args.action == "summarize":
+                if not args.name:
+                    raise ValueError("usage: synkraken rooms summarize <room>")
+                data = post_json(f"{base}/v1/rooms/{args.name}/summary", {"actor": "operator", "limit": args.limit})
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print(data.get("summary") or "")
+                return
+            data = get_json(f"{base}/v1/rooms")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                for room in data.get("rooms", []):
+                    print(f"{room.get('name')} members={room.get('member_count')} last={room.get('last_activity') or room.get('created_at')}")
+            return
+        if args.command == "memory":
+            if args.action == "list":
+                query = [f"limit={args.limit}"]
+                if args.status:
+                    query.append(f"status={urllib.parse.quote(args.status)}")
+                if args.room:
+                    query.append(f"room={urllib.parse.quote(args.room)}")
+                data = get_json(f"{base}/v1/memory?{'&'.join(query)}")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    print_memory(data)
+                return
+            if not args.id:
+                raise ValueError(f"memory id required for {args.action}")
+            payload = {"actor": "operator"}
+            if args.action == "edit":
+                if args.content is None and args.memory_type is None and args.confidence is None:
+                    raise ValueError("memory edit requires --content, --type, or --confidence")
+                if args.content is not None:
+                    payload["content"] = args.content
+                if args.memory_type is not None:
+                    payload["memory_type"] = args.memory_type
+                if args.confidence is not None:
+                    payload["confidence"] = args.confidence
+            result = post_json(f"{base}/v1/memory/{args.id}/{args.action}", payload)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        if args.command == "proposals":
+            if args.scope == "pending":
+                data = get_json(f"{base}/v1/proposals/pending")
+            else:
+                query = [f"limit={args.limit}"]
+                if args.status:
+                    query.append(f"status={urllib.parse.quote(args.status)}")
+                if args.room:
+                    query.append(f"room={urllib.parse.quote(args.room)}")
+                data = get_json(f"{base}/v1/proposals?{'&'.join(query)}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print_proposals(data)
+            return
+        if args.command == "proposal":
+            action = args.action
+            if action == "create":
+                if not args.proposal_type or not args.title:
+                    raise ValueError("proposal create requires --type and --title")
+                payload = {
+                    "proposal_type": args.proposal_type,
+                    "title": args.title,
+                    "summary": args.summary,
+                    "details": args.details,
+                    "proposed_by": args.proposed_by,
+                    "room_id": args.room,
+                    "task_id": args.task,
+                    "goal_id": args.goal,
+                }
+                result = post_json(f"{base}/v1/proposal/create", payload)
+                if args.json:
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                else:
+                    print_proposal(result)
+                return
+            if action in {"approve", "reject", "cancel", "execute"}:
+                if not args.id:
+                    raise ValueError(f"proposal {action} requires an id")
+                payload = {"proposal_id": args.id, "actor": "operator"}
+                if args.reason:
+                    payload["reason"] = args.reason
+                result = post_json(f"{base}/v1/proposal/{action}", payload)
+                if args.json:
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                else:
+                    print_proposal(result)
+                return
+            proposal_id = action
+            if not proposal_id:
+                raise ValueError("usage: synkraken proposal <id>|create|approve|reject|cancel|execute")
+            data = get_json(f"{base}/v1/proposal/{proposal_id}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print_proposal(data)
             return
         if args.command == "incident":
             data = get_json(f"{base}/v1/incident/latest")

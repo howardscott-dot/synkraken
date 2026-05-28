@@ -71,15 +71,16 @@ BOX = dict(tl='╭', tr='╮', bl='╰', br='╯', h='─', v='│')
 COMMANDS = [
     '/dashboard', '/events', '/conversations', '/deadletters', '/adapters',
     '/rooms', '/room', '/tasks', '/compose', '/send', '/broadcast', '/history',
-    '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject',
+    '/open', '/discuss', '/team', '/team-runs', '/team-run', '/approve', '/reject', '/execute',
     '/goal', '/goals', '/goal-run', '/cancel-goal',
     '/runtimes', '/runtime', '/workspace', '/flight',
-    '/decisions', '/decision', '/handoffs', '/handoff', '/replay', '/incident',
+    '/decisions', '/decision', '/handoffs', '/handoff', '/proposals', '/proposal',
+    '/replay', '/trace', '/retry', '/incident',
     '/filter', '/help', '/status', '/health', '/agents', '/tail', '/transcript',
     '/save-transcript', '/workforce', '/stress',
     '/presence', '/agent', '/profiles', '/memory', '/clear', '/refresh', '/quit',
 ]
-ROOM_SUBCOMMANDS = ['create', 'delete', 'enter', 'leave', 'add', 'remove', 'members', 'kick', 'list']
+ROOM_SUBCOMMANDS = ['create', 'preset', 'search', 'summarize', 'delete', 'enter', 'leave', 'add', 'remove', 'members', 'kick', 'list']
 EVENT_FILTERS = {
     'all', 'message.accepted', 'delivery.recorded', 'dead-letter.recorded',
     'delivery.queued', 'delivery.sent', 'typing.started', 'typing.stopped',
@@ -1277,6 +1278,9 @@ def _view_help(stdscr, top, h, w):
         ('ROOMS', C_TEAL, curses.A_BOLD),
         ('  /rooms                          list rooms', None, 0),
         ('  /room create <name> [members…] create a room (members = adapter ids)', None, 0),
+        ('  /room preset <review|planning|ops> [name] create a preset room with memory', None, 0),
+        ('  /room search <name> <query>      search room transcript', None, 0),
+        ('  /room summarize <name>           summarize recent transcript into room memory notes', None, 0),
         ('  /room delete <name>             remove a room', None, 0),
         ('  /room enter <name>              enter a room (next plain text → room)', None, 0),
         ('  /room leave                     exit the current room', None, 0),
@@ -1286,6 +1290,7 @@ def _view_help(stdscr, top, h, w):
         ('  /memory pending                 proposed shared memories', None, 0),
         ('  /memory approved                approved shared memories', None, 0),
         ('  /memory propose fact "..."      propose peer-reviewed memory', None, 0),
+        ('  /memory edit <id> "..."         edit a shared memory proposal', None, 0),
         ('  /memory budget                  show injection budget', None, 0),
         ('  /memory edit                    legacy current room memory editor', None, 0),
         ('', None, 0),
@@ -1305,7 +1310,16 @@ def _view_help(stdscr, top, h, w):
         ('  /workspace init|load|export     manage workspace pack', None, 0),
         ('  /workspace list                 list workspace packs', None, 0),
         ('  /flight                         live control-plane status', None, 0),
+        ('  /proposals [pending]            list execution authority proposals', None, 0),
+        ('  /proposal <id>                  inspect one proposal', None, 0),
+        ('  /proposal create --type shell --title "..."', None, 0),
+        ('  /approve proposal <id>          approve a proposal', None, 0),
+        ('  /reject proposal <id>           reject a proposal', None, 0),
+        ('  /execute proposal <id>          simulate execution after approval', None, 0),
         ('  /replay <id>                    reconstruct messages, failures, decisions, handoffs', None, 0),
+        ('  /trace <id>                     replay plus raw messages, deliveries, and memory injections', None, 0),
+        ('  /retry delivery <id>            retry a failed delivery', None, 0),
+        ('  /retry dead-letter <id>         replay a dead letter', None, 0),
         ('  /incident latest                show latest failure/dead-letter context', None, 0),
         ('  /tasks                          recent / open tasks', None, 0),
         ('  /dashboard                      overview (default)', None, 0),
@@ -1440,6 +1454,18 @@ def _memory_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[s
         action = parts[1]
         result = _post_json(f"{base}/v1/memory/{parts[2]}/{action}", {'actor': 'synkraken-tui'})
         return (f'memory {action}', _format_shared_memory_lines(result.get("memory") or {}))
+    if cmd.startswith('/memory edit '):
+        try:
+            parts = shlex.split(cmd[len('/memory edit '):])
+        except ValueError as exc:
+            return ('memory edit', [f'parse error: {exc}'])
+        if len(parts) < 2:
+            return ('memory edit', ['usage: /memory edit <id> "content"'])
+        result = _post_json(
+            f"{base}/v1/memory/{parts[0]}/edit",
+            {'actor': 'synkraken-tui', 'content': parts[1]},
+        )
+        return ('memory edit', _format_shared_memory_lines(result.get("memory") or {}))
     if cmd.startswith('/memory search '):
         try:
             parts = shlex.split(cmd[len('/memory search '):])
@@ -1818,6 +1844,42 @@ def _format_replay_lines(replay: dict) -> list[str]:
     return lines
 
 
+def _format_proposal_summary(proposal: dict) -> str:
+    approval = 'yes' if proposal.get('requires_approval') else 'no'
+    return (
+        f"{proposal.get('proposal_id')}  {proposal.get('status')}  "
+        f"risk={proposal.get('risk_level')}  type={proposal.get('proposal_type')}  "
+        f"approval={approval}  by={proposal.get('proposed_by')}  "
+        f"{proposal.get('title')}"
+    )
+
+
+def _format_proposal_lines(proposal: dict) -> list[str]:
+    lines = [
+        f"proposal      {proposal.get('proposal_id')}",
+        f"status        {proposal.get('status')}",
+        f"type          {proposal.get('proposal_type')}",
+        f"risk          {proposal.get('risk_level')}",
+        f"approval      {'yes' if proposal.get('requires_approval') else 'no'}",
+        f"reason        {proposal.get('approval_reason') or '-'}",
+        f"title         {proposal.get('title')}",
+        f"summary       {proposal.get('summary') or '-'}",
+        f"proposed by   {proposal.get('proposed_by')}",
+        f"approved by   {proposal.get('approved_by') or '-'}",
+        f"rejected by   {proposal.get('rejected_by') or '-'}",
+        f"executed by   {proposal.get('executed_by') or '-'}",
+        f"room          {proposal.get('room_id') or '-'}",
+        f"task          {proposal.get('task_id') or '-'}",
+        f"goal          {proposal.get('goal_id') or '-'}",
+    ]
+    events = proposal.get('events') or []
+    if events:
+        lines.extend(['', 'events'])
+        for event in events[-12:]:
+            lines.append(f"  {str(event.get('created_at') or '')[:19]}  {event.get('event_type')}  actor={event.get('actor') or '-'}")
+    return lines
+
+
 def _delivery_is_degraded(delivery: dict) -> bool:
     status = _delivery_status(delivery)
     quality = _delivery_quality(delivery)
@@ -1871,53 +1933,109 @@ def _merge_dispatch_result_into_room_transcript(base: str, room_name: str, resul
     return transcript
 
 
+def _workforce_health_lines(summary: dict) -> list[str]:
+    counts = summary.get('summary') or {}
+    lines = [
+        'Workforce Summary',
+        '',
+        f"healthy: {counts.get('healthy', 0)}",
+        f"degraded: {counts.get('degraded', 0)}",
+        f"unstable: {counts.get('unstable', 0)}",
+        f"failing: {counts.get('failing', 0)}",
+        '',
+        'Top trusted:',
+    ]
+    lines.extend(f"- {item}" for item in (summary.get('top_trusted') or []))
+    lines.extend(['', 'Most unstable:'])
+    unstable = summary.get('most_unstable') or []
+    lines.extend(f"- {item}" for item in unstable) if unstable else lines.append("- (none)")
+    lines.extend(['', 'Recent incidents:'])
+    incidents = summary.get('recent_incidents') or []
+    lines.extend(f"- {item}" for item in incidents) if incidents else lines.append("- (none)")
+    inactive = summary.get('available_but_inactive') or []
+    lines.extend(['', 'Available but inactive:'])
+    if inactive:
+        lines.extend(
+            f"- {item.get('runtime_id')} ({item.get('reason') or 'inactive'})"
+            for item in inactive
+        )
+    else:
+        lines.append("- (none)")
+    return lines
+
+
 def _workforce_command_lines(data: dict, base: str) -> tuple[str, list[str]]:
-    agents = _enabled_agents(data)
     try:
-        deliveries = _get_json(f'{base}/v1/deliveries?limit=200').get('deliveries', [])
+        workforce = _get_json(f'{base}/v1/workforce')
+        rows = workforce.get('workforce') or []
+        inactive = workforce.get('available_but_inactive') or []
     except Exception:
+        agents = _enabled_agents(data)
         deliveries = data.get('deliveries', {}).get('deliveries', [])
-    by_agent: dict[str, list[dict]] = {}
-    for delivery in deliveries:
-        by_agent.setdefault(_delivery_target_id(delivery), []).append(delivery)
+        by_agent: dict[str, list[dict]] = {}
+        for delivery in deliveries:
+            by_agent.setdefault(_delivery_target_id(delivery), []).append(delivery)
+        rows = []
+        inactive = []
+        for agent in agents:
+            aid = str(agent.get('adapter_id') or '')
+            recent = by_agent.get(aid, [])
+            latest = recent[0] if recent else {}
+            latest_status = _delivery_status(latest) if latest else ''
+            latest_quality = _delivery_quality(latest) if latest else ''
+            failures = sum(1 for item in recent if _delivery_status(item) in ('failed', 'blocked', 'wrong_identity'))
+            empties = sum(1 for item in recent if _delivery_status(item) == 'empty_reply')
+            timeouts = sum(1 for item in recent if _delivery_status(item) == 'timeout')
+            durations = [int(item.get('duration_ms')) for item in recent if item.get('duration_ms') is not None]
+            trust = max(0, min(100, 100 - (empties * 6) - (timeouts * 14) - (failures * 10)))
+            rows.append({
+                'adapter_id': aid,
+                'runtime_id': aid,
+                'status': agent.get('status') or _agent_status(agent),
+                'cost_tier': agent.get('cost_tier') or 'medium',
+                'reputation': {
+                    'trust_score': trust,
+                    'health_status': 'degraded' if failures or empties or timeouts or latest_quality else 'healthy',
+                    'latest_delivery_status': latest_status,
+                    'latest_quality': latest_quality,
+                    'failures': failures,
+                    'timeouts': timeouts,
+                    'empty_replies': empties,
+                    'avg_duration_ms': int(sum(durations) / len(durations)) if durations else None,
+                    'incident_summary': latest_quality,
+                },
+            })
     lines = ['Workforce', '']
-    if not agents:
-        return ('workforce', ['(no enabled agents)'])
-    for agent in agents:
-        aid = str(agent.get('adapter_id') or '')
-        recent = by_agent.get(aid, [])
-        latest = recent[0] if recent else {}
-        latest_status = _delivery_status(latest) if latest else '(none)'
-        latest_quality = _delivery_quality(latest) if latest else ''
-        failures = sum(1 for item in recent if _delivery_status(item) in ('failed', 'blocked', 'wrong_identity'))
-        empties = sum(1 for item in recent if _delivery_status(item) == 'empty_reply')
-        timeouts = sum(1 for item in recent if _delivery_status(item) == 'timeout')
-        degraded = failures or empties or timeouts or latest_quality
-        note = ''
-        if latest_quality:
-            note = latest_quality
-        elif latest_status == 'empty_reply':
-            note = 'empty reply'
-        elif latest_status == 'timeout':
-            note = 'timeout'
-        elif latest_status in ('failed', 'blocked', 'wrong_identity', 'unexpected_output', 'suspicious_output'):
-            note = latest_status
+    if not rows:
+        lines.append('(no enabled agents)')
+    for row in rows:
+        aid = str(row.get('adapter_id') or row.get('runtime_id') or '')
+        reputation = row.get('reputation') or {}
+        latest_status = reputation.get('latest_delivery_status') or '(none)'
+        latest_quality = reputation.get('latest_quality') or ''
+        avg = reputation.get('avg_duration_ms')
         lines.extend([
             aid,
-            f"  status: {agent.get('status') or _agent_status(agent)}",
-            f"  last_seen: {agent.get('last_seen_at') or '(never)'}",
-            f"  cost: {agent.get('cost_tier') or 'medium'}",
-            f"  usage_risk: {agent.get('usage_risk') or 'medium'}",
+            f"  status: {row.get('status') or 'unknown'}",
+            f"  trust: {reputation.get('trust_score', 100)}",
+            f"  health: {reputation.get('health_status') or 'healthy'}",
+            f"  cost: {row.get('cost_tier') or 'medium'}",
             f"  latest: {latest_status}",
             f"  quality: {latest_quality or '(none)'}",
-            f"  recent failures: {failures}",
-            f"  recent empty_reply: {empties}",
-            f"  recent timeout: {timeouts}",
-            f"  health: {'degraded' if degraded else 'ok'}",
+            f"  recent failures: {reputation.get('failures', 0)}",
+            f"  recent timeouts: {reputation.get('timeouts', 0)}",
+            f"  recent empty_reply: {reputation.get('empty_replies', 0)}",
+            f"  avg_duration: {avg}ms" if avg is not None else "  avg_duration: (none)",
         ])
-        if note:
-            lines.append(f"  note: {note}")
+        if reputation.get('incident_summary'):
+            lines.append(f"  issue: {reputation.get('incident_summary')}")
         lines.append('')
+    lines.extend(['Available but inactive:', ''])
+    if inactive:
+        for item in inactive:
+            lines.append(f"{item.get('runtime_id')}  {item.get('reason') or 'inactive'}")
+    else:
+        lines.append('(none)')
     return ('workforce', lines)
 
 
@@ -1985,6 +2103,8 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
         ])
     if cmd == '/health':
         return ('health', json.dumps(health, indent=2, ensure_ascii=False).splitlines())
+    if cmd == '/health workforce':
+        return ('health workforce', _workforce_health_lines(_get_json(f'{base}/v1/workforce/health')))
     if cmd == '/flight':
         flight = _get_json(f'{base}/v1/flight')
         return ('flight', [
@@ -2002,6 +2122,56 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
         ])
     if cmd == '/workforce':
         return _workforce_command_lines(data, base)
+    if cmd in {'/proposals', '/proposals pending'}:
+        endpoint = '/v1/proposals/pending' if cmd.endswith('pending') else '/v1/proposals?limit=50'
+        proposals = _get_json(f'{base}{endpoint}').get('proposals', [])
+        label = 'proposals pending' if cmd.endswith('pending') else 'proposals'
+        return (label, [_format_proposal_summary(item) for item in proposals] or ['(no proposals)'])
+    if cmd.startswith('/proposal create '):
+        try:
+            parts = shlex.split(cmd[len('/proposal create '):])
+        except ValueError as exc:
+            return ('proposal create', [f'parse error: {exc}'])
+        payload = {'proposed_by': 'synkraken-tui'}
+        index = 0
+        while index < len(parts):
+            key = parts[index]
+            if key in {'--type', '--title', '--summary', '--details', '--room', '--task', '--goal'} and index + 1 < len(parts):
+                value = parts[index + 1]
+                if key == '--type':
+                    payload['proposal_type'] = value
+                elif key == '--room':
+                    payload['room_id'] = value
+                elif key == '--task':
+                    payload['task_id'] = value
+                elif key == '--goal':
+                    payload['goal_id'] = value
+                else:
+                    payload[key[2:]] = value
+                index += 2
+            else:
+                index += 1
+        if not payload.get('proposal_type') or not payload.get('title'):
+            return ('proposal create', ['usage: /proposal create --type shell --title "Title" [--summary "..."]'])
+        result = _post_json(f'{base}/v1/proposal/create', payload)
+        return ('proposal created', _format_proposal_lines(result.get('proposal') or {}))
+    if cmd.startswith('/proposal '):
+        proposal_id = cmd.split(' ', 1)[1].strip()
+        if not proposal_id:
+            return ('proposal', ['usage: /proposal <id>'])
+        return ('proposal', _format_proposal_lines(_get_json(f'{base}/v1/proposal/{proposal_id}')))
+    if cmd == '/proposal':
+        return ('proposal', ['usage: /proposal <id>|create'])
+    if cmd.startswith('/approve proposal ') or cmd.startswith('/reject proposal ') or cmd.startswith('/execute proposal '):
+        parts = cmd.split()
+        action = parts[0].lstrip('/')
+        if len(parts) < 3:
+            return ('proposal', [f'usage: /{action} proposal <id>'])
+        result = _post_json(
+            f'{base}/v1/proposal/{action}',
+            {'proposal_id': parts[2], 'actor': 'synkraken-tui'},
+        )
+        return (f'proposal {action}', _format_proposal_lines(result.get('proposal') or {}))
     if cmd == '/stress latest':
         return _latest_stress_report_lines()
     if cmd == '/stress':
@@ -2999,6 +3169,49 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
                     {'message': {}, 'deliveries': [],
                      'dead_letters': [{'adapter_id': f'room:{name}', 'reason': str(exc)}]},
                     '')
+    if sub == 'preset':
+        if not args:
+            return ('rooms', None, 'usage: /room preset <review|planning|ops> [name]')
+        preset = args[0].lower()
+        name = args[1].lstrip('#').lower() if len(args) > 1 else preset
+        try:
+            _post_json(f'{base}/v1/rooms/preset', {'name': name, 'preset': preset, 'actor': 'synkraken-tui'})
+            state['current_room'] = name
+            save_preferences(state)
+            return (f'#{name}', _handle_room_transcript(base, name), f'applied {preset} preset and entered #{name}')
+        except Exception as exc:
+            return ('preset error',
+                    {'message': {}, 'deliveries': [],
+                     'dead_letters': [{'adapter_id': f'room:{name}', 'reason': str(exc)}]},
+                    '')
+    if sub == 'search':
+        if len(args) < 2:
+            return ('room search', None, 'usage: /room search <name> <query>')
+        name = args[0].lstrip('#').lower()
+        query = urllib.parse.quote(' '.join(args[1:]))
+        result = _get_json(f'{base}/v1/rooms/{name}/messages?q={query}&limit=50')
+        return (f'#{name} search', {
+            'conversation_id': f'room:{name}:search',
+            'messages': result.get('messages') or [],
+            'deliveries': [],
+            'dead_letters': [],
+        }, f"{len(result.get('messages') or [])} matches")
+    if sub == 'summarize':
+        name = args[0].lstrip('#').lower() if args else str(state.get('current_room') or '')
+        if not name:
+            return ('room summary', None, 'usage: /room summarize <name>')
+        result = _post_json(f'{base}/v1/rooms/{name}/summary', {'actor': 'synkraken-tui'})
+        return ('room summary', {
+            'conversation_id': f'room:{name}:summary',
+            'messages': [{
+                'source': 'synkraken-room',
+                'target': f'room:{name}',
+                'timestamp': '',
+                'body': result.get('summary') or '',
+            }],
+            'deliveries': [],
+            'dead_letters': [],
+        }, f'summary recorded in #{name} memory')
     if sub == 'delete':
         if not args:
             return ('rooms', None, 'usage: /room delete <name>')
@@ -3413,6 +3626,68 @@ def _main(stdscr):
 
                 if cmd == '/replay':
                     state['local_output'] = ('replay', ['usage: /replay <id>'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                if cmd.startswith('/trace '):
+                    trace_id = cmd.split(' ', 1)[1].strip()
+                    if not trace_id:
+                        state['local_output'] = ('trace', ['usage: /trace <id>'])
+                        state['view'] = 'local-output'
+                        hint = ''
+                        continue
+                    try:
+                        trace = _get_json(f'{base}/v1/trace/{trace_id}')
+                        lines = _format_replay_lines(trace)
+                        injections = trace.get('memory_injections') or []
+                        if injections:
+                            lines.extend(['', 'Memory injections:'])
+                            lines.extend(
+                                f"- {item.get('message_id')} {item.get('source')} -> {item.get('target')}"
+                                for item in injections
+                            )
+                        state['local_output'] = ('trace', lines)
+                    except Exception as exc:
+                        state['local_output'] = ('trace', [f'error: {exc}'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                if cmd == '/trace':
+                    state['local_output'] = ('trace', ['usage: /trace <id>'])
+                    state['view'] = 'local-output'
+                    hint = ''
+                    continue
+
+                if cmd.startswith('/retry '):
+                    parts = cmd.split()
+                    if len(parts) != 3 or parts[1] not in {'delivery', 'dead-letter'}:
+                        state['local_output'] = ('retry', ['usage: /retry delivery <id>  or  /retry dead-letter <id>'])
+                        state['view'] = 'local-output'
+                        hint = ''
+                        continue
+                    try:
+                        if parts[1] == 'delivery':
+                            result = _post_json(f'{base}/v1/deliveries/{parts[2]}/retry', {'actor': 'synkraken-tui'})
+                        else:
+                            result = _post_json(f'{base}/v1/dead-letters/{parts[2]}/replay', {'actor': 'synkraken-tui'})
+                        lines = [
+                            f"conversation: {(result.get('message') or {}).get('conversation_id')}",
+                            f"message: {(result.get('message') or {}).get('message_id')}",
+                            "",
+                        ]
+                        for delivery in result.get('deliveries') or []:
+                            lines.append(
+                                f"{_delivery_target_id(delivery)}  {_delivery_status(delivery)}  attempts={delivery.get('attempts', 1)}"
+                            )
+                            if delivery.get('error'):
+                                lines.append(f"  error: {delivery.get('error')}")
+                            if delivery.get('body'):
+                                lines.append(f"  {str(delivery.get('body'))[:160]}")
+                        state['local_output'] = ('retry', lines)
+                    except Exception as exc:
+                        state['local_output'] = ('retry', [f'error: {exc}'])
                     state['view'] = 'local-output'
                     hint = ''
                     continue

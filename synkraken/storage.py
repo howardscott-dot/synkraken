@@ -16,6 +16,15 @@ AGENT_PROFILE_ROLES = {"owner", "reviewer", "guardrail", "token_police", "summar
 SHARED_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
 DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
 HANDOFF_STATUSES = {"pending", "accepted", "rejected", "completed"}
+PROPOSAL_STATUSES = {"proposed", "approved", "rejected", "executed", "expired", "cancelled"}
+PROPOSAL_TYPES = {
+    "shell", "git", "restart", "delete", "write", "replay", "retry",
+    "memory_promotion", "room_summary_promotion", "file_write", "delete_file",
+    "room_summarize",
+}
+RUNTIME_HEALTH_STATUSES = {"healthy", "degraded", "unstable", "failing"}
+RUNTIME_REPUTATION_RECENT_WINDOW = 100
+RUNTIME_REPUTATION_MIN_SAMPLE_SIZE = 5
 SHARED_MEMORY_TYPES = {
     "fact", "decision", "preference", "rule", "lesson", "technical_note", "project_context",
 }
@@ -50,6 +59,31 @@ CREATE TABLE IF NOT EXISTS deliveries (
     raw_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY(message_id) REFERENCES messages(message_id)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_reputation (
+    runtime_id TEXT PRIMARY KEY,
+    total_deliveries INTEGER NOT NULL DEFAULT 0,
+    successful_replies INTEGER NOT NULL DEFAULT 0,
+    empty_replies INTEGER NOT NULL DEFAULT 0,
+    timeouts INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
+    wrong_identity INTEGER NOT NULL DEFAULT 0,
+    suspicious_outputs INTEGER NOT NULL DEFAULT 0,
+    avg_duration_ms INTEGER,
+    last_seen TEXT,
+    last_success TEXT,
+    last_failure TEXT,
+    latest_delivery_status TEXT NOT NULL DEFAULT '',
+    latest_quality TEXT NOT NULL DEFAULT '',
+    trust_score INTEGER NOT NULL DEFAULT 100,
+    health_status TEXT NOT NULL DEFAULT 'healthy',
+    incident_summary TEXT NOT NULL DEFAULT '',
+    proposals_created INTEGER NOT NULL DEFAULT 0,
+    proposals_rejected INTEGER NOT NULL DEFAULT 0,
+    proposals_cancelled INTEGER NOT NULL DEFAULT 0,
+    proposals_executed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS dead_letters (
@@ -298,6 +332,8 @@ CREATE TABLE IF NOT EXISTS workspace_packs (
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target);
 CREATE INDEX IF NOT EXISTS idx_deliveries_message_id ON deliveries(message_id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_adapter_created ON deliveries(adapter_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_deliveries_adapter_delivery_id ON deliveries(adapter_id, delivery_id);
 CREATE INDEX IF NOT EXISTS idx_dead_letters_message_id ON dead_letters(message_id);
 CREATE INDEX IF NOT EXISTS idx_room_members_room_name ON room_members(room_name);
 CREATE INDEX IF NOT EXISTS idx_room_memory_room_name ON room_memory(room_name);
@@ -323,6 +359,7 @@ CREATE INDEX IF NOT EXISTS idx_goal_runs_status ON goal_runs(status);
 CREATE INDEX IF NOT EXISTS idx_goal_events_run ON goal_events(goal_run_id);
 CREATE INDEX IF NOT EXISTS idx_goal_events_created ON goal_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_runtime_registry_type ON runtime_registry(runtime_type);
+CREATE INDEX IF NOT EXISTS idx_runtime_reputation_health ON runtime_reputation(health_status);
 CREATE INDEX IF NOT EXISTS idx_workspace_packs_name ON workspace_packs(name);
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -406,6 +443,51 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_status ON handoffs(status);
 CREATE INDEX IF NOT EXISTS idx_handoffs_agents ON handoffs(from_agent, to_agent);
 CREATE INDEX IF NOT EXISTS idx_handoffs_created ON handoffs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_handoff_events_handoff ON handoff_events(handoff_id);
+
+CREATE TABLE IF NOT EXISTS proposals (
+    proposal_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    proposal_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL DEFAULT '',
+    proposed_by TEXT NOT NULL,
+    approved_by TEXT,
+    rejected_by TEXT,
+    executed_by TEXT,
+    room_id TEXT,
+    task_id TEXT,
+    goal_id TEXT,
+    linked_decision_ids_json TEXT NOT NULL DEFAULT '[]',
+    linked_handoff_ids_json TEXT NOT NULL DEFAULT '[]',
+    linked_message_ids_json TEXT NOT NULL DEFAULT '[]',
+    execution_payload_json TEXT NOT NULL DEFAULT '{}',
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    requires_approval INTEGER NOT NULL DEFAULT 1,
+    approval_reason TEXT NOT NULL DEFAULT '',
+    executed_at TEXT,
+    rejected_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS proposal_events (
+    event_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_room ON proposals(room_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_task ON proposals(task_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_goal ON proposals(goal_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proposal_events_proposal ON proposal_events(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_events_created ON proposal_events(created_at);
 """
 
 
@@ -520,6 +602,43 @@ class Storage:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id ON memory_events(memory_id)")
         self._conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS runtime_reputation (
+                runtime_id TEXT PRIMARY KEY,
+                total_deliveries INTEGER NOT NULL DEFAULT 0,
+                successful_replies INTEGER NOT NULL DEFAULT 0,
+                empty_replies INTEGER NOT NULL DEFAULT 0,
+                timeouts INTEGER NOT NULL DEFAULT 0,
+                failures INTEGER NOT NULL DEFAULT 0,
+                wrong_identity INTEGER NOT NULL DEFAULT 0,
+                suspicious_outputs INTEGER NOT NULL DEFAULT 0,
+                avg_duration_ms INTEGER,
+                last_seen TEXT,
+                last_success TEXT,
+                last_failure TEXT,
+                latest_delivery_status TEXT NOT NULL DEFAULT '',
+                latest_quality TEXT NOT NULL DEFAULT '',
+                trust_score INTEGER NOT NULL DEFAULT 100,
+                health_status TEXT NOT NULL DEFAULT 'healthy',
+                incident_summary TEXT NOT NULL DEFAULT '',
+                proposals_created INTEGER NOT NULL DEFAULT 0,
+                proposals_rejected INTEGER NOT NULL DEFAULT 0,
+                proposals_cancelled INTEGER NOT NULL DEFAULT 0,
+                proposals_executed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        reputation_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(runtime_reputation)").fetchall()
+        }
+        for column in ("proposals_created", "proposals_rejected", "proposals_cancelled", "proposals_executed"):
+            if column not in reputation_columns:
+                self._conn.execute(f"ALTER TABLE runtime_reputation ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_adapter_created ON deliveries(adapter_id, created_at)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_adapter_delivery_id ON deliveries(adapter_id, delivery_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_runtime_reputation_health ON runtime_reputation(health_status)")
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS runtime_registry (
                 runtime_id TEXT PRIMARY KEY,
                 runtime_type TEXT NOT NULL,
@@ -559,6 +678,7 @@ class Storage:
         )
         self._migrate_decision_schema()
         self._migrate_handoff_schema()
+        self._migrate_proposal_schema()
 
     def _migrate_decision_schema(self) -> None:
         columns = {
@@ -638,6 +758,58 @@ class Storage:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_room_id ON handoffs(room_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_created_at ON handoffs(created_at DESC)")
 
+    def _migrate_proposal_schema(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proposals (
+                proposal_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                proposal_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                proposed_by TEXT NOT NULL,
+                approved_by TEXT,
+                rejected_by TEXT,
+                executed_by TEXT,
+                room_id TEXT,
+                task_id TEXT,
+                goal_id TEXT,
+                linked_decision_ids_json TEXT NOT NULL DEFAULT '[]',
+                linked_handoff_ids_json TEXT NOT NULL DEFAULT '[]',
+                linked_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                execution_payload_json TEXT NOT NULL DEFAULT '{}',
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                requires_approval INTEGER NOT NULL DEFAULT 1,
+                approval_reason TEXT NOT NULL DEFAULT '',
+                executed_at TEXT,
+                rejected_at TEXT
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proposal_events (
+                event_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_room ON proposals(room_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_task ON proposals(task_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_goal ON proposals(goal_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_at DESC)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_events_proposal ON proposal_events(proposal_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_events_created ON proposal_events(created_at)")
+
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -699,6 +871,243 @@ class Storage:
                     created_at,
                 ),
             )
+        self.recompute_runtime_health(reply.adapter_id)
+
+    def _delivery_quality_from_raw(self, raw_json: str | None) -> str:
+        if not raw_json:
+            return ""
+        try:
+            raw = json.loads(raw_json)
+        except json.JSONDecodeError:
+            return ""
+        return str(raw.get("quality") or "").strip()
+
+    def _delivery_row_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["quality"] = self._delivery_quality_from_raw(data.get("raw_json"))
+        return data
+
+    def _runtime_health_status(
+        self,
+        trust_score: int,
+        *,
+        recent_timeouts: int,
+        recent_empty_replies: int,
+        recent_failures: int,
+        recent_wrong_identity: int,
+        sample_size: int = RUNTIME_REPUTATION_MIN_SAMPLE_SIZE,
+        latest_status: str = "",
+        min_sample_size: int = RUNTIME_REPUTATION_MIN_SAMPLE_SIZE,
+    ) -> str:
+        severe = recent_timeouts + recent_failures
+        if sample_size < min_sample_size:
+            if latest_status in {"timeout", "failed", "blocked"}:
+                return "unstable" if severe >= 2 else "degraded"
+            if recent_wrong_identity or recent_empty_replies or trust_score < 90:
+                return "degraded"
+            return "healthy"
+
+        if (
+            recent_timeouts >= 5
+            or recent_failures >= 6
+            or recent_empty_replies >= 6
+            or (trust_score < 35 and (recent_timeouts >= 3 or recent_failures >= 3 or recent_empty_replies >= 5))
+        ):
+            return "failing"
+        if recent_timeouts >= 3 or recent_failures >= 4 or recent_empty_replies >= 4 or recent_wrong_identity >= 3:
+            return "unstable"
+        if recent_wrong_identity or recent_empty_replies >= 2:
+            status = "degraded"
+        elif trust_score < 70:
+            status = "unstable"
+        elif trust_score < 90:
+            status = "degraded"
+        else:
+            status = "healthy"
+        return status
+
+    def _runtime_incident_summary(self, runtime_id: str, counts: dict[str, int], health_status: str) -> str:
+        if health_status == "healthy":
+            return ""
+        issues = []
+        labels = [
+            ("timeouts", "timeouts"),
+            ("empty_replies", "empty replies"),
+            ("wrong_identity", "wrong identity replies"),
+            ("suspicious_outputs", "suspicious outputs"),
+            ("failures", "failures"),
+        ]
+        for key, label in labels:
+            if counts.get(key, 0):
+                issues.append(f"{counts[key]} {label}")
+        return f"{runtime_id} {health_status}: {', '.join(issues[:2])} in recent deliveries" if issues else ""
+
+    def recompute_runtime_health(self, runtime_id: str, limit: int = RUNTIME_REPUTATION_RECENT_WINDOW) -> dict:
+        recent_window = max(1, min(int(limit), RUNTIME_REPUTATION_RECENT_WINDOW))
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, status, ok, duration_ms, raw_json, created_at
+                FROM deliveries
+                WHERE adapter_id = ?
+                ORDER BY delivery_id DESC
+                LIMIT ?
+                """,
+                (runtime_id, recent_window),
+            ).fetchall()
+            rows = list(reversed(rows))
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM deliveries WHERE adapter_id = ?",
+                (runtime_id,),
+            ).fetchone()
+            total = int(total_row["count"] if total_row else len(rows))
+            successful = 0
+            empty = 0
+            timeouts = 0
+            failures = 0
+            wrong_identity = 0
+            suspicious = 0
+            durations = []
+            last_seen = None
+            last_success = None
+            last_failure = None
+            latest_status = ""
+            latest_quality = ""
+            for row in rows:
+                status = str(row["status"] or "")
+                quality = self._delivery_quality_from_raw(row["raw_json"])
+                ok = bool(row["ok"])
+                created_at = row["created_at"]
+                last_seen = created_at
+                latest_status = status
+                latest_quality = quality
+                try:
+                    duration_ms = int(row["duration_ms"]) if row["duration_ms"] is not None else None
+                except (TypeError, ValueError):
+                    duration_ms = None
+                if duration_ms is not None:
+                    durations.append(duration_ms)
+                if ok and status not in {"empty_reply", "timeout", "failed", "blocked"}:
+                    successful += 1
+                    last_success = created_at
+                if status == "empty_reply":
+                    empty += 1
+                    last_failure = created_at
+                if status == "timeout":
+                    timeouts += 1
+                    last_failure = created_at
+                if (not ok) or status in {"failed", "blocked"}:
+                    failures += 1
+                    last_failure = created_at
+                if status == "wrong_identity" or quality == "wrong_identity":
+                    wrong_identity += 1
+                    last_failure = created_at
+                if status == "suspicious_output" or quality == "suspicious_output":
+                    suspicious += 1
+                    last_failure = created_at
+            recent = rows[-recent_window:]
+            recent_counts = {
+                "timeouts": sum(1 for row in recent if str(row["status"] or "") == "timeout"),
+                "empty_replies": sum(1 for row in recent if str(row["status"] or "") == "empty_reply"),
+                "failures": sum(1 for row in recent if (not bool(row["ok"])) or str(row["status"] or "") in {"failed", "blocked"}),
+                "wrong_identity": sum(
+                    1 for row in recent
+                    if str(row["status"] or "") == "wrong_identity"
+                    or self._delivery_quality_from_raw(row["raw_json"]) == "wrong_identity"
+                ),
+                "suspicious_outputs": sum(
+                    1 for row in recent
+                    if str(row["status"] or "") == "suspicious_output"
+                    or self._delivery_quality_from_raw(row["raw_json"]) == "suspicious_output"
+                ),
+            }
+            avg_duration = int(sum(durations) / len(durations)) if durations else None
+            trust_score = 100
+            trust_score += min(successful, 8)
+            trust_score -= empty * 10
+            trust_score -= timeouts * 18
+            trust_score -= failures * 15
+            trust_score -= wrong_identity * 8
+            trust_score -= suspicious * 6
+            trust_score = max(0, min(100, trust_score))
+            health_status = self._runtime_health_status(
+                trust_score,
+                recent_timeouts=recent_counts["timeouts"],
+                recent_empty_replies=recent_counts["empty_replies"],
+                recent_failures=recent_counts["failures"],
+                recent_wrong_identity=recent_counts["wrong_identity"],
+                sample_size=len(rows),
+                latest_status=latest_status,
+            )
+            incident_summary = self._runtime_incident_summary(runtime_id, recent_counts, health_status)
+            proposal_row = self._conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS created,
+                  SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                  SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                  SUM(CASE WHEN status = 'executed' THEN 1 ELSE 0 END) AS executed
+                FROM proposals
+                WHERE proposed_by = ?
+                   OR approved_by = ?
+                   OR rejected_by = ?
+                   OR executed_by = ?
+                """,
+                (runtime_id, runtime_id, runtime_id, runtime_id),
+            ).fetchone()
+            proposal_counts = {
+                "created": int(proposal_row["created"] or 0) if proposal_row else 0,
+                "rejected": int(proposal_row["rejected"] or 0) if proposal_row else 0,
+                "cancelled": int(proposal_row["cancelled"] or 0) if proposal_row else 0,
+                "executed": int(proposal_row["executed"] or 0) if proposal_row else 0,
+            }
+            now = utc_now_iso()
+            self._conn.execute(
+                """
+                INSERT INTO runtime_reputation (
+                    runtime_id, total_deliveries, successful_replies, empty_replies,
+                    timeouts, failures, wrong_identity, suspicious_outputs,
+                    avg_duration_ms, last_seen, last_success, last_failure,
+                    latest_delivery_status, latest_quality, trust_score,
+                    health_status, incident_summary, proposals_created,
+                    proposals_rejected, proposals_cancelled, proposals_executed,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(runtime_id) DO UPDATE SET
+                    total_deliveries = excluded.total_deliveries,
+                    successful_replies = excluded.successful_replies,
+                    empty_replies = excluded.empty_replies,
+                    timeouts = excluded.timeouts,
+                    failures = excluded.failures,
+                    wrong_identity = excluded.wrong_identity,
+                    suspicious_outputs = excluded.suspicious_outputs,
+                    avg_duration_ms = excluded.avg_duration_ms,
+                    last_seen = excluded.last_seen,
+                    last_success = excluded.last_success,
+                    last_failure = excluded.last_failure,
+                    latest_delivery_status = excluded.latest_delivery_status,
+                    latest_quality = excluded.latest_quality,
+                    trust_score = excluded.trust_score,
+                    health_status = excluded.health_status,
+                    incident_summary = excluded.incident_summary,
+                    proposals_created = excluded.proposals_created,
+                    proposals_rejected = excluded.proposals_rejected,
+                    proposals_cancelled = excluded.proposals_cancelled,
+                    proposals_executed = excluded.proposals_executed,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    runtime_id, total, successful, empty, timeouts, failures,
+                    wrong_identity, suspicious, avg_duration, last_seen,
+                    last_success, last_failure, latest_status, latest_quality,
+                    trust_score, health_status, incident_summary,
+                    proposal_counts["created"], proposal_counts["rejected"],
+                    proposal_counts["cancelled"], proposal_counts["executed"], now,
+                ),
+            )
+        reputation = self.get_runtime_reputation(runtime_id)
+        assert reputation is not None
+        return reputation
 
     def save_dead_letter(self, message_id: str, adapter_id: str, reason: str, payload: dict, created_at: str) -> None:
         with self._lock, self._conn:
@@ -733,6 +1142,29 @@ class Storage:
                 (message_id,),
             ).fetchone()
         return self._message_from_row(row) if row else None
+
+    def get_delivery(self, delivery_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM deliveries WHERE delivery_id = ?",
+                (delivery_id,),
+            ).fetchone()
+        return self._delivery_row_from_row(row) if row else None
+
+    def get_dead_letter(self, dead_letter_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM dead_letters WHERE dead_letter_id = ?",
+                (dead_letter_id,),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["payload"] = json.loads(data.pop("payload_json") or "{}")
+        except json.JSONDecodeError:
+            data["payload"] = {}
+        return data
 
     def list_messages_by_ids(self, message_ids: list[str]) -> list[dict]:
         ids = [message_id for message_id in dict.fromkeys(message_ids) if message_id]
@@ -787,7 +1219,7 @@ class Storage:
                 """,
                 ids,
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._delivery_row_from_row(row) for row in rows]
 
     def list_dead_letters_for_messages(self, message_ids: list[str]) -> list[dict]:
         ids = [message_id for message_id in dict.fromkeys(message_ids) if message_id]
@@ -830,14 +1262,14 @@ class Storage:
             rows = self._conn.execute(
                 """
                 SELECT delivery_id, message_id, adapter_id, status, ok, error,
-                       duration_ms, attempts, created_at, substr(body, 1, 160) AS body_preview
+                       duration_ms, attempts, raw_json, created_at, substr(body, 1, 160) AS body_preview
                 FROM deliveries
                 ORDER BY delivery_id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-        return {"deliveries": [dict(row) for row in rows]}
+        return {"deliveries": [self._delivery_row_from_row(row) for row in rows]}
 
     def list_dead_letters(self, limit: int = 10) -> dict:
         with self._lock:
@@ -851,6 +1283,160 @@ class Storage:
                 (limit,),
             ).fetchall()
         return {"dead_letters": [dict(row) for row in rows]}
+
+    def get_runtime_reputation(self, runtime_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM runtime_reputation WHERE runtime_id = ?",
+                (runtime_id,),
+            ).fetchone()
+        if row is None:
+            with self._lock:
+                has_delivery = self._conn.execute(
+                    "SELECT 1 FROM deliveries WHERE adapter_id = ? LIMIT 1",
+                    (runtime_id,),
+                ).fetchone()
+            if has_delivery:
+                return self.recompute_runtime_health(runtime_id)
+            agent = self.get_agent(runtime_id)
+            runtime = self.get_runtime(runtime_id)
+            if not agent and not runtime:
+                return None
+            return {
+                "runtime_id": runtime_id,
+                "total_deliveries": 0,
+                "successful_replies": 0,
+                "empty_replies": 0,
+                "timeouts": 0,
+                "failures": 0,
+                "wrong_identity": 0,
+                "suspicious_outputs": 0,
+                "avg_duration_ms": None,
+                "last_seen": None,
+                "last_success": None,
+                "last_failure": None,
+                "latest_delivery_status": "",
+                "latest_quality": "",
+                "trust_score": 100,
+                "health_status": "healthy",
+                "incident_summary": "",
+                "proposals_created": 0,
+                "proposals_rejected": 0,
+                "proposals_cancelled": 0,
+                "proposals_executed": 0,
+                "updated_at": None,
+            }
+        return dict(row)
+
+    def get_all_runtime_reputations(self) -> list[dict]:
+        runtime_ids = {
+            str(agent["adapter_id"])
+            for agent in self.list_agents()
+        }
+        runtime_ids.update(str(runtime["runtime_id"]) for runtime in self.list_runtimes())
+        with self._lock:
+            reputation_ids = [
+                str(row["runtime_id"])
+                for row in self._conn.execute("SELECT runtime_id FROM runtime_reputation").fetchall()
+            ]
+        runtime_ids.update(reputation_ids)
+        return [
+            reputation for runtime_id in sorted(runtime_ids)
+            if (reputation := self.get_runtime_reputation(runtime_id)) is not None
+        ]
+
+    def _runtime_proposal_counts(self, runtime_id: str) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS created,
+                  SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                  SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                  SUM(CASE WHEN status = 'executed' THEN 1 ELSE 0 END) AS executed
+                FROM proposals
+                WHERE proposed_by = ?
+                   OR approved_by = ?
+                   OR rejected_by = ?
+                   OR executed_by = ?
+                """,
+                (runtime_id, runtime_id, runtime_id, runtime_id),
+            ).fetchone()
+        return {
+            "proposals_created": int(row["created"] or 0) if row else 0,
+            "proposals_rejected": int(row["rejected"] or 0) if row else 0,
+            "proposals_cancelled": int(row["cancelled"] or 0) if row else 0,
+            "proposals_executed": int(row["executed"] or 0) if row else 0,
+        }
+
+    def _workforce_runtime_sections(self) -> tuple[list[str], list[dict], list[dict]]:
+        agents = self.list_agents()
+        runtimes = {str(runtime["runtime_id"]): runtime for runtime in self.list_runtimes()}
+        agent_ids = {str(agent["adapter_id"]) for agent in agents}
+        enabled_agent_ids = [
+            str(agent["adapter_id"])
+            for agent in agents
+            if bool(agent.get("enabled"))
+        ]
+        disabled = []
+        for agent in agents:
+            adapter_id = str(agent["adapter_id"])
+            if bool(agent.get("enabled")):
+                continue
+            runtime = runtimes.get(adapter_id, {})
+            disabled.append({
+                "runtime_id": adapter_id,
+                "runtime_name": agent.get("runtime_name") or runtime.get("runtime_id") or adapter_id,
+                "runtime_type": agent.get("type") or runtime.get("runtime_type") or runtime.get("adapter_type") or "unknown",
+                "reason": "disabled",
+            })
+        registry_only = []
+        for runtime_id, runtime in runtimes.items():
+            if runtime_id in agent_ids:
+                continue
+            target = registry_only if bool(runtime.get("enabled", True)) else disabled
+            target.append({
+                "runtime_id": runtime_id,
+                "runtime_name": runtime.get("display_name") or runtime_id,
+                "runtime_type": runtime.get("runtime_type") or runtime.get("adapter_type") or "unknown",
+                "reason": "registry-only" if target is registry_only else "disabled",
+            })
+        return enabled_agent_ids, registry_only, disabled
+
+    def workforce_summary(self) -> dict:
+        enabled_agent_ids, registry_only, disabled = self._workforce_runtime_sections()
+        reputations = [
+            reputation for runtime_id in sorted(enabled_agent_ids)
+            if (reputation := self.get_runtime_reputation(runtime_id)) is not None
+        ]
+        counts = {status: 0 for status in ("healthy", "degraded", "unstable", "failing")}
+        for reputation in reputations:
+            status = str(reputation.get("health_status") or "healthy")
+            if status in counts:
+                counts[status] += 1
+        top_trusted = sorted(
+            reputations,
+            key=lambda item: (-int(item.get("trust_score") or 0), str(item.get("runtime_id") or "")),
+        )[:3]
+        most_unstable = sorted(
+            [item for item in reputations if item.get("health_status") in {"unstable", "failing", "degraded"}],
+            key=lambda item: (int(item.get("trust_score") or 100), str(item.get("runtime_id") or "")),
+        )[:3]
+        incidents = [
+            item["incident_summary"] for item in reputations
+            if item.get("incident_summary")
+        ]
+        return {
+            "summary": counts,
+            "top_trusted": [item["runtime_id"] for item in top_trusted],
+            "most_unstable": [item["runtime_id"] for item in most_unstable],
+            "recent_incidents": incidents[:5],
+            "runtimes": reputations,
+            "enabled_workers": len(enabled_agent_ids),
+            "registry_only": registry_only,
+            "disabled_runtimes": disabled,
+            "available_but_inactive": registry_only + disabled,
+        }
 
     def latest_incident_anchor(self) -> dict | None:
         with self._lock:
@@ -1861,6 +2447,25 @@ class Storage:
             ).fetchall()
         return [self._message_from_row(row) for row in rows]
 
+    def search_room_messages(self, name: str, query: str, limit: int = 50) -> list[dict]:
+        target = f"room:{name}"
+        needle = f"%{query.strip()}%"
+        if not query.strip():
+            return self.get_room_messages(name, limit=limit)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT message_id, conversation_id, source, target, timestamp,
+                       message_type, subject, priority, reply_to, hop_count, body, metadata_json
+                FROM messages
+                WHERE target = ? AND body LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (target, needle, limit),
+            ).fetchall()
+        return [self._message_from_row(row) for row in reversed(rows)]
+
     # ── tasks ──────────────────────────────────────────────────────────────
 
     def message_exists(self, message_id: str) -> bool:
@@ -2372,6 +2977,220 @@ class Storage:
             """,
             (str(uuid.uuid4()), task_id, actor, event_type, old_value, new_value, created_at),
         )
+
+    # ── proposals ────────────────────────────────────────────────────────
+
+    def _proposal_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        for key in ("linked_decision_ids", "linked_handoff_ids", "linked_message_ids"):
+            raw = data.pop(f"{key}_json", "[]") or "[]"
+            try:
+                data[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                data[key] = []
+        raw_payload = data.pop("execution_payload_json", "{}") or "{}"
+        try:
+            data["execution_payload"] = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            data["execution_payload"] = {}
+        data["requires_approval"] = bool(data.get("requires_approval"))
+        return data
+
+    def create_proposal(
+        self,
+        *,
+        proposal_id: str,
+        created_at: str,
+        proposal_type: str,
+        title: str,
+        summary: str,
+        details: str,
+        proposed_by: str,
+        room_id: str | None,
+        task_id: str | None,
+        goal_id: str | None,
+        linked_decision_ids: list[str],
+        linked_handoff_ids: list[str],
+        linked_message_ids: list[str],
+        execution_payload: dict,
+        risk_level: str,
+        requires_approval: bool,
+        approval_reason: str,
+    ) -> dict:
+        if proposal_type not in PROPOSAL_TYPES:
+            raise ValueError(f"invalid proposal_type: {proposal_type}")
+        if risk_level not in USAGE_RISKS:
+            raise ValueError(f"invalid risk_level: {risk_level}")
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO proposals (
+                    proposal_id, created_at, updated_at, status, proposal_type,
+                    title, summary, details, proposed_by, room_id, task_id,
+                    goal_id, linked_decision_ids_json, linked_handoff_ids_json,
+                    linked_message_ids_json, execution_payload_json,
+                    risk_level, requires_approval, approval_reason
+                ) VALUES (?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id, created_at, created_at, proposal_type, title,
+                    summary, details, proposed_by, room_id, task_id, goal_id,
+                    json.dumps(linked_decision_ids, ensure_ascii=False),
+                    json.dumps(linked_handoff_ids, ensure_ascii=False),
+                    json.dumps(linked_message_ids, ensure_ascii=False),
+                    json.dumps(execution_payload, ensure_ascii=False),
+                    risk_level, 1 if requires_approval else 0, approval_reason,
+                ),
+            )
+            self._append_proposal_event_locked(
+                proposal_id,
+                "proposed",
+                proposed_by,
+                {
+                    "proposal_type": proposal_type,
+                    "risk_level": risk_level,
+                    "requires_approval": requires_approval,
+                    "approval_reason": approval_reason,
+                },
+                created_at,
+            )
+        self.recompute_runtime_health(proposed_by)
+        proposal = self.get_proposal(proposal_id)
+        assert proposal is not None
+        return proposal
+
+    def get_proposal(self, proposal_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+        return self._proposal_from_row(row) if row else None
+
+    def list_proposals(
+        self,
+        *,
+        status: str | None = None,
+        room_id: str | None = None,
+        task_id: str | None = None,
+        goal_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses = []
+        params: list[object] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if room_id is not None:
+            clauses.append("room_id = ?")
+            params.append(room_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if goal_id is not None:
+            clauses.append("goal_id = ?")
+            params.append(goal_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM proposals
+                {where}
+                ORDER BY created_at DESC, proposal_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._proposal_from_row(row) for row in rows]
+
+    def update_proposal(self, proposal_id: str, fields: dict, *, actor: str, event_type: str, details: dict | str | None = None) -> dict | None:
+        allowed = {
+            "status", "updated_at", "approved_by", "rejected_by", "executed_by",
+            "executed_at", "rejected_at",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if "status" in clean and clean["status"] not in PROPOSAL_STATUSES:
+            raise ValueError(f"invalid proposal status: {clean['status']}")
+        if "updated_at" not in clean:
+            clean["updated_at"] = utc_now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"UPDATE proposals SET {assignments} WHERE proposal_id = ?",
+                [*clean.values(), proposal_id],
+            )
+            if cur.rowcount == 0:
+                return None
+            self._append_proposal_event_locked(
+                proposal_id,
+                event_type,
+                actor,
+                details if details is not None else clean,
+                str(clean["updated_at"]),
+            )
+        proposal = self.get_proposal(proposal_id)
+        if proposal:
+            for actor_id in {
+                proposal.get("proposed_by"),
+                proposal.get("approved_by"),
+                proposal.get("rejected_by"),
+                proposal.get("executed_by"),
+            }:
+                if actor_id:
+                    self.recompute_runtime_health(str(actor_id))
+        return proposal
+
+    def _append_proposal_event_locked(
+        self,
+        proposal_id: str,
+        event_type: str,
+        actor: str,
+        details: dict | str | None,
+        created_at: str,
+    ) -> None:
+        detail_text = json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
+        self._conn.execute(
+            """
+            INSERT INTO proposal_events (
+                event_id, proposal_id, event_type, actor, details, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), proposal_id, event_type, actor or "system", detail_text, created_at),
+        )
+
+    def append_proposal_event(
+        self,
+        proposal_id: str,
+        event_type: str,
+        actor: str,
+        details: dict | str | None,
+        created_at: str | None = None,
+    ) -> None:
+        with self._lock, self._conn:
+            if self._conn.execute("SELECT 1 FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone() is None:
+                return
+            self._append_proposal_event_locked(proposal_id, event_type, actor, details, created_at or utc_now_iso())
+
+    def list_proposal_events(self, proposal_id: str | None = None, limit: int = 100) -> list[dict] | None:
+        if proposal_id and self.get_proposal(proposal_id) is None:
+            return None
+        params: list[object] = []
+        where = ""
+        if proposal_id:
+            where = "WHERE proposal_id = ?"
+            params.append(proposal_id)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT event_id, proposal_id, event_type, actor, details, created_at
+                FROM proposal_events
+                {where}
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── decisions ────────────────────────────────────────────────────────
 
