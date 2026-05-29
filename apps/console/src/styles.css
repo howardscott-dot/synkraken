@@ -1,0 +1,308 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+  background: #090a0c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1024px;
+  background: #090a0c;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+@layer components {
+  .nav-item {
+    @apply mb-1 block w-full border-l-2 border-transparent px-3 py-2 text-left font-mono text-xs uppercase tracking-[0.18em] text-muted transition-colors;
+  }
+
+  .nav-item:hover {
+    @apply bg-panel2 text-slate-100;
+  }
+
+  .nav-item-active {
+    @apply border-cyanop bg-cyanop/10 text-cyanop;
+  }
+
+  .btn {
+    @apply border border-line bg-panel2 px-3 py-1.5 font-mono text-xs uppercase tracking-[0.12em] text-slate-200 transition-colors;
+  }
+
+  .btn:hover {
+    @apply border-cyanop text-cyanop;
+  }
+
+  .btn-cyan {
+    @apply border border-cyanop bg-cyanop/10 px-3 py-1.5 font-mono text-xs uppercase tracking-[0.12em] text-cyanop transition-colors;
+  }
+
+  .btn-cyan:hover {
+    @apply bg-cyanop text-abyss;
+  }
+
+  .btn-amber {
+    @apply border border-amberop bg-amberop/10 px-3 py-1.5 font-mono text-xs uppercase tracking-[0.12em] text-amberop transition-colors;
+  }
+
+  .btn-amber:hover {
+    @apply bg-amberop text-abyss;
+  }
+
+  .badge {
+    @apply inline-flex items-center border border-current px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em];
+  }
+
+  .status-dot {
+    @apply h-2 w-2 rounded-full;
+  }
+
+  .command-trigger {
+    @apply border border-line bg-panel px-3 py-1.5 font-mono text-xs text-muted transition-colors;
+  }
+
+  .command-trigger:hover {
+    @apply border-cyanop text-cyanop;
+  }
+
+  .toolbar {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .seg {
+    @apply border border-line bg-panel2 px-3 py-1.5 font-mono text-xs uppercase tracking-[0.12em] text-muted transition-colors;
+  }
+
+  .seg:hover,
+  .seg-active {
+    @apply border-cyanop bg-cyanop/10 text-cyanop;
+  }
+
+  .status-strip {
+    @apply grid grid-cols-7 gap-2;
+  }
+
+  .status-metric {
+    @apply min-w-0 border border-line bg-panel2 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.1em] text-muted;
+  }
+
+  .status-metric strong {
+    @apply ml-2 text-slate-100;
+  }
+
+  .status-good strong {
+    @apply text-cyanop;
+  }
+
+  .status-warn strong {
+    @apply text-amberop;
+  }
+
+  .status-danger strong {
+    @apply text-danger;
+  }
+
+  .ops-table {
+    @apply w-full overflow-x-auto;
+  }
+
+  .ops-head,
+  .ops-row {
+    @apply grid min-w-max items-center gap-3 border-b border-line px-4 py-3 text-left;
+  }
+
+  .ops-head {
+    @apply bg-panel2 font-mono text-[10px] uppercase tracking-[0.14em] text-muted;
+  }
+
+  .ops-row {
+    @apply w-full bg-panel text-sm text-slate-200 transition-colors;
+  }
+
+  .ops-row:hover,
+  .ops-row-active {
+    @apply bg-cyanop/10;
+  }
+
+  .ops-table-workforce .ops-head,
+  .ops-table-workforce .ops-row {
+    grid-template-columns: 180px 110px 80px 110px 170px 110px 140px 130px 160px;
+  }
+
+  .ops-table-proposals .ops-head,
+  .ops-table-proposals .ops-row {
+    grid-template-columns: 95px 90px 120px 90px 120px 155px minmax(260px, 1fr) 260px;
+  }
+
+  .queue-row {
+    @apply border-l-2 border-l-amberop;
+  }
+
+  .runtime-cell {
+    @apply font-mono text-cyanop;
+  }
+
+  .pill {
+    @apply inline-flex w-fit border border-current px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em];
+  }
+
+  .status-good {
+    @apply border-cyanop text-cyanop;
+  }
+
+  .status-warn {
+    @apply border-amberop text-amberop;
+  }
+
+  .status-danger {
+    @apply border-danger text-danger;
+  }
+
+  .drawer {
+    @apply border border-cyanop/60 bg-panel p-4 shadow-2xl shadow-black/40;
+  }
+
+  .compact-grid {
+    @apply grid grid-cols-2 gap-3;
+  }
+
+  .chip-row {
+    @apply flex flex-wrap gap-2;
+  }
+
+  .chip {
+    @apply border border-line bg-panel2 px-2 py-1 font-mono text-xs text-slate-200 transition-colors;
+  }
+
+  .chip:hover {
+    @apply border-cyanop text-cyanop;
+  }
+
+  .room-tab {
+    @apply flex w-full items-center justify-between border border-line bg-panel px-3 py-3 font-mono text-sm text-slate-200 transition-colors;
+  }
+
+  .room-tab:hover,
+  .room-tab-active {
+    @apply border-cyanop bg-cyanop/10 text-cyanop;
+  }
+
+  .message-list {
+    @apply max-h-[520px] space-y-2 overflow-auto;
+  }
+
+  .message-row {
+    @apply border border-line bg-panel2 p-3;
+  }
+
+  .message-meta {
+    @apply mb-2 flex items-center justify-between gap-3 font-mono text-[11px] uppercase tracking-[0.12em] text-muted;
+  }
+
+  .mention {
+    @apply font-mono text-cyanop;
+  }
+
+  .mini-list {
+    @apply space-y-2;
+  }
+
+  .mini-row {
+    @apply flex items-center justify-between gap-3 border border-line bg-panel2 px-3 py-2 text-sm;
+  }
+
+  .timeline {
+    @apply relative space-y-3;
+  }
+
+  .timeline-item {
+    @apply relative border border-line bg-panel2 p-4 pl-7;
+  }
+
+  .timeline-pin {
+    @apply absolute left-3 top-5 h-2 w-2 rounded-full bg-cyanop;
+  }
+
+  .timeline-failure,
+  .timeline-incident {
+    @apply border-danger/70;
+  }
+
+  .timeline-failure .timeline-pin,
+  .timeline-incident .timeline-pin {
+    @apply bg-danger;
+  }
+
+  .timeline-approval,
+  .timeline-execution,
+  .timeline-proposal {
+    @apply border-amberop/60;
+  }
+
+  .timeline-approval .timeline-pin,
+  .timeline-execution .timeline-pin,
+  .timeline-proposal .timeline-pin {
+    @apply bg-amberop;
+  }
+
+  .incident-card {
+    @apply border border-danger/50 bg-panel p-4;
+  }
+
+  .raw-details {
+    @apply border border-line bg-panel2 p-3 font-mono text-xs text-muted;
+  }
+
+  .raw-details summary {
+    @apply cursor-pointer text-slate-300;
+  }
+
+  .link-button {
+    @apply min-w-0 truncate text-left font-mono text-cyanop underline-offset-4 hover:underline;
+  }
+
+  .input {
+    @apply min-w-0 flex-1 border border-line bg-panel px-3 py-2 font-mono text-sm text-slate-100 outline-none transition-colors;
+  }
+
+  .input:focus {
+    @apply border-cyanop;
+  }
+
+  .textarea {
+    @apply min-h-28 w-full resize-y border border-line bg-panel px-3 py-2 font-mono text-sm text-slate-100 outline-none transition-colors;
+  }
+
+  .textarea:focus {
+    @apply border-cyanop;
+  }
+
+  .check-label {
+    @apply flex items-center gap-2 border border-line bg-panel2 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-muted;
+  }
+
+  .json-block {
+    @apply max-h-[520px] overflow-auto border border-line bg-abyss p-3 font-mono text-xs leading-relaxed text-slate-300;
+  }
+
+  .command-row {
+    @apply block w-full border border-transparent px-3 py-3 text-left font-mono text-sm text-slate-200 transition-colors;
+  }
+
+  .command-row:hover {
+    @apply border-cyanop bg-cyanop/10 text-cyanop;
+  }
+}

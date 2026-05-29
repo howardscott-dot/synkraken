@@ -5,6 +5,43 @@
 The Command Deck is the Web GUI surface for SynKraken. It complements the TUI;
 it does not replace it.
 
+SynKraken Console is a separate Tauri desktop client surface. It follows the
+same daemon-owned backend contract and visual direction. Console v0.2 expands
+the desktop surface into an operator command centre for workforce visibility,
+room operations, flight recorder investigation, proposal governance, incidents,
+dead letters, and command-palette navigation. Console does not replace the Web
+Command Deck and does not add a second backend.
+
+## Console v0.2 scope
+
+Console v0.2 consumes these daemon APIs:
+
+- `GET /health`
+- `GET /v1/agents`
+- `GET /v1/workforce`
+- `GET /v1/workforce/health`
+- `GET /v1/rooms`
+- `GET /v1/rooms/{name}`
+- `GET /v1/rooms/{name}/messages`
+- `GET /v1/rooms/{name}/memory`
+- `POST /v1/rooms/{name}/members`
+- `DELETE /v1/rooms/{name}/members/{adapter_id}`
+- `POST /v1/messages`
+- `GET /v1/proposals`
+- `GET /v1/proposals/pending`
+- `GET /v1/proposal/{id}`
+- `POST /v1/proposal/approve`
+- `POST /v1/proposal/reject`
+- `POST /v1/proposal/execute`
+- `GET /v1/replay/{id}`
+- `GET /v1/trace/{id}`
+- `GET /v1/incident/latest`
+- `GET /v1/dead-letters?limit=N`
+
+Console v0.2 must not read SQLite directly, mutate daemon-owned state outside
+existing APIs, add auth, add cloud features, add autonomous execution, or
+implement full memory, goal, team, decision, or handoff management.
+
 ## v0.1 goals
 
 Provide a browser-based local operator surface that:
@@ -29,6 +66,8 @@ Provide a browser-based local operator surface that:
   rejection actor, and summary
 - shows recent Handoffs with status, from-agent, to-agent, summary, and
   recommended next step
+- shows recent and pending Proposals with risk, approval requirement, proposer,
+  approve/reject/execute controls, and trace access
 - shows a minimal Flight Recorder / Incident panel for replaying existing work
   and inspecting the latest failure context
 
@@ -73,6 +112,11 @@ The human operator is in control. The default interaction is:
   or `timeout`; no chain-of-thought text
 - successful pending rows collapse into the actual replies as transcript data
   arrives; failed and timed-out rows remain visible inline
+- operator surfaces must render arbitrary enabled workers from daemon data; no
+  UI surface may assume a fixed workforce size or fixed adapter id list
+- weak adapter behavior is operator-visible: empty replies render as
+  `[empty reply]`, delivery quality labels such as `suspicious_output` are not
+  hidden, and broadcast result summaries list every target
 - discussion progress appears as transcript messages, for example
   `goose turn 1`, `hermes turn 2`, and `hermes final recommendation`
 - team task progress appears as transcript messages for clarify, nominate,
@@ -92,6 +136,8 @@ The human operator is in control. The default interaction is:
 - show display name and adapter id
 - show durable operational status from the daemon
 - show last seen, current room, and current task
+- show all enabled configured workers, including unknown future adapter ids with
+  fallback styling
 - select an agent as a direct-message target
 - show live typing state when available
 - do not show chain-of-thought, hidden memory, plans, or scheduling state
@@ -109,6 +155,8 @@ The human operator is in control. The default interaction is:
 - cancel active Goal Runs
 - list recent Decision Records and show status
 - list recent Handoffs and show status, sender, receiver, summary, and next step
+- list recent Proposals and show status, risk, approval requirement, proposer,
+  title, and operator controls
 - show latest incident context
 - replay a conversation, task, goal run, decision, or handoff id as a plain
   timeline
@@ -153,6 +201,7 @@ The command deck must use the existing daemon model:
 | goal mode | `POST /v1/goal-runs`, `GET /v1/goal-runs`, `GET /v1/goal-runs/{id}`, `GET /v1/goal-runs/{id}/events`, `POST /v1/goal-runs/{id}/cancel` |
 | decisions | `GET /v1/decisions`, `GET /v1/decision/{id}`, `GET /v1/decision/latest`, `POST /v1/decision/propose`, `POST /v1/decision/approve`, `POST /v1/decision/reject` |
 | handoffs | `GET /v1/handoffs`, `GET /v1/handoff/{id}`, `GET /v1/handoff/latest`, `POST /v1/handoff`, `POST /v1/handoff/accept`, `POST /v1/handoff/reject`, `POST /v1/handoff/complete` |
+| proposals | `GET /v1/proposals`, `GET /v1/proposal/{id}`, `GET /v1/proposals/pending`, `POST /v1/proposal/create`, `POST /v1/proposal/approve`, `POST /v1/proposal/reject`, `POST /v1/proposal/cancel`, `POST /v1/proposal/execute` |
 | flight recorder | `GET /v1/replay/{id}`, `GET /v1/incident/latest` |
 | live updates | `GET /v1/events/stream` |
 | tasks | `GET /v1/tasks`, `POST /v1/tasks`, `PATCH /v1/tasks/{id}` |
@@ -238,6 +287,12 @@ it should not invent alternate semantics.
   worker accepted, rejected, or completed it
 - Handoffs are not approval chains, voting, policy enforcement, scheduling, or
   autonomous workflow automation
+- Proposals are daemon-owned durable execution-authority records through
+  `proposals` and `proposal_events`
+- Proposal execution is operator-controlled; workers may propose, humans
+  approve, and SynKraken records simulated execution in v0.1
+- Proposal controls must not run real shell, git, restart, write, delete,
+  replay, or retry actions from the browser
 - Flight Recorder is daemon-owned read-model assembly through `GET
   /v1/replay/{id}` and `GET /v1/incident/latest`
 - Flight Recorder reconstructs messages, deliveries, dead letters, decisions,

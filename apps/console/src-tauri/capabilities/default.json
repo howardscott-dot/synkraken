@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop capability for SynKraken Console",
+  "windows": ["main"],
+  "permissions": [
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "http://127.0.0.1:9460/**" }]
+    }
+  ]
+}

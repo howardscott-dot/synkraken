@@ -217,6 +217,39 @@ That's it. The setup wizard does the boring parts for you — runtime
 detection, skill installation, config bootstrap — and tells you exactly
 what to do next.
 
+## SynKraken Console
+
+SynKraken Console v0.2 is an optional Tauri desktop client for the same local
+daemon. It is part of the open-source SynKraken product, not a separate edition
+or backend. The daemon remains authoritative, SQLite remains daemon-owned, and
+Console talks to `http://127.0.0.1:9460` by default.
+
+Console currently provides:
+
+- a Workforce Command Centre with sortable runtime health, trust, latency, and incident signals
+- first-class Rooms for members, notes, recent activity, broadcasts, and room-linked proposals
+- a Flight Recorder timeline over replay records with type, runtime, and failure filters
+- Proposal Governance with pending queue, detail view, linked traces, and approval actions
+- an Incident Centre for failing runtimes, dead letters, recovery hints, and raw drill-down
+- a persistent global status bar and `Ctrl+K` command palette for navigation and search
+
+Run it from a checkout with the daemon already running:
+
+```bash
+cd apps/console
+npm install
+npm run tauri dev
+```
+
+Or from the repo root after installing Console dependencies:
+
+```bash
+npm run console:dev
+```
+
+See [`apps/console/README.md`](apps/console/README.md) for build commands,
+consumed daemon APIs, and v0.2 limitations.
+
 ## Uninstall
 
 ```bash

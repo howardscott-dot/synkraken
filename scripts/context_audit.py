@@ -18,6 +18,11 @@ SKIP_DIRS = {
     "build",
     ".mypy_cache",
 }
+SKIP_PATH_PREFIXES = {
+    ("apps", "console", "node_modules"),
+    ("apps", "console", "dist"),
+    ("apps", "console", "src-tauri", "target"),
+}
 SKIP_SUFFIXES = {".pyc", ".sqlite", ".sqlite3", ".db", ".log"}
 TEXT_SUFFIXES = {
     ".md", ".py", ".json", ".sh", ".service", ".txt", ".toml", ".yaml", ".yml",
@@ -58,6 +63,8 @@ def rel(path: Path) -> str:
 def should_scan(path: Path) -> bool:
     relative = path.relative_to(ROOT)
     if any(part in SKIP_DIRS for part in relative.parts):
+        return False
+    if any(relative.parts[:len(prefix)] == prefix for prefix in SKIP_PATH_PREFIXES):
         return False
     if path == Path(__file__).resolve():
         return False
