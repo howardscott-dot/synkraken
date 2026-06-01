@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import {
   Agent,
+  CanvasRelationship,
   DAEMON_URL,
   HealthResponse,
   IncidentResponse,
@@ -10,15 +11,52 @@ import {
   Room,
   RoomMemory,
   RoomMessage,
+  TraceResponse,
   WorkforceHealthResponse,
   WorkforceResponse,
   api,
 } from "./lib/api";
 import { asRecord, duration, numberText, percent, prettyJson, shortDate, stringList, text } from "./lib/format";
 
-type View = "workforce" | "rooms" | "flight" | "proposals" | "proposal-detail" | "incidents";
+type View = "canvas" | "workforce" | "rooms" | "flight" | "proposals" | "proposal-detail" | "incidents";
 type SortKey = "health" | "trust" | "latency" | "incidents";
 type ReplayFilter = "all" | "message" | "reply" | "handoff" | "proposal" | "approval" | "execution" | "incident" | "failure";
+type WorkspacePreset = "Coding" | "Operations" | "Research" | "Incident Response";
+type CanvasNodeType = "workforce-summary" | "runtime" | "room" | "proposal-queue" | "proposal-detail" | "incident" | "trace" | "dead-letter";
+
+type CanvasNode = {
+  id: string;
+  type: CanvasNodeType;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  collapsed?: boolean;
+  refId?: string;
+};
+
+type CanvasCommand =
+  | { nonce: number; kind: "workspace"; workspace: WorkspacePreset }
+  | { nonce: number; kind: "add"; nodeType: CanvasNodeType; refId?: string }
+  | { nonce: number; kind: "fit" }
+  | { nonce: number; kind: "reset" }
+  | { nonce: number; kind: "clear-layout" }
+  | { nonce: number; kind: "focus-runtime"; id?: string }
+  | { nonce: number; kind: "focus-room"; id?: string }
+  | { nonce: number; kind: "focus-proposal"; id?: string }
+  | { nonce: number; kind: "focus-trace"; id?: string };
+
+type CanvasCommandInput =
+  | { kind: "workspace"; workspace: WorkspacePreset }
+  | { kind: "add"; nodeType: CanvasNodeType; refId?: string }
+  | { kind: "fit" }
+  | { kind: "reset" }
+  | { kind: "clear-layout" }
+  | { kind: "focus-runtime"; id?: string }
+  | { kind: "focus-room"; id?: string }
+  | { kind: "focus-proposal"; id?: string }
+  | { kind: "focus-trace"; id?: string };
 
 type AppData = {
   health?: HealthResponse;
@@ -30,6 +68,7 @@ type AppData = {
   rooms: Room[];
   incident?: IncidentResponse;
   deadLetters: unknown[];
+  canvasRelationships: CanvasRelationship[];
 };
 
 type RoomDetail = {
@@ -38,21 +77,30 @@ type RoomDetail = {
   memory?: RoomMemory;
 };
 
+type DaemonStatus = "unknown" | "online" | "offline";
+
+type NodeErrors = Record<string, string | undefined>;
+
 const initialData: AppData = {
   agents: [],
   proposals: [],
   pending: [],
   rooms: [],
   deadLetters: [],
+  canvasRelationships: [],
 };
 
 const navItems: { id: View; label: string }[] = [
+  { id: "canvas", label: "Canvas" },
   { id: "workforce", label: "Workforce" },
   { id: "rooms", label: "Rooms" },
-  { id: "flight", label: "Flight Recorder" },
+  { id: "flight", label: "Trace" },
   { id: "proposals", label: "Proposals" },
   { id: "incidents", label: "Incidents" },
 ];
+
+const workspacePresets: WorkspacePreset[] = ["Coding", "Operations", "Research", "Incident Response"];
+const canvasStorageKey = "synkraken.console.v03.operationsCanvasLayout";
 
 const healthRank: Record<string, number> = {
   failing: 0,
@@ -142,11 +190,133 @@ function proposalLinks(proposal: Proposal): string[] {
   ].filter(Boolean);
 }
 
+function sameCanvasRelationships(left: CanvasRelationship[], right: CanvasRelationship[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return Boolean(other)
+      && item.id === other.id
+      && item.source_type === other.source_type
+      && item.source_id === other.source_id
+      && item.target_type === other.target_type
+      && item.target_id === other.target_id
+      && item.kind === other.kind
+      && item.tone === other.tone
+      && item.status === other.status;
+  });
+}
+
+function nodeTitle(type: CanvasNodeType, refId?: string): string {
+  if (type === "workforce-summary") return "Workforce Summary";
+  if (type === "runtime") return refId ? `Runtime · ${refId}` : "Runtime";
+  if (type === "room") return refId ? `Room · #${refId}` : "Room";
+  if (type === "proposal-queue") return "Proposal Queue";
+  if (type === "proposal-detail") return refId ? `Proposal · ${refId}` : "Proposal Detail";
+  if (type === "incident") return "Incident";
+  if (type === "trace") return refId ? `Trace · ${refId}` : "Trace";
+  return "Dead Letters";
+}
+
+function createNode(type: CanvasNodeType, x: number, y: number, refId?: string): CanvasNode {
+  const compact = type === "runtime";
+  const id = `${type}:${refId || "primary"}`;
+  return {
+    id,
+    type,
+    title: nodeTitle(type, refId),
+    x,
+    y,
+    width: compact ? 300 : 360,
+    height: type === "trace" ? 360 : 300,
+    refId,
+  };
+}
+
+function createPresetNodes(workspace: WorkspacePreset, workers: Agent[], rooms: Room[], proposals: Proposal[], deadLetters: unknown[]): CanvasNode[] {
+  const primaryRoom = text(rooms[0]?.name, workspace === "Research" ? "research" : workspace === "Coding" ? "coding" : "ops");
+  const failingWorkers = workers.filter((worker) => ["failing", "unstable", "degraded"].includes(workerHealth(worker)));
+  const runtimeWorkers = workspace === "Incident Response" ? failingWorkers : workers;
+  const selectedProposal = proposals.find((proposal) => text(proposal.status, "").toLowerCase() === "pending") || proposals[0];
+  const traceId = text(selectedProposal ? proposalId(selectedProposal) : asRecord(deadLetters[0]).message_id || asRecord(deadLetters[0]).conversation_id, "");
+
+  if (workspace === "Coding") {
+    return [
+      createNode("workforce-summary", 40, 40),
+      createNode("room", 430, 40, primaryRoom),
+      createNode("proposal-queue", 40, 380),
+      createNode("trace", 430, 380, traceId || undefined),
+    ];
+  }
+  if (workspace === "Research") {
+    return [
+      createNode("room", 40, 40, primaryRoom),
+      createNode("trace", 430, 40, traceId || undefined),
+      createNode("proposal-queue", 40, 400),
+      createNode("workforce-summary", 430, 430),
+    ];
+  }
+  if (workspace === "Incident Response") {
+    return [
+      createNode("incident", 40, 40),
+      createNode("dead-letter", 430, 40),
+      createNode("trace", 820, 40, traceId || undefined),
+      ...runtimeWorkers.slice(0, 4).map((worker, index) => createNode("runtime", 40 + index * 320, 430, workerId(worker))),
+      createNode("proposal-queue", 40, 760),
+    ];
+  }
+  return [
+    createNode("workforce-summary", 40, 40),
+    ...runtimeWorkers.slice(0, 6).map((worker, index) => createNode("runtime", 430 + (index % 3) * 320, 40 + Math.floor(index / 3) * 330, workerId(worker))),
+    createNode("incident", 40, 380),
+    createNode("dead-letter", 430, 710),
+  ];
+}
+
+function nodeTone(type: CanvasNodeType, node: CanvasNode, workers: Agent[], pending: Proposal[], deadLetters: unknown[]): "normal" | "selected" | "degraded" | "failing" | "pending" | "empty" | "loading" | "error" {
+  if (type === "runtime") {
+    const worker = workers.find((item) => workerId(item) === node.refId);
+    if (!worker) return "empty";
+    const health = workerHealth(worker);
+    if (health === "failing" || health === "unstable") return "failing";
+    if (health === "degraded") return "degraded";
+  }
+  if (type === "proposal-queue" || type === "proposal-detail") return pending.length ? "pending" : "empty";
+  if (type === "dead-letter") return deadLetters.length ? "failing" : "empty";
+  if (type === "incident") return deadLetters.length || workers.some((worker) => ["failing", "unstable"].includes(workerHealth(worker))) ? "failing" : "normal";
+  return "normal";
+}
+
+function inferCanvasTarget(query: string, workers: Agent[], rooms: Room[], proposals: Proposal[], deadLetters: unknown[]): { type: CanvasNodeType; refId?: string } {
+  const value = query.trim();
+  const normalized = value.toLowerCase();
+  if (!value) return { type: "workforce-summary" };
+  const runtime = workers.find((worker) => workerId(worker).toLowerCase() === normalized);
+  if (runtime) return { type: "runtime", refId: workerId(runtime) };
+  const roomName = normalized.startsWith("#") ? normalized.slice(1) : normalized;
+  const room = rooms.find((item) => text(item.name, "").toLowerCase() === roomName);
+  if (room) return { type: "room", refId: text(room.name, roomName) };
+  const proposal = proposals.find((item) => proposalId(item).toLowerCase() === normalized || text(item.title, "").toLowerCase().includes(normalized));
+  if (proposal) return { type: "proposal-detail", refId: proposalId(proposal) };
+  const deadLetter = deadLetters.find((item) => {
+    const record = asRecord(item);
+    return [record.dead_letter_id, record.delivery_id, record.message_id, record.conversation_id].some((candidate) => text(candidate, "").toLowerCase() === normalized);
+  });
+  if (deadLetter) return { type: "dead-letter" };
+  if (normalized.includes("incident")) return { type: "incident" };
+  if (normalized.includes("dead")) return { type: "dead-letter" };
+  if (normalized.includes("proposal")) return { type: "proposal-queue" };
+  return { type: "trace", refId: value };
+}
+
 export default function App() {
-  const [view, setView] = useState<View>("workforce");
+  const [view, setView] = useState<View>("canvas");
   const [data, setData] = useState<AppData>(initialData);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [daemonStatus, setDaemonStatus] = useState<DaemonStatus>("unknown");
+  const [globalError, setGlobalError] = useState<string | null>(null);
+  const [viewError, setViewError] = useState<string | null>(null);
+  const [nodeErrors, setNodeErrors] = useState<NodeErrors>({});
   const [selectedRuntime, setSelectedRuntime] = useState<string | null>(null);
   const [selectedRoom, setSelectedRoom] = useState("ops");
   const [roomDetail, setRoomDetail] = useState<RoomDetail>({ messages: [] });
@@ -161,50 +331,71 @@ export default function App() {
   const [failureOnly, setFailureOnly] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
+  const [canvasWorkspace, setCanvasWorkspace] = useState<WorkspacePreset>("Operations");
+  const [canvasCommand, setCanvasCommand] = useState<CanvasCommand | null>(null);
 
-  const daemonOnline = !error && Boolean(data.health);
+  const daemonOnline = daemonStatus === "online";
 
   const workers = useMemo(() => {
     const workforceWorkers = (data.workforce?.workforce || data.workforce?.workers || data.workforce?.agents || []) as Agent[];
     return workforceWorkers.length ? workforceWorkers : data.agents;
   }, [data.agents, data.workforce]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [health, agents, workforce, workforceHealth, proposals, pending, rooms, incident, deadLetters] =
-        await Promise.all([
-          api.getHealth(),
-          api.getAgents(),
-          api.getWorkforce(),
-          api.getWorkforceHealth(),
-          api.getProposals(),
-          api.getPendingProposals(),
-          api.getRooms(),
-          api.getLatestIncident(),
-          api.getDeadLetters(100),
-        ]);
-
-      setData({
-        health,
-        agents: agents.agents || [],
-        workforce,
-        workforceHealth,
-        proposals: proposals.proposals || [],
-        pending: pending.proposals || [],
-        rooms: rooms.rooms || [],
-        incident,
-        deadLetters: deadLetters.dead_letters || [],
-      });
-      setError(null);
-    } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Daemon unavailable");
-    } finally {
-      setLoading(false);
+  const refresh = useCallback(async (background = false) => {
+    if (background) {
+      setRefreshing(true);
+    } else {
+      setInitialLoading(true);
     }
+    const health = await api.getHealth().catch((healthError: unknown) => healthError) as HealthResponse | Error;
+    if (health instanceof Error) {
+      setDaemonStatus("offline");
+      setGlobalError(health.message || "Daemon unavailable");
+      if (!background) setInitialLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
+    setDaemonStatus("online");
+    setGlobalError(null);
+    const [agents, workforce, workforceHealth, proposals, pending, rooms, incident, deadLetters, canvasRelationships] =
+      await Promise.allSettled([
+        api.getAgents(),
+        api.getWorkforce(),
+        api.getWorkforceHealth(),
+        api.getProposals(),
+        api.getPendingProposals(),
+        api.getRooms(),
+        api.getLatestIncident(),
+        api.getDeadLetters(100),
+        api.getCanvasRelationships(500),
+      ]);
+
+    const endpointErrors = [agents, workforce, workforceHealth, proposals, pending, rooms, incident, deadLetters, canvasRelationships]
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason instanceof Error ? result.reason.message : "Endpoint refresh failed");
+
+    setData((current) => {
+      const nextRelationships = canvasRelationships.status === "fulfilled" ? canvasRelationships.value.relationships || [] : current.canvasRelationships;
+      return {
+        health,
+        agents: agents.status === "fulfilled" ? agents.value.agents || [] : current.agents,
+        workforce: workforce.status === "fulfilled" ? workforce.value : current.workforce,
+        workforceHealth: workforceHealth.status === "fulfilled" ? workforceHealth.value : current.workforceHealth,
+        proposals: proposals.status === "fulfilled" ? proposals.value.proposals || [] : current.proposals,
+        pending: pending.status === "fulfilled" ? pending.value.proposals || [] : current.pending,
+        rooms: rooms.status === "fulfilled" ? rooms.value.rooms || [] : current.rooms,
+        incident: incident.status === "fulfilled" ? incident.value : current.incident,
+        deadLetters: deadLetters.status === "fulfilled" ? deadLetters.value.dead_letters || [] : current.deadLetters,
+        canvasRelationships: sameCanvasRelationships(current.canvasRelationships, nextRelationships) ? current.canvasRelationships : nextRelationships,
+      };
+    });
+    setViewError(endpointErrors[0] || null);
+    if (!background) setInitialLoading(false);
+    setRefreshing(false);
   }, []);
 
-  const loadRoom = useCallback(async (name: string) => {
+  const loadRoom = useCallback(async (name: string, background = false) => {
     if (!name) return;
     try {
       const [room, messages, memory] = await Promise.all([
@@ -217,19 +408,25 @@ export default function App() {
         messages: messages.messages || [],
         memory: ("memory" in memory ? memory.memory : memory) as RoomMemory,
       });
-      setError(null);
+      setViewError(null);
+      setNodeErrors((current) => {
+        const next = { ...current };
+        delete next[`room:${name}`];
+        return next;
+      });
     } catch (roomError) {
-      setRoomDetail({ messages: [] });
-      setError(roomError instanceof Error ? roomError.message : "Room load failed");
+      const message = roomError instanceof Error ? roomError.message : "Room load failed";
+      if (!background) setViewError(message);
+      setNodeErrors((current) => ({ ...current, [`room:${name}`]: message.toLowerCase().includes("not found") ? "Room not found" : message }));
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
+    void refresh(false);
   }, [refresh]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void refresh(), 4000);
+    const timer = window.setInterval(() => void refresh(true), 4000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
@@ -238,9 +435,16 @@ export default function App() {
   }, [loadRoom, selectedRoom]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void loadRoom(selectedRoom), 5000);
+    const timer = window.setInterval(() => void loadRoom(selectedRoom, true), 5000);
     return () => window.clearInterval(timer);
   }, [loadRoom, selectedRoom]);
+
+  useEffect(() => {
+    if (selectedRoom === "ops" && data.rooms.length && !data.rooms.some((room) => room.name === selectedRoom)) {
+      const firstRoom = text(data.rooms[0]?.name, "");
+      if (firstRoom) setSelectedRoom(firstRoom);
+    }
+  }, [data.rooms, selectedRoom]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -262,9 +466,16 @@ export default function App() {
     setView("proposal-detail");
     try {
       setSelectedProposal(await api.getProposal(id));
-      setError(null);
+      setViewError(null);
+      setNodeErrors((current) => {
+        const next = { ...current };
+        delete next[`proposal-detail:${id}`];
+        return next;
+      });
     } catch (detailError) {
-      setError(detailError instanceof Error ? detailError.message : "Proposal load failed");
+      const message = detailError instanceof Error ? detailError.message : "Proposal load failed";
+      setViewError(message);
+      setNodeErrors((current) => ({ ...current, [`proposal-detail:${id}`]: message.toLowerCase().includes("not found") ? "Proposal not found" : message }));
     }
   }, []);
 
@@ -278,9 +489,9 @@ export default function App() {
         if (selectedProposalId === id) {
           setSelectedProposal(await api.getProposal(id));
         }
-        setError(null);
+        setViewError(null);
       } catch (actionError) {
-        setError(actionError instanceof Error ? actionError.message : "Proposal action failed");
+        setViewError(actionError instanceof Error ? actionError.message : "Proposal action failed");
       }
     },
     [refresh, selectedProposalId],
@@ -293,10 +504,10 @@ export default function App() {
       setReplay(result);
       setReplayId(id.trim());
       setView("flight");
-      setError(null);
+      setViewError(null);
     } catch (replayError) {
       setReplay(null);
-      setError(replayError instanceof Error ? replayError.message : "Replay load failed");
+      setViewError(replayError instanceof Error ? replayError.message : "Replay load failed");
     }
   }, [replayId]);
 
@@ -308,7 +519,7 @@ export default function App() {
       await loadRoom(selectedRoom);
       await refresh();
     } catch (sendError) {
-      setError(sendError instanceof Error ? sendError.message : "Room broadcast failed");
+      setViewError(sendError instanceof Error ? sendError.message : "Room broadcast failed");
     }
   }, [loadRoom, refresh, roomMessage, selectedRoom]);
 
@@ -324,12 +535,40 @@ export default function App() {
       await loadRoom(selectedRoom);
       await refresh();
     } catch (memberError) {
-      setError(memberError instanceof Error ? memberError.message : "Room membership update failed");
+      setViewError(memberError instanceof Error ? memberError.message : "Room membership update failed");
     }
   }, [loadRoom, refresh, selectedRoom]);
 
+  const dispatchCanvasCommand = useCallback((command: CanvasCommandInput) => {
+    setView("canvas");
+    setCanvasCommand({ ...command, nonce: Date.now() } as CanvasCommand);
+    if (command.kind === "workspace") {
+      setCanvasWorkspace(command.workspace);
+    }
+  }, []);
+
   const commands = useMemo(
     () => [
+      { label: "Open Operations Canvas", run: () => setView("canvas") },
+      { label: "Switch workspace: Coding", run: () => dispatchCanvasCommand({ kind: "workspace", workspace: "Coding" }) },
+      { label: "Switch workspace: Operations", run: () => dispatchCanvasCommand({ kind: "workspace", workspace: "Operations" }) },
+      { label: "Switch workspace: Research", run: () => dispatchCanvasCommand({ kind: "workspace", workspace: "Research" }) },
+      { label: "Switch workspace: Incident Response", run: () => dispatchCanvasCommand({ kind: "workspace", workspace: "Incident Response" }) },
+      { label: "Add Workforce Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "workforce-summary" }) },
+      { label: "Add Runtime Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "runtime", refId: workers[0] ? workerId(workers[0]) : undefined }) },
+      { label: "Add Room Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "room", refId: data.rooms[0]?.name }) },
+      { label: "Add Proposal Queue Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "proposal-queue" }) },
+      { label: "Add Proposal Detail Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "proposal-detail", refId: data.pending[0] ? proposalId(data.pending[0]) : undefined }) },
+      { label: "Add Incident Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "incident" }) },
+      { label: "Add Trace Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "trace" }) },
+      { label: "Add Dead Letter Node", run: () => dispatchCanvasCommand({ kind: "add", nodeType: "dead-letter" }) },
+      { label: "Fit Canvas", run: () => dispatchCanvasCommand({ kind: "fit" }) },
+      { label: "Reset Layout", run: () => dispatchCanvasCommand({ kind: "reset" }) },
+      { label: "Clear Saved Layout", run: () => dispatchCanvasCommand({ kind: "clear-layout" }) },
+      { label: "Focus Runtime", run: () => dispatchCanvasCommand({ kind: "focus-runtime" }) },
+      { label: "Focus Room", run: () => dispatchCanvasCommand({ kind: "focus-room" }) },
+      { label: "Focus Proposal", run: () => dispatchCanvasCommand({ kind: "focus-proposal" }) },
+      { label: "Focus Trace", run: () => dispatchCanvasCommand({ kind: "focus-trace" }) },
       { label: "Go to Workforce", run: () => setView("workforce") },
       { label: "Go to Rooms", run: () => setView("rooms") },
       { label: "Go to Proposals", run: () => setView("proposals") },
@@ -340,7 +579,7 @@ export default function App() {
       { label: "Search Trace", run: () => setView("flight") },
       { label: "Live Refresh", run: () => void refresh() },
     ],
-    [refresh],
+    [data.pending, data.rooms, dispatchCanvasCommand, refresh, workers],
   );
 
   return (
@@ -348,7 +587,7 @@ export default function App() {
       <aside className="fixed inset-y-0 left-0 w-60 border-r border-line bg-panel">
         <div className="border-b border-line px-5 py-4">
           <div className="text-xs uppercase tracking-[0.28em] text-cyanop">SynKraken</div>
-          <div className="mt-1 font-mono text-lg">Console v0.2</div>
+          <div className="mt-1 font-mono text-lg">Console v0.4</div>
         </div>
         <nav className="p-3">
           {navItems.map((item) => (
@@ -374,15 +613,38 @@ export default function App() {
         <TopBar
           data={data}
           online={daemonOnline}
-          loading={loading}
-          error={error}
+          loading={initialLoading}
+          refreshing={refreshing}
+          error={globalError}
           workers={workers}
-          onRefresh={() => void refresh()}
+          onRefresh={() => void refresh(false)}
           onPalette={() => setPaletteOpen(true)}
         />
-        {error && <OfflineState message={error} onRefresh={() => void refresh()} />}
+        {globalError && <OfflineState message={globalError} onRefresh={() => void refresh(false)} />}
+        {!globalError && viewError && <InlineFault message={viewError} />}
 
         <section className="p-4">
+          {view === "canvas" && (
+            <OperationsCanvas
+              data={data}
+              workers={workers}
+              selectedWorkspace={canvasWorkspace}
+              selectedRoom={selectedRoom}
+              selectedProposal={selectedProposal}
+              command={canvasCommand}
+              loading={initialLoading}
+              refreshing={refreshing}
+              daemonStatus={daemonStatus}
+              globalError={globalError}
+              nodeErrors={nodeErrors}
+              onWorkspace={setCanvasWorkspace}
+              onSelectRoom={setSelectedRoom}
+              onOpenProposal={openProposal}
+              onProposalAction={proposalAction}
+              onReplay={(id) => void loadReplay(id)}
+              onView={setView}
+            />
+          )}
           {view === "workforce" && (
             <WorkforceView
               workers={workers}
@@ -461,11 +723,10 @@ export default function App() {
           onQuery={setPaletteQuery}
           onClose={() => setPaletteOpen(false)}
           onRuntime={(id) => {
-            setSelectedRuntime(id);
-            setView("workforce");
+            dispatchCanvasCommand({ kind: "focus-runtime", id });
           }}
           onProposal={(id) => void openProposal(id)}
-          onTrace={(id) => void loadReplay(id)}
+          onTrace={(id) => dispatchCanvasCommand({ kind: "focus-trace", id })}
         />
       )}
     </div>
@@ -477,6 +738,7 @@ function TopBar({
   workers,
   online,
   loading,
+  refreshing,
   error,
   onRefresh,
   onPalette,
@@ -485,6 +747,7 @@ function TopBar({
   workers: Agent[];
   online: boolean;
   loading: boolean;
+  refreshing: boolean;
   error: string | null;
   onRefresh: () => void;
   onPalette: () => void;
@@ -517,12 +780,855 @@ function TopBar({
           <StatusMetric label="dead letters" value={data.deadLetters.length} tone={data.deadLetters.length ? "danger" : "good"} />
         </div>
         <div className="flex items-center justify-end gap-3 font-mono text-xs">
-          {loading && <span className="text-amberop">polling</span>}
+          {loading && <span className="text-amberop">loading</span>}
+          {!loading && refreshing && <span className="text-amberop">polling</span>}
           {error && <span className="text-danger">fault</span>}
           <button className="btn" onClick={onRefresh}>Refresh</button>
         </div>
       </div>
     </header>
+  );
+}
+
+function OperationsCanvas({
+  data,
+  workers,
+  selectedWorkspace,
+  selectedRoom,
+  selectedProposal,
+  command,
+  loading,
+  refreshing,
+  daemonStatus,
+  globalError,
+  nodeErrors,
+  onWorkspace,
+  onSelectRoom,
+  onOpenProposal,
+  onProposalAction,
+  onReplay,
+  onView,
+}: {
+  data: AppData;
+  workers: Agent[];
+  selectedWorkspace: WorkspacePreset;
+  selectedRoom: string;
+  selectedProposal: Proposal | null;
+  command: CanvasCommand | null;
+  loading: boolean;
+  refreshing: boolean;
+  daemonStatus: DaemonStatus;
+  globalError: string | null;
+  nodeErrors: NodeErrors;
+  onWorkspace: (workspace: WorkspacePreset) => void;
+  onSelectRoom: (room: string) => void;
+  onOpenProposal: (id: string) => void;
+  onProposalAction: (id: string, action: "approve" | "reject" | "execute") => void;
+  onReplay: (id: string) => void;
+  onView: (view: View) => void;
+}) {
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ mode: "pan" | "node"; id?: string; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+  const layoutDirtyRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const [nodes, setNodes] = useState<CanvasNode[]>([]);
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [transform, setTransform] = useState({ x: 40, y: 40, scale: 1 });
+  const [traceId, setTraceId] = useState("");
+  const [trace, setTrace] = useState<TraceResponse | null>(null);
+  const [traceError, setTraceError] = useState<string | null>(null);
+  const [layoutRestored, setLayoutRestored] = useState(false);
+  const [layoutInitialized, setLayoutInitialized] = useState(false);
+  const [focusQuery, setFocusQuery] = useState("");
+
+  const markLayoutDirty = useCallback(() => {
+    layoutDirtyRef.current = true;
+  }, []);
+
+  const resetLayout = useCallback((workspace = selectedWorkspace) => {
+    setNodes(createPresetNodes(workspace, workers, data.rooms, data.pending.length ? data.pending : data.proposals, data.deadLetters));
+    setSelectedNode(null);
+    setTransform({ x: 40, y: 40, scale: 1 });
+  }, [data.deadLetters, data.pending, data.proposals, data.rooms, selectedWorkspace, workers]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(canvasStorageKey);
+      if (raw) {
+        const saved = JSON.parse(raw) as { selectedWorkspace?: WorkspacePreset; nodes?: CanvasNode[]; transform?: { x: number; y: number; scale: number } };
+        if (saved.selectedWorkspace && workspacePresets.includes(saved.selectedWorkspace)) onWorkspace(saved.selectedWorkspace);
+        if (Array.isArray(saved.nodes) && saved.nodes.length) {
+          setNodes(saved.nodes);
+          setLayoutRestored(true);
+          setLayoutInitialized(true);
+        }
+        if (saved.transform && Number.isFinite(saved.transform.scale)) setTransform(saved.transform);
+        return;
+      }
+    } catch {
+      window.localStorage.removeItem(canvasStorageKey);
+    }
+    if (workers.length || data.rooms.length || data.proposals.length || data.deadLetters.length) {
+      resetLayout(selectedWorkspace);
+      setLayoutInitialized(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!layoutRestored && !layoutInitialized && (workers.length || data.rooms.length || data.proposals.length || data.deadLetters.length)) {
+      resetLayout(selectedWorkspace);
+      setLayoutInitialized(true);
+    }
+  }, [data.deadLetters.length, data.proposals.length, data.rooms.length, layoutInitialized, layoutRestored, resetLayout, selectedWorkspace, workers.length]);
+
+  useEffect(() => {
+    if (!layoutDirtyRef.current) return;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      window.localStorage.setItem(canvasStorageKey, JSON.stringify({ selectedWorkspace, nodes, transform }));
+      layoutDirtyRef.current = false;
+      saveTimerRef.current = null;
+    }, 350);
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, [nodes, selectedWorkspace, transform]);
+
+  const saveLayoutNow = useCallback(() => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    window.localStorage.setItem(canvasStorageKey, JSON.stringify({ selectedWorkspace, nodes, transform }));
+    layoutDirtyRef.current = false;
+    saveTimerRef.current = null;
+  }, [nodes, selectedWorkspace, transform]);
+
+  const addNode = useCallback((nodeType: CanvasNodeType, refId?: string) => {
+    const nodeId = `${nodeType}:${refId || "primary"}`;
+    setNodes((current) => {
+      if (current.some((node) => node.id === nodeId)) return current;
+      markLayoutDirty();
+      return [...current, createNode(nodeType, 160 + current.length * 28, 140 + current.length * 28, refId)];
+    });
+    setSelectedNode(nodeId);
+    return nodeId;
+  }, []);
+
+  const focusNode = useCallback((id: string) => {
+    const node = nodes.find((item) => item.id === id);
+    if (!node) return;
+    const bounds = viewportRef.current?.getBoundingClientRect();
+    setSelectedNode(id);
+    if (bounds) {
+      setTransform((current) => ({
+        ...current,
+        x: bounds.width / 2 - (node.x + node.width / 2) * current.scale,
+        y: bounds.height / 2 - (node.y + node.height / 2) * current.scale,
+      }));
+    }
+  }, [nodes]);
+
+  const focusOrCreateNode = useCallback((nodeType: CanvasNodeType, refId?: string) => {
+    const id = `${nodeType}:${refId || "primary"}`;
+    const existing = nodes.find((node) => node.id === id);
+    const nextNode = existing || createNode(nodeType, 160 + nodes.length * 28, 140 + nodes.length * 28, refId);
+    if (!existing) {
+      markLayoutDirty();
+      setNodes((current) => current.some((node) => node.id === id) ? current : [...current, nextNode]);
+    }
+    setSelectedNode(id);
+    const bounds = viewportRef.current?.getBoundingClientRect();
+    if (bounds) {
+      setTransform((current) => ({
+        ...current,
+        x: bounds.width / 2 - (nextNode.x + nextNode.width / 2) * current.scale,
+        y: bounds.height / 2 - (nextNode.y + nextNode.height / 2) * current.scale,
+      }));
+    }
+    if (nodeType === "trace" && refId) setTraceId(refId);
+    return id;
+  }, [markLayoutDirty, nodes]);
+
+  const fitCanvas = useCallback(() => {
+    if (!nodes.length) return;
+    const bounds = viewportRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const minX = Math.min(...nodes.map((node) => node.x));
+    const minY = Math.min(...nodes.map((node) => node.y));
+    const maxX = Math.max(...nodes.map((node) => node.x + node.width));
+    const maxY = Math.max(...nodes.map((node) => node.y + node.height));
+    const scale = Math.min(1.1, Math.max(0.35, Math.min((bounds.width - 96) / (maxX - minX), (bounds.height - 96) / (maxY - minY))));
+    markLayoutDirty();
+    setTransform({
+      scale,
+      x: bounds.width / 2 - ((minX + maxX) / 2) * scale,
+      y: bounds.height / 2 - ((minY + maxY) / 2) * scale,
+    });
+  }, [markLayoutDirty, nodes]);
+
+  useEffect(() => {
+    if (!command) return;
+    if (command.kind === "workspace") {
+      onWorkspace(command.workspace);
+      markLayoutDirty();
+      resetLayout(command.workspace);
+    }
+    if (command.kind === "add") focusOrCreateNode(command.nodeType, command.refId);
+    if (command.kind === "fit") fitCanvas();
+    if (command.kind === "reset") {
+      markLayoutDirty();
+      resetLayout(selectedWorkspace);
+    }
+    if (command.kind === "clear-layout") {
+      window.localStorage.removeItem(canvasStorageKey);
+      setLayoutRestored(false);
+      markLayoutDirty();
+      resetLayout(selectedWorkspace);
+    }
+    if (command.kind === "focus-runtime") {
+      const id = command.id || (workers[0] ? workerId(workers[0]) : "");
+      if (id) {
+        focusOrCreateNode("runtime", id);
+      }
+    }
+    if (command.kind === "focus-room") focusOrCreateNode("room", command.id || text(data.rooms[0]?.name, "ops"));
+    if (command.kind === "focus-proposal") {
+      const id = command.id || proposalId(data.pending[0] || data.proposals[0] || {});
+      focusOrCreateNode("proposal-detail", id || undefined);
+    }
+    if (command.kind === "focus-trace") {
+      const id = command.id || traceId || proposalId(data.pending[0] || data.proposals[0] || {});
+      focusOrCreateNode("trace", id || undefined);
+    }
+  }, [command, data.pending, data.proposals, data.rooms, fitCanvas, focusOrCreateNode, markLayoutDirty, onWorkspace, resetLayout, selectedWorkspace, traceId, workers]);
+
+  const loadTrace = useCallback(async (id = traceId) => {
+    if (!id.trim()) return;
+    try {
+      const result = await api.getTrace(id.trim());
+      setTrace(result);
+      setTraceId(id.trim());
+      setTraceError(null);
+    } catch (loadError) {
+      setTrace(null);
+      setTraceError(loadError instanceof Error ? loadError.message : "Trace load failed");
+    }
+  }, [traceId]);
+
+  const onMouseMove = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (drag.mode === "pan") {
+      markLayoutDirty();
+      setTransform((current) => ({ ...current, x: drag.baseX + dx, y: drag.baseY + dy }));
+      return;
+    }
+    if (drag.id) {
+      markLayoutDirty();
+      setNodes((current) => current.map((node) => node.id === drag.id
+        ? { ...node, x: drag.baseX + dx / transform.scale, y: drag.baseY + dy / transform.scale }
+        : node));
+    }
+  }, [markLayoutDirty, transform.scale]);
+
+  const relationships = useMemo(() => buildRelationships(nodes, data.canvasRelationships), [data.canvasRelationships, nodes]);
+  const selectedCanvasNode = nodes.find((node) => node.id === selectedNode) || null;
+  const focusCanvasQuery = useCallback(() => {
+    const target = inferCanvasTarget(focusQuery, workers, data.rooms, data.proposals, data.deadLetters);
+    focusOrCreateNode(target.type, target.refId);
+    if (target.type === "room" && target.refId) onSelectRoom(target.refId);
+    if (target.type === "proposal-detail" && target.refId) onOpenProposal(target.refId);
+  }, [data.deadLetters, data.proposals, data.rooms, focusOrCreateNode, focusQuery, onOpenProposal, onSelectRoom, workers]);
+
+  return (
+    <div className="operations-shell">
+      <div className="canvas-toolbar">
+        <div>
+          <h1 className="font-mono text-xl text-slate-50">Operations Canvas</h1>
+          <p className="text-xs text-muted">Spatial AI workforce control plane · saved locally</p>
+        </div>
+        <div className="toolbar">
+          {workspacePresets.map((workspace) => (
+            <button
+              key={workspace}
+              className={`seg ${selectedWorkspace === workspace ? "seg-active" : ""}`}
+              onClick={() => {
+                onWorkspace(workspace);
+                markLayoutDirty();
+                resetLayout(workspace);
+              }}
+            >
+              {workspace}
+            </button>
+          ))}
+          <input
+            className="input canvas-focus-input"
+            value={focusQuery}
+            onChange={(event) => setFocusQuery(event.target.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") focusCanvasQuery(); }}
+            placeholder="focus runtime, #room, proposal, trace"
+          />
+          <button className="btn-cyan" onClick={focusCanvasQuery}>Focus</button>
+          <select
+            className="input canvas-add-select"
+            value=""
+            onChange={(event) => {
+              const nodeType = event.target.value as CanvasNodeType;
+              if (nodeType) focusOrCreateNode(nodeType);
+            }}
+          >
+            <option value="">add node</option>
+            <option value="workforce-summary">Workforce</option>
+            <option value="runtime">Runtime</option>
+            <option value="room">Room</option>
+            <option value="proposal-queue">Proposal Queue</option>
+            <option value="proposal-detail">Proposal Detail</option>
+            <option value="incident">Incident</option>
+            <option value="trace">Trace</option>
+            <option value="dead-letter">Dead Letter</option>
+          </select>
+          <button className="btn" onClick={fitCanvas}>Fit</button>
+          <button className="btn" onClick={() => { markLayoutDirty(); resetLayout(selectedWorkspace); }}>Reset Layout</button>
+          <button className="btn" onClick={() => { window.localStorage.removeItem(canvasStorageKey); setLayoutRestored(false); markLayoutDirty(); resetLayout(selectedWorkspace); }}>Clear Saved</button>
+          <button className="btn-cyan" onClick={saveLayoutNow}>Save Layout</button>
+        </div>
+      </div>
+      <div className="canvas-main">
+        <div
+          className="canvas-viewport"
+          ref={viewportRef}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              dragRef.current = { mode: "pan", startX: event.clientX, startY: event.clientY, baseX: transform.x, baseY: transform.y };
+            }
+          }}
+          onMouseMove={onMouseMove}
+          onMouseUp={() => { dragRef.current = null; }}
+          onMouseLeave={() => { dragRef.current = null; }}
+          onWheel={(event) => {
+            event.preventDefault();
+            const next = Math.max(0.45, Math.min(1.6, transform.scale - event.deltaY * 0.001));
+            markLayoutDirty();
+            setTransform((current) => ({ ...current, scale: next }));
+          }}
+        >
+          <div className="canvas-world" style={{ transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})` }}>
+            <svg className="relationship-layer" width="2400" height="1600" viewBox="0 0 2400 1600">
+              {relationships.map((line) => (
+                <line
+                  key={line.id}
+                  x1={line.x1}
+                  y1={line.y1}
+                  x2={line.x2}
+                  y2={line.y2}
+                  className={`relationship-line relationship-${line.tone}`}
+                />
+              ))}
+            </svg>
+            {nodes.map((node) => {
+              const tone = nodeTone(node.type, node, workers, data.pending, data.deadLetters);
+              const nodeError = nodeErrors[node.id] || (node.type === "room" && node.refId && !data.rooms.some((room) => room.name === node.refId) ? "Room not found" : undefined);
+              return (
+                <CanvasNodePanel
+                  key={node.id}
+                  node={node}
+                  selected={selectedNode === node.id}
+                  tone={tone}
+                  data={data}
+                  workers={workers}
+                  selectedRoom={selectedRoom}
+                  selectedProposal={selectedProposal}
+                  traceId={traceId}
+                  trace={trace}
+                  traceError={traceError}
+                  loading={loading}
+                  refreshing={refreshing}
+                  daemonStatus={daemonStatus}
+                  error={nodeError || globalError}
+                  onSelect={() => setSelectedNode(node.id)}
+                  onDragStart={(event) => {
+                    event.stopPropagation();
+                    setSelectedNode(node.id);
+                    dragRef.current = { mode: "node", id: node.id, startX: event.clientX, startY: event.clientY, baseX: node.x, baseY: node.y };
+                  }}
+                  onSelectRoom={onSelectRoom}
+                  onOpenProposal={onOpenProposal}
+                  onProposalAction={onProposalAction}
+                  onTraceId={setTraceId}
+                  onLoadTrace={() => void loadTrace()}
+                  onReplay={onReplay}
+                  onView={onView}
+                />
+              );
+            })}
+          </div>
+        </div>
+        <CanvasInspector
+          node={selectedCanvasNode}
+          data={data}
+          workers={workers}
+          trace={trace}
+          relationships={data.canvasRelationships.filter((relationship) => {
+            if (!selectedCanvasNode) return false;
+            const nodeType = selectedCanvasNode.type;
+            const nodeId = selectedCanvasNode.refId || "primary";
+            return (
+              (relationship.source_type === nodeType && relationship.source_id === nodeId)
+              || (relationship.target_type === nodeType && relationship.target_id === nodeId)
+            );
+          })}
+          onFocus={focusOrCreateNode}
+          onSelectRoom={onSelectRoom}
+          onOpenProposal={onOpenProposal}
+          onProposalAction={onProposalAction}
+          onReplay={onReplay}
+          onView={onView}
+        />
+      </div>
+    </div>
+  );
+}
+
+function buildRelationships(nodes: CanvasNode[], canvasRelationships: CanvasRelationship[]) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const center = (node: CanvasNode) => ({ x: node.x + node.width / 2, y: node.y + node.height / 2 });
+  const lines: { id: string; x1: number; y1: number; x2: number; y2: number; tone: "normal" | "pending" | "failing"; relationship: CanvasRelationship }[] = [];
+  const add = (from?: CanvasNode, to?: CanvasNode, relationship?: CanvasRelationship) => {
+    if (!relationship) return;
+    if (!from || !to) return;
+    const a = center(from);
+    const b = center(to);
+    const rawTone = text(relationship.tone || relationship.status, "normal");
+    const tone = rawTone === "failing" || rawTone === "pending" ? rawTone : "normal";
+    lines.push({ id: relationship.id, x1: a.x, y1: a.y, x2: b.x, y2: b.y, tone, relationship });
+  };
+
+  canvasRelationships.forEach((relationship) => {
+    const source = nodeMap.get(`${relationship.source_type}:${relationship.source_id || "primary"}`);
+    const target = nodeMap.get(`${relationship.target_type}:${relationship.target_id || "primary"}`);
+    add(source, target, relationship);
+  });
+
+  return lines;
+}
+
+function CanvasNodePanel({
+  node,
+  selected,
+  tone,
+  data,
+  workers,
+  selectedRoom,
+  selectedProposal,
+  traceId,
+  trace,
+  traceError,
+  loading,
+  refreshing,
+  daemonStatus,
+  error,
+  onSelect,
+  onDragStart,
+  onSelectRoom,
+  onOpenProposal,
+  onProposalAction,
+  onTraceId,
+  onLoadTrace,
+  onReplay,
+  onView,
+}: {
+  node: CanvasNode;
+  selected: boolean;
+  tone: string;
+  data: AppData;
+  workers: Agent[];
+  selectedRoom: string;
+  selectedProposal: Proposal | null;
+  traceId: string;
+  trace: TraceResponse | null;
+  traceError: string | null;
+  loading: boolean;
+  refreshing: boolean;
+  daemonStatus: DaemonStatus;
+  error: string | null;
+  onSelect: () => void;
+  onDragStart: (event: MouseEvent<HTMLElement>) => void;
+  onSelectRoom: (room: string) => void;
+  onOpenProposal: (id: string) => void;
+  onProposalAction: (id: string, action: "approve" | "reject" | "execute") => void;
+  onTraceId: (id: string) => void;
+  onLoadTrace: () => void;
+  onReplay: (id: string) => void;
+  onView: (view: View) => void;
+}) {
+  return (
+    <article
+      className={`canvas-node canvas-node-${tone} ${selected ? "canvas-node-selected" : ""}`}
+      style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+      onMouseDown={onSelect}
+    >
+      <header className="canvas-node-header" onMouseDown={onDragStart}>
+        <span>{node.type.replace("-", " ")}</span>
+        <strong>{node.title}</strong>
+        <em>{loading ? "loading" : error ? "warning" : refreshing ? "polling" : tone}</em>
+      </header>
+      <div className="canvas-node-meta">
+        <span>{node.refId || "daemon"}</span>
+        <span>{shortDate(new Date().toISOString())}</span>
+      </div>
+      <div className="canvas-node-body">
+        {error && <div className="text-xs text-danger">{error}</div>}
+        {node.type === "workforce-summary" && <WorkforceSummaryNode data={data} workers={workers} daemonStatus={daemonStatus} />}
+        {node.type === "runtime" && <RuntimeNode node={node} workers={workers} onView={onView} />}
+        {node.type === "room" && <RoomNode node={node} data={data} selectedRoom={selectedRoom} onSelectRoom={onSelectRoom} onView={onView} />}
+        {node.type === "proposal-queue" && <ProposalQueueNode proposals={data.pending} onOpen={onOpenProposal} onAction={onProposalAction} onView={onView} />}
+        {node.type === "proposal-detail" && <ProposalDetailNode node={node} proposal={selectedProposal || data.proposals.find((proposal) => proposalId(proposal) === node.refId) || null} onAction={onProposalAction} onReplay={onReplay} />}
+        {node.type === "incident" && <IncidentNode data={data} workers={workers} onView={onView} onReplay={onReplay} />}
+        {node.type === "trace" && <TraceNode traceId={traceId || node.refId || ""} trace={trace} traceError={traceError} onTraceId={onTraceId} onLoadTrace={onLoadTrace} onReplay={onReplay} />}
+        {node.type === "dead-letter" && <DeadLetterNode data={data} onReplay={onReplay} />}
+      </div>
+    </article>
+  );
+}
+
+function CanvasInspector({
+  node,
+  data,
+  workers,
+  trace,
+  relationships,
+  onFocus,
+  onSelectRoom,
+  onOpenProposal,
+  onProposalAction,
+  onReplay,
+  onView,
+}: {
+  node: CanvasNode | null;
+  data: AppData;
+  workers: Agent[];
+  trace: TraceResponse | null;
+  relationships: CanvasRelationship[];
+  onFocus: (nodeType: CanvasNodeType, refId?: string) => string;
+  onSelectRoom: (room: string) => void;
+  onOpenProposal: (id: string) => void;
+  onProposalAction: (id: string, action: "approve" | "reject" | "execute") => void;
+  onReplay: (id: string) => void;
+  onView: (view: View) => void;
+}) {
+  if (!node) {
+    return (
+      <aside className="canvas-inspector">
+        <div className="canvas-inspector-title">Canvas Inspector</div>
+        <EmptyPanel label="Select a node to inspect daemon object detail." />
+      </aside>
+    );
+  }
+  const tone = nodeTone(node.type, node, workers, data.pending, data.deadLetters);
+  const runtime = node.type === "runtime" ? workers.find((worker) => workerId(worker) === node.refId) : null;
+  const room = node.type === "room" ? data.rooms.find((item) => item.name === node.refId) : null;
+  const proposal = node.type === "proposal-detail" ? data.proposals.find((item) => proposalId(item) === node.refId) : null;
+  const latestDeadLetter = asRecord(data.deadLetters[0]);
+
+  return (
+    <aside className="canvas-inspector">
+      <div className="canvas-inspector-title">Canvas Inspector</div>
+      <div className="canvas-inspector-section">
+        <Field label="node type" value={node.type} />
+        <Field label="status" value={tone} />
+        <Field label="object id" value={node.refId || "primary"} />
+        <Field label="position" value={`${Math.round(node.x)}, ${Math.round(node.y)}`} />
+      </div>
+
+      {node.type === "workforce-summary" && (
+        <div className="canvas-inspector-section">
+          <Field label="workers" value={workers.length} />
+          <Field label="pending proposals" value={data.pending.length} />
+          <Field label="dead letters" value={data.deadLetters.length} />
+          <button className="btn-cyan" onClick={() => onView("workforce")}>Open Workforce</button>
+        </div>
+      )}
+
+      {node.type === "runtime" && runtime && (
+        <div className="canvas-inspector-section">
+          <Field label="health" value={workerHealth(runtime)} />
+          <Field label="trust" value={percent(workerReputation(runtime).trust_score ?? runtime.trust_score ?? runtime.trust)} />
+          <Field label="cost tier" value={text(runtime.cost_tier || workerReputation(runtime).cost_tier, "medium")} />
+          <Field label="incident" value={text(workerReputation(runtime).incident_summary || runtime.incident_summary, "none")} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} />
+          <button className="btn-cyan" onClick={() => onView("workforce")}>Open Runtime Detail</button>
+        </div>
+      )}
+
+      {node.type === "room" && (
+        <div className="canvas-inspector-section">
+          <Field label="room" value={`#${node.refId || "ops"}`} />
+          <Field label="members" value={room?.member_count ?? 0} />
+          <Field label="last activity" value={shortDate(room?.last_activity)} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onOpenProposal={onOpenProposal} />
+          <button className="btn-cyan" onClick={() => { onSelectRoom(node.refId || "ops"); onView("rooms"); }}>Open Room</button>
+        </div>
+      )}
+
+      {node.type === "proposal-queue" && (
+        <div className="canvas-inspector-section">
+          <Field label="pending" value={data.pending.length} />
+          <Field label="highest visible risk" value={text(data.pending[0]?.risk || data.pending[0]?.risk_level, "none")} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onOpenProposal={onOpenProposal} />
+          <button className="btn-cyan" onClick={() => onView("proposals")}>Open Governance</button>
+        </div>
+      )}
+
+      {node.type === "proposal-detail" && proposal && (
+        <div className="canvas-inspector-section">
+          <Field label="status" value={proposal.status} />
+          <Field label="risk" value={proposal.risk || proposal.risk_level} />
+          <Field label="proposer" value={proposal.proposed_by || proposal.proposer} />
+          <Field label="room" value={proposal.room_id || proposal.room || "-"} />
+          <ProposalActions id={proposalId(proposal)} onAction={onProposalAction} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onOpenProposal={onOpenProposal} onReplay={onReplay} />
+        </div>
+      )}
+
+      {node.type === "incident" && (
+        <div className="canvas-inspector-section">
+          <Field label="failing runtimes" value={workers.filter((worker) => ["failing", "unstable"].includes(workerHealth(worker))).map(workerId).join(", ") || "none"} />
+          <Field label="dead letters" value={data.deadLetters.length} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onReplay={onReplay} />
+          <button className="btn-cyan" onClick={() => onView("incidents")}>Open Incident View</button>
+        </div>
+      )}
+
+      {node.type === "trace" && (
+        <div className="canvas-inspector-section">
+          <Field label="trace id" value={node.refId || "manual"} />
+          <Field label="timeline events" value={Array.isArray(trace?.timeline) ? trace.timeline.length : 0} />
+          <Field label="dead letters" value={Array.isArray(trace?.dead_letters) ? trace.dead_letters.length : 0} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onOpenProposal={onOpenProposal} onReplay={onReplay} />
+          {node.refId && <button className="btn-cyan" onClick={() => onReplay(node.refId || "")}>Open Replay</button>}
+        </div>
+      )}
+
+      {node.type === "dead-letter" && (
+        <div className="canvas-inspector-section">
+          <Field label="count" value={data.deadLetters.length} />
+          <Field label="latest runtime" value={text(latestDeadLetter.adapter_id || latestDeadLetter.target || latestDeadLetter.source, "none")} />
+          <Field label="latest reason" value={text(latestDeadLetter.reason || latestDeadLetter.error || latestDeadLetter.status, "none")} />
+          <RelationshipJumpRow relationships={relationships} onFocus={onFocus} onReplay={onReplay} />
+        </div>
+      )}
+
+      <div className="canvas-inspector-section">
+        <Field label="relationships" value={relationships.length} />
+        <div className="mini-list">
+          {relationships.slice(0, 4).map((line) => (
+            <div className="canvas-mini-row" key={line.id}>
+              <span>{line.id}</span>
+              <span>{line.tone}</span>
+            </div>
+          ))}
+          {!relationships.length && <span className="text-xs text-muted">No daemon relationship records touch this node.</span>}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function RelationshipJumpRow({
+  relationships,
+  onFocus,
+  onOpenProposal,
+  onReplay,
+}: {
+  relationships: CanvasRelationship[];
+  onFocus: (nodeType: CanvasNodeType, refId?: string) => string;
+  onOpenProposal?: (id: string) => void;
+  onReplay?: (id: string) => void;
+}) {
+  if (!relationships.length) {
+    return <span className="text-xs text-muted">No daemon relationship jumps returned.</span>;
+  }
+  return (
+    <div className="chip-row">
+      {relationships.slice(0, 8).map((relationship) => {
+        const targetType = relationship.target_type as CanvasNodeType;
+        const targetId = text(relationship.target_id, "primary");
+        return (
+          <button
+            className="chip"
+            key={relationship.id}
+            onClick={() => {
+              onFocus(targetType, targetId === "primary" ? undefined : targetId);
+              if (targetType === "proposal-detail" && onOpenProposal && targetId !== "primary") onOpenProposal(targetId);
+              if (targetType === "trace" && onReplay && targetId !== "primary") onReplay(targetId);
+            }}
+            title={text(asRecord(relationship.evidence).table || asRecord(relationship.evidence).source || relationship.kind, relationship.kind)}
+          >
+            {relationship.kind} · {targetType}:{targetId}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkforceSummaryNode({ data, workers, daemonStatus }: { data: AppData; workers: Agent[]; daemonStatus: DaemonStatus }) {
+  const failing = workers.filter((worker) => ["failing", "unstable"].includes(workerHealth(worker))).length;
+  const degraded = workers.filter((worker) => workerHealth(worker) === "degraded").length;
+  const healthy = workers.filter((worker) => workerHealth(worker) === "healthy").length;
+  return (
+    <div className="node-grid">
+      <Field label="daemon" value={daemonStatus === "offline" ? "offline" : text(data.health?.status, daemonStatus)} />
+      <Field label="active agents" value={workers.length} />
+      <Field label="healthy" value={healthy} />
+      <Field label="degraded" value={degraded} />
+      <Field label="failing" value={failing} />
+      <Field label="pending proposals" value={data.pending.length} />
+      <Field label="incidents" value={failing + (data.deadLetters.length ? 1 : 0)} />
+      <Field label="dead letters" value={data.deadLetters.length} />
+    </div>
+  );
+}
+
+function RuntimeNode({ node, workers, onView }: { node: CanvasNode; workers: Agent[]; onView: (view: View) => void }) {
+  const worker = workers.find((item) => workerId(item) === node.refId);
+  if (!worker) return <EmptyPanel label="Runtime not returned by daemon." />;
+  const reputation = workerReputation(worker);
+  return (
+    <div className="space-y-3">
+      <div className="node-grid">
+        <Field label="health" value={workerHealth(worker)} />
+        <Field label="trust" value={percent(reputation.trust_score ?? worker.trust_score ?? worker.trust)} />
+        <Field label="cost tier" value={text(worker.cost_tier || reputation.cost_tier, "medium")} />
+        <Field label="usage risk" value={text(worker.usage_risk || reputation.usage_risk, "unknown")} />
+        <Field label="latest delivery" value={text(reputation.latest_delivery_status || worker.latest_delivery_status, "none")} />
+        <Field label="incident" value={text(reputation.incident_summary || worker.incident_summary, "none")} />
+      </div>
+      <button className="btn-cyan" onClick={() => onView("workforce")}>Focus Runtime Detail</button>
+    </div>
+  );
+}
+
+function RoomNode({ node, data, selectedRoom, onSelectRoom, onView }: { node: CanvasNode; data: AppData; selectedRoom: string; onSelectRoom: (room: string) => void; onView: (view: View) => void }) {
+  const roomName = node.refId || selectedRoom;
+  const room = data.rooms.find((item) => item.name === roomName);
+  const roomProposals = data.proposals.filter((proposal) => text(proposal.room_id || proposal.room, "") === roomName);
+  return (
+    <div className="space-y-3">
+      <div className="node-grid">
+        <Field label="room" value={`#${roomName}`} />
+        <Field label="members" value={room?.member_count ?? 0} />
+        <Field label="recent messages" value="open Rooms view" />
+        <Field label="last activity" value={shortDate(room?.last_activity)} />
+      </div>
+      <textarea className="textarea canvas-textarea" placeholder="@everyone or @runtime message via Rooms view" readOnly />
+      <div className="flex gap-2">
+        <button className="btn-cyan" onClick={() => { onSelectRoom(roomName); onView("rooms"); }}>Open Room</button>
+        <span className="pill status-warn">{roomProposals.length} proposals</span>
+      </div>
+    </div>
+  );
+}
+
+function ProposalQueueNode({ proposals, onOpen, onAction, onView }: { proposals: Proposal[]; onOpen: (id: string) => void; onAction: (id: string, action: "approve" | "reject" | "execute") => void; onView: (view: View) => void }) {
+  return (
+    <div className="mini-list">
+      {proposals.slice(0, 6).map((proposal) => {
+        const id = proposalId(proposal);
+        return (
+          <div className="canvas-mini-row" key={id}>
+            <button className="link-button" onClick={() => onOpen(id)}>{text(proposal.title || proposal.summary, id)}</button>
+            <span className={`pill ${statusClass(proposal.risk || proposal.risk_level)}`}>{text(proposal.risk || proposal.risk_level, "risk")}</span>
+            <span>{text(proposal.proposed_by || proposal.proposer, "unknown")}</span>
+            <div className="flex gap-1">
+              <button className="micro-btn" onClick={() => onAction(id, "approve")}>approve</button>
+              <button className="micro-btn" onClick={() => onAction(id, "reject")}>reject</button>
+              <button className="micro-btn" onClick={() => onAction(id, "execute")}>execute</button>
+            </div>
+          </div>
+        );
+      })}
+      {!proposals.length && <EmptyPanel label="No pending proposals." />}
+      <button className="btn mt-2" onClick={() => onView("proposals")}>Open Proposal Governance</button>
+    </div>
+  );
+}
+
+function ProposalDetailNode({ node, proposal, onAction, onReplay }: { node: CanvasNode; proposal: Proposal | null; onAction: (id: string, action: "approve" | "reject" | "execute") => void; onReplay: (id: string) => void }) {
+  if (!proposal) return <EmptyPanel label="No selected proposal detail." />;
+  const id = proposalId(proposal) || node.refId || "";
+  return (
+    <div className="space-y-3">
+      <Field label="status" value={proposal.status} />
+      <Field label="risk" value={proposal.risk || proposal.risk_level} />
+      <Field label="approval reason" value={proposal.approval_reason || proposal.governance_reason} />
+      <p className="line-clamp-node text-sm text-slate-200">{text(proposal.summary || proposal.details, "No proposal summary returned.")}</p>
+      <div className="chip-row">
+        {proposalLinks(proposal).slice(0, 5).map((link) => <button className="chip" key={link} onClick={() => onReplay(link)}>{link}</button>)}
+      </div>
+      <ProposalActions id={id} onAction={onAction} />
+    </div>
+  );
+}
+
+function IncidentNode({ data, workers, onView, onReplay }: { data: AppData; workers: Agent[]; onView: (view: View) => void; onReplay: (id: string) => void }) {
+  const failing = workers.filter((worker) => ["failing", "unstable"].includes(workerHealth(worker)));
+  const latest = asRecord(data.deadLetters[0]);
+  const traceId = text(latest.message_id || latest.conversation_id || latest.dead_letter_id, "");
+  return (
+    <div className="space-y-3">
+      <Field label="latest incident" value={traceId || text(asRecord(data.incident?.incident).summary, "No incident returned.")} />
+      <Field label="failing runtimes" value={failing.map(workerId).join(", ") || "none"} />
+      <Field label="recommended action" value={failing.length ? "Inspect runtime and trace before retry." : "Monitor workforce health."} />
+      <div className="flex gap-2">
+        {traceId && <button className="btn" onClick={() => onReplay(traceId)}>Focus Trace</button>}
+        <button className="btn-cyan" onClick={() => onView("incidents")}>Open Incidents</button>
+      </div>
+    </div>
+  );
+}
+
+function TraceNode({ traceId, trace, traceError, onTraceId, onLoadTrace, onReplay }: { traceId: string; trace: TraceResponse | null; traceError: string | null; onTraceId: (id: string) => void; onLoadTrace: () => void; onReplay: (id: string) => void }) {
+  const events = ((trace?.timeline || trace?.messages || []) as unknown[]).map(asRecord).slice(0, 10);
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <input className="input" value={traceId} onChange={(event) => onTraceId(event.target.value)} placeholder="trace id" />
+        <button className="btn-cyan" onClick={onLoadTrace}>Load</button>
+      </div>
+      {traceError && <div className="text-xs text-danger">{traceError}</div>}
+      <div className="mini-list">
+        {events.map((event, index) => (
+          <div className="canvas-mini-row" key={index}>
+            <span className="text-cyanop">{text(event.event_type || event.type || event.kind, "event")}</span>
+            <span>{shortDate(event.timestamp || event.created_at)}</span>
+            <span>{text(event.source || event.actor || event.status, "recorded")}</span>
+          </div>
+        ))}
+        {!events.length && <EmptyPanel label="Load a trace to inspect summarized events." />}
+      </div>
+      {traceId && <button className="btn" onClick={() => onReplay(traceId)}>Open Replay</button>}
+    </div>
+  );
+}
+
+function DeadLetterNode({ data, onReplay }: { data: AppData; onReplay: (id: string) => void }) {
+  return (
+    <div className="mini-list">
+      <Field label="dead letters" value={data.deadLetters.length} />
+      {data.deadLetters.slice(0, 6).map((item, index) => {
+        const record = asRecord(item);
+        const id = text(record.message_id || record.conversation_id || record.dead_letter_id || record.delivery_id, "");
+        return (
+          <div className="canvas-mini-row" key={`${id}-${index}`}>
+            <span>{text(record.adapter_id || record.target || record.source, "runtime")}</span>
+            <span className="text-danger">{text(record.reason || record.error || record.status, "failed")}</span>
+            {id && <button className="micro-btn" onClick={() => onReplay(id)}>replay</button>}
+          </div>
+        );
+      })}
+      {!data.deadLetters.length && <EmptyPanel label="No dead letters returned." />}
+    </div>
   );
 }
 
@@ -1186,6 +2292,14 @@ function OfflineState({ message, onRefresh }: { message: string; onRefresh: () =
     <div className="border-b border-danger/60 bg-danger/10 px-5 py-3 font-mono text-sm text-danger">
       Daemon unavailable at {DAEMON_URL}: {message}
       <button className="btn ml-4" onClick={onRefresh}>Retry</button>
+    </div>
+  );
+}
+
+function InlineFault({ message }: { message: string }) {
+  return (
+    <div className="border-b border-amberop/50 bg-amberop/10 px-5 py-2 font-mono text-xs text-amberop">
+      Endpoint warning: {message}
     </div>
   );
 }
