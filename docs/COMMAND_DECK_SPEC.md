@@ -2,15 +2,18 @@
 
 ## Purpose
 
-The Command Deck is the Web GUI surface for SynKraken. It complements the TUI;
-it does not replace it.
+The Command Deck is the local Web GUI surface for SynKraken's AI Workforce
+Operating System. It complements the TUI and native Console; it does not
+replace either one.
 
 SynKraken Console is a separate Tauri desktop client surface. It follows the
-same daemon-owned backend contract and visual direction. Console v0.2 expands
-the desktop surface into an operator command centre for workforce visibility,
-room operations, flight recorder investigation, proposal governance, incidents,
-dead letters, and command-palette navigation. Console does not replace the Web
-Command Deck and does not add a second backend.
+same daemon-owned backend contract and visual direction. Console is the spatial
+operations console for workforce visibility, room operations, flight recorder
+investigation, proposal governance, incidents, dead letters, and
+command-palette navigation. Its canvas relationship lines and inspector jumps
+come from daemon-backed relationship records through `GET
+/v1/canvas/relationships`. Console does not replace the Web Command Deck and
+does not add a second backend.
 
 ## Console v0.2 scope
 
@@ -42,7 +45,88 @@ Console v0.2 must not read SQLite directly, mutate daemon-owned state outside
 existing APIs, add auth, add cloud features, add autonomous execution, or
 implement full memory, goal, team, decision, or handoff management.
 
-## v0.1 goals
+## Console v0.3 Operations Canvas scope
+
+Operations Canvas represents daemon-owned objects as movable node panels on a
+dark 24px dot-grid canvas. It uses React/TypeScript UI state only; Rust remains
+the Tauri shell and packaging boundary. Layouts are saved in localStorage for
+v0.3 and are not written to the daemon.
+
+Canvas node types:
+
+- Workforce Summary
+- Runtime
+- Room
+- Proposal Queue
+- Proposal Detail
+- Incident
+- Trace
+- Dead Letter
+
+Workspace presets:
+
+- Coding: Workforce Summary, Room, Proposal Queue, Trace
+- Operations: Workforce Summary, Runtime Nodes, Incident, Dead Letters
+- Research: Room, Trace, Proposal Queue, Workforce Summary
+- Incident Response: Incident, Dead Letters, Trace, affected Runtime Nodes,
+  Proposal Queue
+
+Canvas behavior:
+
+- pan and zoom
+- move nodes
+- select and focus nodes
+- fit to view
+- reset layout
+- save and restore layout locally
+- render simple relationship lines where daemon data exposes a relationship
+
+Relationship lines are visual hints only. They may link proposals to traces,
+proposals to runtime proposers, incidents to dead letters, rooms to proposals,
+runtimes to incidents, and traces to dead letters when existing API fields
+support the inference. Missing relationship data must be omitted rather than
+mocked.
+
+Existing v0.2 screens remain accessible from the left navigation as detail and
+backstop views: Workforce, Rooms, Proposals, Trace, and Incidents.
+
+## Console v0.4 Canvas drilldown scope
+
+Console v0.4 keeps the v0.3 canvas foundation and adds:
+
+- Canvas Inspector for the selected node
+- object focus/search input on the canvas toolbar
+- toolbar add-node control for supported v0.3 node types
+- command-palette add/focus commands for runtime, room, proposal, trace,
+  incident, dead-letter, workforce, and proposal queue nodes
+- local clear saved layout control
+- related object jumps where current daemon records expose ids
+
+The inspector may show richer fields and object links, but it must not become a
+client-owned business model. It reads currently loaded daemon responses and
+links back to existing legacy/detail screens where full workflows already
+exist.
+
+## Console v0.5 real relationship scope
+
+Console v0.5 adds `GET /v1/canvas/relationships`, a daemon read model over
+persisted SynKraken records. Relationship records include source type/id,
+target type/id, relationship kind, status/tone, evidence, and observed
+timestamp where available.
+
+Relationship sources include:
+
+- proposals and their proposer, room, and linked message ids
+- proposal queue membership from persisted proposal status
+- dead letters and their failed message/runtime ids
+- runtime reputation incident state
+- latest incident anchors
+
+Canvas relationship lines and inspector jumps must use these daemon
+relationship records. If the daemon returns no relationship for an object, the
+canvas omits the relationship rather than inventing one in the client.
+
+## Web Command Deck goals
 
 Provide a browser-based local operator surface that:
 

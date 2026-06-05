@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 import json
@@ -13,10 +14,15 @@ AGENT_STATUSES = {"configured", "online", "idle", "working", "blocked", "offline
 AGENT_COST_TIERS = {"cheap", "medium", "premium", "local"}
 USAGE_RISKS = {"low", "medium", "high"}
 AGENT_PROFILE_ROLES = {"owner", "reviewer", "guardrail", "token_police", "summary", "ops"}
-SHARED_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
+SHARED_MEMORY_STATUSES = {"proposed", "approved", "peer_approved", "rejected", "archived"}
 DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
 HANDOFF_STATUSES = {"pending", "accepted", "rejected", "completed"}
 PROPOSAL_STATUSES = {"proposed", "approved", "rejected", "executed", "expired", "cancelled"}
+MISSION_STATUSES = {"proposed", "active", "blocked", "review", "completed", "cancelled"}
+MISSION_PRIORITIES = {"low", "medium", "high", "critical"}
+OUTCOME_STATUSES = {"not_started", "in_progress", "review", "completed", "blocked", "cancelled"}
+OUTCOME_CONFIDENCE = {"low", "medium", "high"}
+ASSIGNMENT_STATUSES = {"assigned", "in_progress", "waiting", "blocked", "handoff", "review", "completed", "cancelled"}
 PROPOSAL_TYPES = {
     "shell", "git", "restart", "delete", "write", "replay", "retry",
     "memory_promotion", "room_summary_promotion", "file_write", "delete_file",
@@ -25,9 +31,16 @@ PROPOSAL_TYPES = {
 RUNTIME_HEALTH_STATUSES = {"healthy", "degraded", "unstable", "failing"}
 RUNTIME_REPUTATION_RECENT_WINDOW = 100
 RUNTIME_REPUTATION_MIN_SAMPLE_SIZE = 5
-SHARED_MEMORY_TYPES = {
+LEGACY_SHARED_MEMORY_TYPES = {
     "fact", "decision", "preference", "rule", "lesson", "technical_note", "project_context",
 }
+SHARED_MEMORY_TYPES = {
+    *LEGACY_SHARED_MEMORY_TYPES,
+    "operator_note", "room_summary", "decision_memory", "handoff_memory",
+    "mission_context", "outcome_context", "assignment_context", "runtime_observation",
+}
+SHARED_MEMORY_IMPORTANCE = {"low", "medium", "high", "critical"}
+SHARED_MEMORY_SCOPES = {"global", "room", "mission", "outcome", "assignment", "runtime"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -121,11 +134,20 @@ CREATE TABLE IF NOT EXISTS shared_memory (
     room_name TEXT NULL,
     workspace TEXT NULL,
     memory_type TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    scope_type TEXT NOT NULL DEFAULT 'global',
+    scope_id TEXT,
+    source_type TEXT NOT NULL DEFAULT 'operator',
+    source_id TEXT,
     status TEXT NOT NULL,
+    importance TEXT NOT NULL DEFAULT 'medium',
     confidence INTEGER DEFAULT 0,
     created_by TEXT,
     created_at TEXT,
+    updated_at TEXT,
+    expires_at TEXT,
     reviewed_by TEXT NULL,
     review_result TEXT NULL,
     review_reason TEXT NULL,
@@ -362,6 +384,236 @@ CREATE INDEX IF NOT EXISTS idx_runtime_registry_type ON runtime_registry(runtime
 CREATE INDEX IF NOT EXISTS idx_runtime_reputation_health ON runtime_reputation(health_status);
 CREATE INDEX IF NOT EXISTS idx_workspace_packs_name ON workspace_packs(name);
 
+CREATE TABLE IF NOT EXISTS missions (
+    mission_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    goal TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    risk_level TEXT NOT NULL DEFAULT 'medium'
+);
+
+CREATE TABLE IF NOT EXISTS mission_workers (
+    mission_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT '',
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (mission_id, adapter_id),
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_rooms (
+    mission_id TEXT NOT NULL,
+    room_name TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (mission_id, room_name),
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_traces (
+    mission_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (mission_id, trace_id),
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_incidents (
+    mission_id TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    incident_type TEXT NOT NULL DEFAULT '',
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (mission_id, incident_id),
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_proposals (
+    mission_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (mission_id, proposal_id),
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE,
+    FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_relationships (
+    relationship_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mission_events (
+    event_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
+CREATE INDEX IF NOT EXISTS idx_missions_updated ON missions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mission_workers_worker ON mission_workers(adapter_id);
+CREATE INDEX IF NOT EXISTS idx_mission_rooms_room ON mission_rooms(room_name);
+CREATE INDEX IF NOT EXISTS idx_mission_traces_trace ON mission_traces(trace_id);
+CREATE INDEX IF NOT EXISTS idx_mission_incidents_incident ON mission_incidents(incident_id);
+CREATE INDEX IF NOT EXISTS idx_mission_proposals_proposal ON mission_proposals(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_mission_relationships_mission ON mission_relationships(mission_id);
+CREATE INDEX IF NOT EXISTS idx_mission_events_created ON mission_events(created_at);
+
+CREATE TABLE IF NOT EXISTS outcomes (
+    outcome_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    owner TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_workers (
+    outcome_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT '',
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (outcome_id, adapter_id),
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_traces (
+    outcome_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (outcome_id, trace_id),
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_incidents (
+    outcome_id TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    incident_type TEXT NOT NULL DEFAULT '',
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (outcome_id, incident_id),
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_proposals (
+    outcome_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (outcome_id, proposal_id),
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE,
+    FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_relationships (
+    relationship_id TEXT PRIMARY KEY,
+    outcome_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outcome_events (
+    event_id TEXT PRIMARY KEY,
+    outcome_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_mission ON outcomes(mission_id);
+CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
+CREATE INDEX IF NOT EXISTS idx_outcomes_updated ON outcomes(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_outcome_workers_worker ON outcome_workers(adapter_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_traces_trace ON outcome_traces(trace_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_incidents_incident ON outcome_incidents(incident_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_proposals_proposal ON outcome_proposals(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_relationships_outcome ON outcome_relationships(outcome_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_events_created ON outcome_events(created_at);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    assignment_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    owner_worker TEXT NOT NULL,
+    mission_id TEXT,
+    outcome_id TEXT,
+    room_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assignment_contributors (
+    assignment_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, worker_id),
+    FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS assignment_events (
+    event_id TEXT PRIMARY KEY,
+    assignment_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'operator',
+    old_value TEXT,
+    new_value TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS assignment_proposals (
+    assignment_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, proposal_id),
+    FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE,
+    FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS assignment_traces (
+    assignment_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, trace_id),
+    FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_assignments_status ON assignments(status);
+CREATE INDEX IF NOT EXISTS idx_assignments_owner ON assignments(owner_worker);
+CREATE INDEX IF NOT EXISTS idx_assignments_mission ON assignments(mission_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_outcome ON assignments(outcome_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_room ON assignments(room_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_updated ON assignments(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_assignment_contributors_worker ON assignment_contributors(worker_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_events_assignment ON assignment_events(assignment_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_events_created ON assignment_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_assignment_proposals_proposal ON assignment_proposals(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_traces_trace ON assignment_traces(trace_id);
+
 CREATE TABLE IF NOT EXISTS decisions (
     id TEXT PRIMARY KEY,
     decision_id TEXT UNIQUE,
@@ -371,6 +623,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     room_id TEXT,
     room_name TEXT,
     task_id TEXT,
+    assignment_id TEXT,
     goal_id TEXT,
     proposed_by TEXT,
     approved_by TEXT,
@@ -592,6 +845,15 @@ class Storage:
             row["name"] for row in self._conn.execute("PRAGMA table_info(shared_memory)").fetchall()
         }
         shared_additions = {
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "body": "TEXT NOT NULL DEFAULT ''",
+            "scope_type": "TEXT NOT NULL DEFAULT 'global'",
+            "scope_id": "TEXT",
+            "source_type": "TEXT NOT NULL DEFAULT 'operator'",
+            "source_id": "TEXT",
+            "importance": "TEXT NOT NULL DEFAULT 'medium'",
+            "updated_at": "TEXT",
+            "expires_at": "TEXT",
             "token_cost_estimate": "INTEGER DEFAULT 0",
             "use_count": "INTEGER DEFAULT 0",
             "last_used_at": "TEXT",
@@ -599,7 +861,14 @@ class Storage:
         for column, definition in shared_additions.items():
             if column not in shared_columns:
                 self._conn.execute(f"ALTER TABLE shared_memory ADD COLUMN {column} {definition}")
+        self._conn.execute("UPDATE shared_memory SET body = content WHERE COALESCE(body, '') = ''")
+        self._conn.execute("UPDATE shared_memory SET title = substr(content, 1, 80) WHERE COALESCE(title, '') = ''")
+        self._conn.execute("UPDATE shared_memory SET status = 'approved' WHERE status = 'peer_approved'")
+        self._conn.execute("UPDATE shared_memory SET updated_at = COALESCE(reviewed_at, approved_at, created_at) WHERE updated_at IS NULL")
+        self._conn.execute("UPDATE shared_memory SET scope_type = 'room', scope_id = room_name WHERE room_name IS NOT NULL AND (scope_id IS NULL OR scope_id = '')")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id ON memory_events(memory_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_memory_scope ON shared_memory(scope_type, scope_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_shared_memory_importance ON shared_memory(importance)")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runtime_reputation (
@@ -679,6 +948,9 @@ class Storage:
         self._migrate_decision_schema()
         self._migrate_handoff_schema()
         self._migrate_proposal_schema()
+        self._migrate_mission_schema()
+        self._migrate_outcome_schema()
+        self._migrate_assignment_schema()
 
     def _migrate_decision_schema(self) -> None:
         columns = {
@@ -723,6 +995,7 @@ class Storage:
             "room_id": "TEXT",
             "room_name": "TEXT",
             "task_id": "TEXT",
+            "assignment_id": "TEXT",
             "goal_id": "TEXT",
             "from_agent": "TEXT",
             "to_agent": "TEXT",
@@ -756,6 +1029,7 @@ class Storage:
         self._conn.execute("UPDATE handoff_events SET id = event_id WHERE (id IS NULL OR id = '') AND event_id IS NOT NULL")
         self._conn.execute("UPDATE handoff_events SET event_id = id WHERE (event_id IS NULL OR event_id = '') AND id IS NOT NULL")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_room_id ON handoffs(room_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_assignment ON handoffs(assignment_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_created_at ON handoffs(created_at DESC)")
 
     def _migrate_proposal_schema(self) -> None:
@@ -809,6 +1083,231 @@ class Storage:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_at DESC)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_events_proposal ON proposal_events(proposal_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_events_created ON proposal_events(created_at)")
+
+    def _migrate_mission_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS missions (
+                mission_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT '',
+                goal TEXT NOT NULL DEFAULT '',
+                outcome TEXT NOT NULL DEFAULT '',
+                risk_level TEXT NOT NULL DEFAULT 'medium'
+            );
+            CREATE TABLE IF NOT EXISTS mission_workers (
+                mission_id TEXT NOT NULL,
+                adapter_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT '',
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, adapter_id),
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_rooms (
+                mission_id TEXT NOT NULL,
+                room_name TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, room_name),
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_traces (
+                mission_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, trace_id),
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_incidents (
+                mission_id TEXT NOT NULL,
+                incident_id TEXT NOT NULL,
+                incident_type TEXT NOT NULL DEFAULT '',
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, incident_id),
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_proposals (
+                mission_id TEXT NOT NULL,
+                proposal_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (mission_id, proposal_id),
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE,
+                FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_relationships (
+                relationship_id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                observed_at TEXT NOT NULL,
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS mission_events (
+                event_id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL DEFAULT 'system',
+                details TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
+            CREATE INDEX IF NOT EXISTS idx_missions_updated ON missions(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_mission_workers_worker ON mission_workers(adapter_id);
+            CREATE INDEX IF NOT EXISTS idx_mission_rooms_room ON mission_rooms(room_name);
+            CREATE INDEX IF NOT EXISTS idx_mission_traces_trace ON mission_traces(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_mission_incidents_incident ON mission_incidents(incident_id);
+            CREATE INDEX IF NOT EXISTS idx_mission_proposals_proposal ON mission_proposals(proposal_id);
+            CREATE INDEX IF NOT EXISTS idx_mission_relationships_mission ON mission_relationships(mission_id);
+            CREATE INDEX IF NOT EXISTS idx_mission_events_created ON mission_events(created_at);
+            """
+        )
+
+    def _migrate_outcome_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS outcomes (
+                outcome_id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                owner TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY(mission_id) REFERENCES missions(mission_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_workers (
+                outcome_id TEXT NOT NULL,
+                adapter_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT '',
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (outcome_id, adapter_id),
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_traces (
+                outcome_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (outcome_id, trace_id),
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_incidents (
+                outcome_id TEXT NOT NULL,
+                incident_id TEXT NOT NULL,
+                incident_type TEXT NOT NULL DEFAULT '',
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (outcome_id, incident_id),
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_proposals (
+                outcome_id TEXT NOT NULL,
+                proposal_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (outcome_id, proposal_id),
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE,
+                FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_relationships (
+                relationship_id TEXT PRIMARY KEY,
+                outcome_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                observed_at TEXT NOT NULL,
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS outcome_events (
+                event_id TEXT PRIMARY KEY,
+                outcome_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL DEFAULT 'system',
+                details TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(outcome_id) REFERENCES outcomes(outcome_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_outcomes_mission ON outcomes(mission_id);
+            CREATE INDEX IF NOT EXISTS idx_outcomes_status ON outcomes(status);
+            CREATE INDEX IF NOT EXISTS idx_outcomes_updated ON outcomes(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_outcome_workers_worker ON outcome_workers(adapter_id);
+            CREATE INDEX IF NOT EXISTS idx_outcome_traces_trace ON outcome_traces(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_outcome_incidents_incident ON outcome_incidents(incident_id);
+            CREATE INDEX IF NOT EXISTS idx_outcome_proposals_proposal ON outcome_proposals(proposal_id);
+            CREATE INDEX IF NOT EXISTS idx_outcome_relationships_outcome ON outcome_relationships(outcome_id);
+            CREATE INDEX IF NOT EXISTS idx_outcome_events_created ON outcome_events(created_at);
+            """
+        )
+
+    def _migrate_assignment_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS assignments (
+                assignment_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                owner_worker TEXT NOT NULL,
+                mission_id TEXT,
+                outcome_id TEXT,
+                room_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS assignment_contributors (
+                assignment_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (assignment_id, worker_id),
+                FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS assignment_events (
+                event_id TEXT PRIMARY KEY,
+                assignment_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL DEFAULT 'operator',
+                old_value TEXT,
+                new_value TEXT,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS assignment_proposals (
+                assignment_id TEXT NOT NULL,
+                proposal_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (assignment_id, proposal_id),
+                FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE,
+                FOREIGN KEY(proposal_id) REFERENCES proposals(proposal_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS assignment_traces (
+                assignment_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                linked_at TEXT NOT NULL,
+                PRIMARY KEY (assignment_id, trace_id),
+                FOREIGN KEY(assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_assignments_status ON assignments(status);
+            CREATE INDEX IF NOT EXISTS idx_assignments_owner ON assignments(owner_worker);
+            CREATE INDEX IF NOT EXISTS idx_assignments_mission ON assignments(mission_id);
+            CREATE INDEX IF NOT EXISTS idx_assignments_outcome ON assignments(outcome_id);
+            CREATE INDEX IF NOT EXISTS idx_assignments_room ON assignments(room_id);
+            CREATE INDEX IF NOT EXISTS idx_assignments_updated ON assignments(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_assignment_contributors_worker ON assignment_contributors(worker_id);
+            CREATE INDEX IF NOT EXISTS idx_assignment_events_assignment ON assignment_events(assignment_id);
+            CREATE INDEX IF NOT EXISTS idx_assignment_events_created ON assignment_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_assignment_proposals_proposal ON assignment_proposals(proposal_id);
+            CREATE INDEX IF NOT EXISTS idx_assignment_traces_trace ON assignment_traces(trace_id);
+            """
+        )
 
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
@@ -1438,6 +1937,852 @@ class Storage:
             "available_but_inactive": registry_only + disabled,
         }
 
+    @staticmethod
+    def _parse_activity_timestamp(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _presence_seconds_since(now: datetime, timestamp: str | None) -> int | None:
+        parsed = Storage._parse_activity_timestamp(timestamp)
+        if parsed is None:
+            return None
+        return max(0, int((now - parsed).total_seconds()))
+
+    @staticmethod
+    def _runtime_attention_reason(reputation: dict, enabled: bool, registry_only: bool) -> str:
+        if registry_only:
+            return "Runtime is discovered but not configured as an active worker."
+        if not enabled:
+            return "Worker is disabled or offline."
+        quality = str(reputation.get("latest_quality") or "")
+        if quality == "empty":
+            return "Empty replies detected."
+        if quality == "wrong_identity":
+            return "Identity mismatch in recent replies."
+        if int(reputation.get("timeouts") or 0) > 0:
+            return "Timeout history detected."
+        if int(reputation.get("failures") or 0) > 0:
+            return "Recent delivery failures detected."
+        if int(reputation.get("trust_score") or 100) < 50:
+            return "Trust score is low."
+        if str(reputation.get("health_status") or "healthy") in {"degraded", "unstable", "failing"}:
+            return str(reputation.get("incident_summary") or "Runtime health needs attention.")
+        return ""
+
+    @staticmethod
+    def _runtime_suggested_action(presence_state: str, attention_reason: str, current_room: str | None) -> str:
+        if presence_state in {"active", "idle"}:
+            return "No action needed."
+        if presence_state == "watching":
+            return "Monitor room activity."
+        if "Empty replies" in attention_reason:
+            return "Remove from active rooms unless needed."
+        if "Identity mismatch" in attention_reason:
+            return "Inspect latest trace before relying on replies."
+        if "Timeout" in attention_reason:
+            return "Restart adapter if this worker is needed."
+        if "delivery failures" in attention_reason:
+            return "Inspect latest trace or remove from active rooms."
+        if presence_state == "unavailable":
+            return "Enable or configure the runtime before assigning work."
+        if current_room:
+            return f"Check #{current_room} before assigning more work."
+        return "Review before assigning work."
+
+    def _latest_runtime_activity(self, runtime_id: str) -> dict | None:
+        candidates: list[dict] = []
+        with self._lock:
+            delivery = self._conn.execute(
+                """
+                SELECT d.delivery_id, d.adapter_id, d.status, d.ok, d.error, d.created_at,
+                       d.body, m.target, m.conversation_id
+                FROM deliveries d
+                LEFT JOIN messages m ON m.message_id = d.message_id
+                WHERE d.adapter_id = ?
+                ORDER BY d.created_at DESC, d.delivery_id DESC
+                LIMIT 1
+                """,
+                (runtime_id,),
+            ).fetchone()
+            message = self._conn.execute(
+                """
+                SELECT message_id, conversation_id, source, target, timestamp, body
+                FROM messages
+                WHERE source = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (runtime_id,),
+            ).fetchone()
+            proposal = self._conn.execute(
+                """
+                SELECT proposal_id, title, room_id, status, proposed_by, created_at, updated_at
+                FROM proposals
+                WHERE proposed_by = ? OR approved_by = ? OR rejected_by = ? OR executed_by = ?
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT 1
+                """,
+                (runtime_id, runtime_id, runtime_id, runtime_id),
+            ).fetchone()
+            handoff = self._conn.execute(
+                """
+                SELECT handoff_id, room_id, task_id, from_agent, to_agent, status, created_at, updated_at
+                FROM handoffs
+                WHERE from_agent = ? OR to_agent = ?
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT 1
+                """,
+                (runtime_id, runtime_id),
+            ).fetchone()
+            decision = self._conn.execute(
+                """
+                SELECT decision_id, title, room_id, status, proposed_by, approved_by, created_at, updated_at
+                FROM decisions
+                WHERE proposed_by = ? OR approved_by = ?
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT 1
+                """,
+                (runtime_id, runtime_id),
+            ).fetchone()
+            dead_letter = self._conn.execute(
+                """
+                SELECT dead_letter_id, adapter_id, reason, created_at
+                FROM dead_letters
+                WHERE adapter_id = ?
+                ORDER BY created_at DESC, dead_letter_id DESC
+                LIMIT 1
+                """,
+                (runtime_id,),
+            ).fetchone()
+        if delivery:
+            target = str(delivery["target"] or "")
+            room = target.removeprefix("room:") if target.startswith("room:") else None
+            ok = bool(delivery["ok"])
+            candidates.append({
+                "activity_type": "delivery",
+                "summary": f"{runtime_id} replied in #{room}" if ok and room else f"{runtime_id} replied" if ok else f"{runtime_id} delivery failed",
+                "timestamp": delivery["created_at"],
+                "room_id": room,
+                "goal_id": None,
+                "task_id": None,
+                "severity": "info" if ok else "warning",
+            })
+        if message:
+            target = str(message["target"] or "")
+            room = target.removeprefix("room:") if target.startswith("room:") else None
+            candidates.append({
+                "activity_type": "message",
+                "summary": f"{runtime_id} sent a message in #{room}" if room else f"{runtime_id} sent a message to {target}",
+                "timestamp": message["timestamp"],
+                "room_id": room,
+                "goal_id": None,
+                "task_id": None,
+                "severity": "info",
+            })
+        if proposal:
+            title = str(proposal["title"] or "proposal")
+            candidates.append({
+                "activity_type": "proposal",
+                "summary": f"{runtime_id} updated proposal: {title}",
+                "timestamp": proposal["updated_at"] or proposal["created_at"],
+                "room_id": proposal["room_id"],
+                "goal_id": None,
+                "task_id": None,
+                "severity": "info" if proposal["status"] in {"approved", "executed"} else "notice",
+            })
+        if handoff:
+            peer = handoff["to_agent"] if handoff["from_agent"] == runtime_id else handoff["from_agent"]
+            candidates.append({
+                "activity_type": "handoff",
+                "summary": f"{runtime_id} handoff with {peer}",
+                "timestamp": handoff["updated_at"] or handoff["created_at"],
+                "room_id": handoff["room_id"],
+                "goal_id": None,
+                "task_id": handoff["task_id"],
+                "severity": "info",
+            })
+        if decision:
+            title = str(decision["title"] or "decision")
+            candidates.append({
+                "activity_type": "decision",
+                "summary": f"{runtime_id} touched decision: {title}",
+                "timestamp": decision["updated_at"] or decision["created_at"],
+                "room_id": decision["room_id"],
+                "goal_id": None,
+                "task_id": None,
+                "severity": "info",
+            })
+        if dead_letter:
+            candidates.append({
+                "activity_type": "dead_letter",
+                "summary": f"Dead letter recorded for {runtime_id}: {dead_letter['reason']}",
+                "timestamp": dead_letter["created_at"],
+                "room_id": None,
+                "goal_id": None,
+                "task_id": None,
+                "severity": "warning",
+            })
+        candidates = [item for item in candidates if item.get("timestamp")]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: self._parse_activity_timestamp(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+        )
+
+    def workforce_presence(self, active_window_seconds: int = 300) -> dict:
+        now = datetime.now(timezone.utc)
+        agents = {str(agent["adapter_id"]): agent for agent in self.list_agents()}
+        runtimes = {str(runtime["runtime_id"]): runtime for runtime in self.list_runtimes()}
+        reputations = {str(item["runtime_id"]): item for item in self.get_all_runtime_reputations()}
+        runtime_ids = sorted(set(agents) | set(runtimes) | set(reputations))
+        workers = []
+        for runtime_id in runtime_ids:
+            agent = agents.get(runtime_id, {})
+            runtime = runtimes.get(runtime_id, {})
+            reputation = reputations.get(runtime_id) or self.get_runtime_reputation(runtime_id) or {}
+            registry_only = runtime_id in runtimes and runtime_id not in agents
+            enabled = bool(agent.get("enabled", runtime.get("enabled", True))) and not registry_only
+            health_status = str(reputation.get("health_status") or "healthy")
+            activity = self._latest_runtime_activity(runtime_id) or {}
+            latest_at = activity.get("timestamp") or agent.get("last_message_at") or reputation.get("last_seen")
+            idle_for_seconds = self._presence_seconds_since(now, latest_at)
+            current_room = agent.get("current_room") or activity.get("room_id") or None
+            current_mission = self.current_mission_for_worker(runtime_id)
+            current_outcome = self.current_outcome_for_worker(runtime_id)
+            assignment_state = self.worker_assignments(runtime_id, limit=100)
+            assignment_counts = assignment_state["counts"]
+            attention_reason = self._runtime_attention_reason(reputation, enabled, registry_only)
+            needs_attention = bool(attention_reason) and (
+                registry_only
+                or not enabled
+                or health_status in {"degraded", "unstable", "failing"}
+                or int(reputation.get("trust_score") or 100) < 50
+            )
+            recent_success = self._presence_seconds_since(now, reputation.get("last_success"))
+            if not enabled:
+                presence_state = "unavailable"
+            elif needs_attention:
+                presence_state = "needs_attention"
+            elif recent_success is not None and recent_success <= active_window_seconds:
+                presence_state = "active"
+            elif idle_for_seconds is not None and idle_for_seconds <= active_window_seconds:
+                presence_state = "active"
+            elif current_room and health_status in {"healthy", "degraded"}:
+                presence_state = "watching"
+            elif health_status in {"healthy", "degraded"}:
+                presence_state = "idle"
+            else:
+                presence_state = "unknown"
+            if activity:
+                summary = str(activity.get("summary") or "Recent activity recorded.")
+                activity_type = str(activity.get("activity_type") or "activity")
+            else:
+                summary = "No recent activity recorded."
+                activity_type = "runtime_health"
+            if needs_attention:
+                current_activity = "Needs attention"
+            elif presence_state == "active" and activity_type == "proposal":
+                current_activity = "Reviewing proposal"
+            elif presence_state == "active" and activity_type == "delivery":
+                current_activity = "Reply generated"
+            elif presence_state == "active" and current_room:
+                current_activity = "Working in room"
+            elif presence_state == "watching":
+                current_activity = "Watching room"
+            elif presence_state == "idle":
+                current_activity = "Idle"
+            elif presence_state == "unavailable":
+                current_activity = "Unavailable"
+            else:
+                current_activity = "Awaiting activity"
+            workers.append({
+                "runtime_id": runtime_id,
+                "display_name": agent.get("runtime_name") or runtime.get("display_name") or runtime_id,
+                "runtime_type": agent.get("type") or runtime.get("runtime_type") or runtime.get("adapter_type") or "unknown",
+                "status": agent.get("status") or ("enabled" if enabled else "disabled"),
+                "health_status": health_status,
+                "trust_score": int(reputation.get("trust_score") or agent.get("trust") or 100),
+                "presence_state": presence_state,
+                "current_room": current_room,
+                "current_mission": current_mission,
+                "current_outcome": current_outcome,
+                "assignment_counts": assignment_counts,
+                "current_assignment_count": assignment_counts["owned"] + assignment_counts["contributor"],
+                "owned_assignments": assignment_state["owned"],
+                "contributor_assignments": assignment_state["contributing"],
+                "assignments_waiting": assignment_counts["waiting"],
+                "assignments_blocked": assignment_counts["blocked"],
+                "assignments_in_review": assignment_counts["review"],
+                "current_task_id": agent.get("current_task_id"),
+                "current_goal_id": activity.get("goal_id"),
+                "latest_activity_type": activity_type,
+                "latest_activity_summary": summary,
+                "latest_activity_at": latest_at,
+                "current_activity": current_activity,
+                "last_meaningful_action": summary,
+                "seconds_since_activity": idle_for_seconds,
+                "last_success_at": reputation.get("last_success"),
+                "last_failure_at": reputation.get("last_failure"),
+                "idle_for_seconds": idle_for_seconds,
+                "needs_attention": needs_attention,
+                "attention_reason": attention_reason if needs_attention else "",
+                "suggested_action": self._runtime_suggested_action(presence_state, attention_reason, current_room),
+            })
+        summary_counts = {state: 0 for state in ("active", "idle", "watching", "needs_attention", "unavailable", "unknown")}
+        for worker in workers:
+            summary_counts[str(worker["presence_state"])] += 1
+        attention_worker = next((worker for worker in workers if worker["needs_attention"]), None)
+        active_worker = next((worker for worker in workers if worker["presence_state"] == "active"), None)
+        if attention_worker:
+            highest_priority = f"{attention_worker['display_name']}: {attention_worker['attention_reason']}"
+            suggested_next_action = str(attention_worker["suggested_action"])
+        elif active_worker:
+            highest_priority = str(active_worker["latest_activity_summary"])
+            suggested_next_action = "Monitor active work."
+        else:
+            highest_priority = "No active issues detected."
+            suggested_next_action = "Assign work when ready."
+        return {
+            "summary": {
+                "total": len(workers),
+                **summary_counts,
+                "highest_priority": highest_priority,
+                "suggested_next_action": suggested_next_action,
+            },
+            "workers": workers,
+            "recent_activity": self.list_recent_activity(limit=12)["activity"],
+        }
+
+    def list_recent_activity(self, limit: int = 50) -> dict:
+        limit = max(1, min(int(limit), 200))
+        records: list[dict] = []
+        with self._lock:
+            messages = self._conn.execute(
+                """
+                SELECT message_id, conversation_id, source, target, timestamp, message_type, subject
+                FROM messages
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            deliveries = self._conn.execute(
+                """
+                SELECT d.delivery_id, d.adapter_id, d.status, d.ok, d.error, d.created_at, m.target
+                FROM deliveries d
+                LEFT JOIN messages m ON m.message_id = d.message_id
+                ORDER BY d.created_at DESC, d.delivery_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            proposals = self._conn.execute(
+                """
+                SELECT proposal_id, title, room_id, status, proposed_by, created_at, updated_at
+                FROM proposals
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            handoffs = self._conn.execute(
+                """
+                SELECT handoff_id, room_id, task_id, from_agent, to_agent, status, created_at, updated_at
+                FROM handoffs
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            decisions = self._conn.execute(
+                """
+                SELECT decision_id, title, room_id, status, proposed_by, approved_by, created_at, updated_at
+                FROM decisions
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            dead_letters = self._conn.execute(
+                """
+                SELECT dead_letter_id, adapter_id, reason, created_at
+                FROM dead_letters
+                ORDER BY created_at DESC, dead_letter_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            assignment_events = self._conn.execute(
+                """
+                SELECT ae.event_id, ae.assignment_id, ae.event_type, ae.actor, ae.created_at,
+                       a.title, a.status, a.owner_worker, a.mission_id, a.outcome_id, a.room_id
+                FROM assignment_events ae
+                LEFT JOIN assignments a ON a.assignment_id = ae.assignment_id
+                ORDER BY ae.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        for row in messages:
+            target = str(row["target"] or "")
+            room_id = target.removeprefix("room:") if target.startswith("room:") else None
+            records.append({
+                "activity_id": row["message_id"],
+                "timestamp": row["timestamp"],
+                "actor": row["source"],
+                "actor_type": "runtime" if row["source"] != "operator" else "operator",
+                "activity_type": "message",
+                "summary": f"{row['source']} sent a message in #{room_id}" if room_id else f"{row['source']} sent a message to {target}",
+                "room_id": room_id,
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": row["conversation_id"],
+                "severity": "info",
+            })
+        for row in deliveries:
+            target = str(row["target"] or "")
+            room_id = target.removeprefix("room:") if target.startswith("room:") else None
+            ok = bool(row["ok"])
+            records.append({
+                "activity_id": str(row["delivery_id"]),
+                "timestamp": row["created_at"],
+                "actor": row["adapter_id"],
+                "actor_type": "runtime",
+                "activity_type": "delivery",
+                "summary": f"{row['adapter_id']} replied in #{room_id}" if ok and room_id else f"{row['adapter_id']} replied" if ok else f"{row['adapter_id']} delivery failed",
+                "room_id": room_id,
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": None,
+                "severity": "info" if ok else "warning",
+            })
+        for row in proposals:
+            records.append({
+                "activity_id": row["proposal_id"],
+                "timestamp": row["updated_at"] or row["created_at"],
+                "actor": row["proposed_by"],
+                "actor_type": "runtime",
+                "activity_type": "proposal",
+                "summary": f"{row['proposed_by']} proposed: {row['title']}",
+                "room_id": row["room_id"],
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": row["proposal_id"],
+                "trace_id": None,
+                "severity": "info" if row["status"] in {"approved", "executed"} else "notice",
+            })
+        for row in handoffs:
+            records.append({
+                "activity_id": row["handoff_id"],
+                "timestamp": row["updated_at"] or row["created_at"],
+                "actor": row["from_agent"],
+                "actor_type": "runtime",
+                "activity_type": "handoff",
+                "summary": f"{row['from_agent']} handed off to {row['to_agent']}",
+                "room_id": row["room_id"],
+                "task_id": row["task_id"],
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": None,
+                "severity": "info" if row["status"] != "rejected" else "warning",
+            })
+        for row in decisions:
+            actor = row["approved_by"] or row["proposed_by"]
+            records.append({
+                "activity_id": row["decision_id"],
+                "timestamp": row["updated_at"] or row["created_at"],
+                "actor": actor,
+                "actor_type": "runtime" if actor != "operator" else "operator",
+                "activity_type": "decision",
+                "summary": f"Decision {row['status']}: {row['title']}",
+                "room_id": row["room_id"],
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": None,
+                "severity": "info" if row["status"] == "approved" else "notice",
+            })
+        for row in dead_letters:
+            records.append({
+                "activity_id": row["dead_letter_id"],
+                "timestamp": row["created_at"],
+                "actor": row["adapter_id"],
+                "actor_type": "runtime",
+                "activity_type": "dead_letter",
+                "summary": f"Dead letter recorded for {row['adapter_id']}: {row['reason']}",
+                "room_id": None,
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": None,
+                "severity": "warning",
+            })
+        for row in assignment_events:
+            actor = str(row["actor"] or "operator")
+            title = self._activity_summary_subject(row["title"], "assignment")
+            records.append({
+                "activity_id": row["event_id"],
+                "timestamp": row["created_at"],
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "runtime",
+                "activity_type": str(row["event_type"] or "assignment"),
+                "summary": f"Assignment {row['event_type']}: {title}",
+                "room_id": row["room_id"],
+                "task_id": None,
+                "goal_id": None,
+                "proposal_id": None,
+                "trace_id": None,
+                "mission_id": row["mission_id"],
+                "outcome_id": row["outcome_id"],
+                "assignment_id": row["assignment_id"],
+                "severity": "warning" if row["status"] == "blocked" else "info",
+            })
+        records = [record for record in records if record.get("timestamp")]
+        records.sort(
+            key=lambda item: self._parse_activity_timestamp(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        records = self._attach_outcomes_to_activity(self._attach_missions_to_activity(records))
+        return {"activity": records[:limit]}
+
+    @staticmethod
+    def _activity_room_from_target(target: str | None) -> str | None:
+        value = str(target or "")
+        return value.removeprefix("room:") if value.startswith("room:") else None
+
+    @staticmethod
+    def _activity_summary_subject(value: str | None, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        return text if len(text) <= 90 else f"{text[:87]}..."
+
+    def list_live_activity(
+        self,
+        limit: int = 50,
+        *,
+        runtime: str | None = None,
+        room: str | None = None,
+        event_type: str | None = None,
+        mission: str | None = None,
+        outcome: str | None = None,
+        assignment: str | None = None,
+        active_missions: bool = False,
+    ) -> dict:
+        limit = max(1, min(int(limit), 200))
+        scan_limit = min(500, limit * 5)
+        runtime_filter = str(runtime or "").strip()
+        room_filter = str(room or "").strip().removeprefix("#")
+        event_filter = str(event_type or "").strip()
+        mission_filter = str(mission or "").strip()
+        outcome_filter = str(outcome or "").strip()
+        assignment_filter = str(assignment or "").strip()
+        records: list[dict] = []
+        with self._lock:
+            messages = self._conn.execute(
+                """
+                SELECT message_id, conversation_id, source, target, timestamp, body, metadata_json
+                FROM messages
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            deliveries = self._conn.execute(
+                """
+                SELECT d.delivery_id, d.adapter_id, d.status, d.ok, d.error, d.created_at,
+                       d.duration_ms, m.target, m.conversation_id
+                FROM deliveries d
+                LEFT JOIN messages m ON m.message_id = d.message_id
+                ORDER BY d.created_at DESC, d.delivery_id DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            proposals = self._conn.execute(
+                """
+                SELECT proposal_id, title, summary, room_id, status, proposed_by, created_at, updated_at
+                FROM proposals
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            proposal_events = self._conn.execute(
+                """
+                SELECT pe.event_id, pe.proposal_id, pe.event_type, pe.actor, pe.created_at,
+                       p.title, p.room_id, p.proposed_by
+                FROM proposal_events pe
+                LEFT JOIN proposals p ON p.proposal_id = pe.proposal_id
+                ORDER BY pe.created_at DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            handoffs = self._conn.execute(
+                """
+                SELECT handoff_id, room_id, task_id, from_agent, to_agent, status, summary, created_at, updated_at
+                FROM handoffs
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            decisions = self._conn.execute(
+                """
+                SELECT decision_id, title, room_id, status, proposed_by, approved_by, created_at, updated_at
+                FROM decisions
+                ORDER BY COALESCE(updated_at, created_at) DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            dead_letters = self._conn.execute(
+                """
+                SELECT dead_letter_id, adapter_id, reason, created_at
+                FROM dead_letters
+                ORDER BY created_at DESC, dead_letter_id DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+            assignment_events = self._conn.execute(
+                """
+                SELECT ae.event_id, ae.assignment_id, ae.event_type, ae.actor, ae.created_at,
+                       a.title, a.status, a.owner_worker, a.mission_id, a.outcome_id, a.room_id
+                FROM assignment_events ae
+                LEFT JOIN assignments a ON a.assignment_id = ae.assignment_id
+                ORDER BY ae.created_at DESC
+                LIMIT ?
+                """,
+                (scan_limit,),
+            ).fetchall()
+        for row in messages:
+            row_room = self._activity_room_from_target(row["target"])
+            actor = str(row["source"] or "unknown")
+            target = str(row["target"] or "")
+            records.append({
+                "activity_id": row["message_id"],
+                "runtime": actor if actor != "operator" and not actor.startswith("synkraken-") else None,
+                "room": row_room,
+                "event_type": "message",
+                "timestamp": row["timestamp"],
+                "summary": f"{actor} posted in #{row_room}" if row_room else f"{actor} sent message to {target}",
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "system" if actor.startswith("synkraken-") else "runtime",
+                "severity": "info",
+                "trace_id": row["conversation_id"],
+            })
+        for row in deliveries:
+            row_room = self._activity_room_from_target(row["target"])
+            actor = str(row["adapter_id"] or "runtime")
+            status = str(row["status"] or "")
+            ok = bool(row["ok"])
+            if status == "timeout" or str(row["error"] or "").lower().find("timeout") >= 0:
+                summary = f"{actor} timeout"
+                kind = "timeout"
+                severity = "warning"
+            elif ok:
+                summary = f"{actor} replied in #{row_room}" if row_room else f"{actor} replied"
+                kind = "reply"
+                severity = "info"
+            else:
+                summary = f"{actor} delivery failed"
+                kind = "delivery_failed"
+                severity = "warning"
+            records.append({
+                "activity_id": str(row["delivery_id"]),
+                "runtime": actor,
+                "room": row_room,
+                "event_type": kind,
+                "timestamp": row["created_at"],
+                "summary": summary,
+                "actor": actor,
+                "actor_type": "runtime",
+                "severity": severity,
+                "trace_id": row["conversation_id"],
+            })
+        for row in proposals:
+            actor = str(row["proposed_by"] or "runtime")
+            title = self._activity_summary_subject(row["title"] or row["summary"], "proposal")
+            status = str(row["status"] or "proposed")
+            records.append({
+                "activity_id": row["proposal_id"],
+                "runtime": actor if actor != "operator" else None,
+                "room": row["room_id"],
+                "event_type": "proposal",
+                "timestamp": row["updated_at"] or row["created_at"],
+                "summary": f"{actor} created proposal: {title}" if status == "proposed" else f"{actor} updated proposal: {title}",
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "runtime",
+                "severity": "notice" if status == "proposed" else "info",
+                "proposal_id": row["proposal_id"],
+            })
+        for row in proposal_events:
+            actor = str(row["actor"] or "operator")
+            raw_type = str(row["event_type"] or "proposal_event")
+            title = self._activity_summary_subject(row["title"], "proposal")
+            if actor == "operator" and raw_type in {"approved", "proposal_approved", "approve"}:
+                summary = f"Operator approved proposal: {title}"
+                kind = "proposal_approved"
+            elif actor == "operator" and raw_type in {"rejected", "proposal_rejected", "reject"}:
+                summary = f"Operator rejected proposal: {title}"
+                kind = "proposal_rejected"
+            elif actor == "operator" and raw_type in {"executed", "proposal_executed", "execute"}:
+                summary = f"Operator executed proposal: {title}"
+                kind = "proposal_executed"
+            elif raw_type in {"proposed", "proposal_created", "created"}:
+                summary = f"{actor} created proposal: {title}"
+                kind = "proposal"
+            else:
+                summary = f"{actor} recorded proposal event: {raw_type}"
+                kind = raw_type
+            records.append({
+                "activity_id": row["event_id"],
+                "runtime": None if actor == "operator" else actor,
+                "room": row["room_id"],
+                "event_type": kind,
+                "timestamp": row["created_at"],
+                "summary": summary,
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "runtime",
+                "severity": "info" if "approved" in kind or "executed" in kind else "notice",
+                "proposal_id": row["proposal_id"],
+            })
+        for row in handoffs:
+            actor = str(row["from_agent"] or "runtime")
+            records.append({
+                "activity_id": row["handoff_id"],
+                "runtime": actor,
+                "room": row["room_id"],
+                "event_type": "handoff",
+                "timestamp": row["updated_at"] or row["created_at"],
+                "summary": f"{actor} handed off to {row['to_agent']}",
+                "actor": actor,
+                "actor_type": "runtime",
+                "severity": "info" if row["status"] != "rejected" else "warning",
+                "task_id": row["task_id"],
+            })
+        for row in decisions:
+            actor = str(row["approved_by"] or row["proposed_by"] or "operator")
+            records.append({
+                "activity_id": row["decision_id"],
+                "runtime": None if actor == "operator" else actor,
+                "room": row["room_id"],
+                "event_type": "decision",
+                "timestamp": row["updated_at"] or row["created_at"],
+                "summary": f"Decision {row['status']}: {self._activity_summary_subject(row['title'], 'decision')}",
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "runtime",
+                "severity": "info" if row["status"] == "approved" else "notice",
+            })
+        for row in dead_letters:
+            actor = str(row["adapter_id"] or "runtime")
+            records.append({
+                "activity_id": str(row["dead_letter_id"]),
+                "runtime": actor,
+                "room": None,
+                "event_type": "dead_letter",
+                "timestamp": row["created_at"],
+                "summary": f"{actor} dead letter: {row['reason']}",
+                "actor": actor,
+                "actor_type": "runtime",
+                "severity": "warning",
+                "incident_id": str(row["dead_letter_id"]),
+            })
+        for row in assignment_events:
+            actor = str(row["actor"] or "operator")
+            raw_type = str(row["event_type"] or "assignment")
+            title = self._activity_summary_subject(row["title"], "assignment")
+            records.append({
+                "activity_id": row["event_id"],
+                "runtime": None if actor == "operator" else actor,
+                "room": row["room_id"],
+                "event_type": f"assignment_{raw_type}" if not raw_type.startswith("assignment") else raw_type,
+                "timestamp": row["created_at"],
+                "summary": f"Assignment {raw_type}: {title}",
+                "actor": actor,
+                "actor_type": "operator" if actor == "operator" else "runtime",
+                "severity": "warning" if row["status"] == "blocked" else "info",
+                "mission_id": row["mission_id"],
+                "mission_ids": [row["mission_id"]] if row["mission_id"] else [],
+                "outcome_id": row["outcome_id"],
+                "outcome_ids": [row["outcome_id"]] if row["outcome_id"] else [],
+                "assignment_id": row["assignment_id"],
+                "assignment_ids": [row["assignment_id"]] if row["assignment_id"] else [],
+            })
+        records = self._attach_outcomes_to_activity(self._attach_missions_to_activity(records))
+        active_mission_ids: set[str] = set()
+        if active_missions:
+            with self._lock:
+                active_mission_ids = {
+                    str(row["mission_id"])
+                    for row in self._conn.execute("SELECT mission_id FROM missions WHERE status = 'active'").fetchall()
+                }
+        filtered = []
+        for record in records:
+            if not record.get("timestamp"):
+                continue
+            if runtime_filter and record.get("runtime") != runtime_filter and record.get("actor") != runtime_filter:
+                continue
+            if room_filter and record.get("room") != room_filter:
+                continue
+            if event_filter and record.get("event_type") != event_filter:
+                continue
+            if mission_filter and mission_filter not in (record.get("mission_ids") or []):
+                continue
+            if outcome_filter and outcome_filter not in (record.get("outcome_ids") or []):
+                continue
+            if assignment_filter and assignment_filter not in (record.get("assignment_ids") or []) and record.get("assignment_id") != assignment_filter:
+                continue
+            if active_missions and not (active_mission_ids & set(record.get("mission_ids") or [])):
+                continue
+            filtered.append(record)
+        filtered.sort(
+            key=lambda item: self._parse_activity_timestamp(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        now = datetime.now(timezone.utc)
+        recent_window = [
+            item for item in filtered
+            if (self._presence_seconds_since(now, item.get("timestamp")) or 10**9) <= 900
+        ]
+        active_now = sorted({
+            str(item.get("runtime"))
+            for item in recent_window
+            if item.get("runtime")
+        })
+        return {
+            "activity": filtered[:limit],
+            "summary": {
+                "active_workers": len(active_now),
+                "active_worker_ids": active_now,
+                "recent_events": len(recent_window),
+                "last_activity_at": filtered[0]["timestamp"] if filtered else None,
+                "last_activity_seconds_ago": self._presence_seconds_since(now, filtered[0]["timestamp"]) if filtered else None,
+            },
+            "filters": {
+                "runtime": runtime_filter or None,
+                "room": room_filter or None,
+                "event_type": event_filter or None,
+                "mission": mission_filter or None,
+                "outcome": outcome_filter or None,
+                "assignment": assignment_filter or None,
+                "active_missions": active_missions,
+            },
+        }
+
     def latest_incident_anchor(self) -> dict | None:
         with self._lock:
             dead = self._conn.execute(
@@ -1464,6 +2809,991 @@ class Storage:
         if not candidates:
             return None
         return max(candidates, key=lambda item: (item.get("created_at") or "", int(item.get("incident_id") or 0)))
+
+    def list_canvas_relationships(self, limit: int = 500) -> list[dict]:
+        relationships: list[dict] = []
+        seen: set[str] = set()
+
+        def tone_for_status(status: str | None, risk: str | None = None) -> str:
+            clean_status = str(status or "").lower()
+            clean_risk = str(risk or "").lower()
+            if clean_status in {"rejected", "cancelled", "expired", "failed", "timeout"}:
+                return "failing"
+            if clean_risk in {"high", "critical"}:
+                return "failing"
+            if clean_status in {"proposed", "approved"}:
+                return "pending"
+            if clean_risk in {"medium", "moderate"}:
+                return "pending"
+            return "normal"
+
+        def add(
+            *,
+            source_type: str,
+            source_id: str,
+            target_type: str,
+            target_id: str,
+            kind: str,
+            tone: str,
+            evidence: dict,
+            observed_at: str | None,
+        ) -> None:
+            if not source_id or not target_id:
+                return
+            relationship_id = f"{source_type}:{source_id}:{kind}:{target_type}:{target_id}"
+            if relationship_id in seen:
+                return
+            seen.add(relationship_id)
+            relationships.append({
+                "id": relationship_id,
+                "source_type": source_type,
+                "source_id": source_id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "kind": kind,
+                "tone": tone,
+                "status": tone,
+                "evidence": evidence,
+                "observed_at": observed_at,
+            })
+
+        proposals = self.list_proposals(limit=limit)
+        for proposal in proposals:
+            proposal_id = str(proposal.get("proposal_id") or "")
+            tone = tone_for_status(str(proposal.get("status") or ""), str(proposal.get("risk_level") or ""))
+            evidence = {
+                "table": "proposals",
+                "proposal_id": proposal_id,
+                "status": proposal.get("status"),
+                "risk_level": proposal.get("risk_level"),
+            }
+            add(
+                source_type="proposal-detail",
+                source_id=proposal_id,
+                target_type="runtime",
+                target_id=str(proposal.get("proposed_by") or ""),
+                kind="proposed_by",
+                tone=tone,
+                evidence=evidence,
+                observed_at=str(proposal.get("created_at") or ""),
+            )
+            add(
+                source_type="proposal-queue",
+                source_id="primary",
+                target_type="proposal-detail",
+                target_id=proposal_id,
+                kind="contains_proposal",
+                tone=tone,
+                evidence=evidence,
+                observed_at=str(proposal.get("created_at") or ""),
+            )
+            room_id = str(proposal.get("room_id") or "")
+            if room_id:
+                add(
+                    source_type="room",
+                    source_id=room_id,
+                    target_type="proposal-detail",
+                    target_id=proposal_id,
+                    kind="has_proposal",
+                    tone=tone,
+                    evidence=evidence | {"room_id": room_id},
+                    observed_at=str(proposal.get("created_at") or ""),
+                )
+                add(
+                    source_type="proposal-detail",
+                    source_id=proposal_id,
+                    target_type="room",
+                    target_id=room_id,
+                    kind="in_room",
+                    tone=tone,
+                    evidence=evidence | {"room_id": room_id},
+                    observed_at=str(proposal.get("created_at") or ""),
+                )
+            for message_id in proposal.get("linked_message_ids") or []:
+                add(
+                    source_type="proposal-detail",
+                    source_id=proposal_id,
+                    target_type="trace",
+                    target_id=str(message_id),
+                    kind="linked_message_trace",
+                    tone=tone,
+                    evidence=evidence | {"message_id": message_id},
+                    observed_at=str(proposal.get("created_at") or ""),
+                )
+
+        for dead_letter in self.list_dead_letters(limit=limit).get("dead_letters", []):
+            dead_letter_id = str(dead_letter.get("dead_letter_id") or "")
+            message_id = str(dead_letter.get("message_id") or "")
+            adapter_id = str(dead_letter.get("adapter_id") or "")
+            evidence = {
+                "table": "dead_letters",
+                "dead_letter_id": dead_letter_id,
+                "message_id": message_id,
+                "adapter_id": adapter_id,
+                "reason": dead_letter.get("reason"),
+            }
+            add(
+                source_type="dead-letter",
+                source_id="primary",
+                target_type="trace",
+                target_id=message_id,
+                kind="failed_message_trace",
+                tone="failing",
+                evidence=evidence,
+                observed_at=str(dead_letter.get("created_at") or ""),
+            )
+            add(
+                source_type="trace",
+                source_id=message_id,
+                target_type="dead-letter",
+                target_id="primary",
+                kind="has_dead_letter",
+                tone="failing",
+                evidence=evidence,
+                observed_at=str(dead_letter.get("created_at") or ""),
+            )
+            add(
+                source_type="dead-letter",
+                source_id="primary",
+                target_type="runtime",
+                target_id=adapter_id,
+                kind="failed_runtime",
+                tone="failing",
+                evidence=evidence,
+                observed_at=str(dead_letter.get("created_at") or ""),
+            )
+
+        for reputation in self.get_all_runtime_reputations():
+            status = str(reputation.get("health_status") or "healthy")
+            if status not in {"degraded", "unstable", "failing"}:
+                continue
+            runtime_id = str(reputation.get("runtime_id") or "")
+            tone = "failing" if status in {"unstable", "failing"} else "pending"
+            add(
+                source_type="runtime",
+                source_id=runtime_id,
+                target_type="incident",
+                target_id="primary",
+                kind="has_runtime_incident",
+                tone=tone,
+                evidence={
+                    "table": "runtime_reputation",
+                    "runtime_id": runtime_id,
+                    "health_status": status,
+                    "incident_summary": reputation.get("incident_summary"),
+                },
+                observed_at=str(reputation.get("updated_at") or reputation.get("last_failure") or ""),
+            )
+
+        anchor = self.latest_incident_anchor()
+        if anchor:
+            message_id = str(anchor.get("message_id") or "")
+            adapter_id = str(anchor.get("adapter_id") or "")
+            tone = "failing"
+            evidence = {"source": "latest_incident_anchor"} | anchor
+            add(
+                source_type="incident",
+                source_id="primary",
+                target_type="trace",
+                target_id=message_id,
+                kind="latest_incident_trace",
+                tone=tone,
+                evidence=evidence,
+                observed_at=str(anchor.get("created_at") or ""),
+            )
+            add(
+                source_type="incident",
+                source_id="primary",
+                target_type="runtime",
+                target_id=adapter_id,
+                kind="latest_incident_runtime",
+                tone=tone,
+                evidence=evidence,
+                observed_at=str(anchor.get("created_at") or ""),
+            )
+            add(
+                source_type="incident",
+                source_id="primary",
+                target_type="dead-letter",
+                target_id="primary",
+                kind="latest_incident_dead_letter",
+                tone=tone,
+                evidence=evidence,
+                observed_at=str(anchor.get("created_at") or ""),
+            )
+
+        for mission in self.list_missions(limit=limit):
+            mission_id = str(mission.get("mission_id") or "")
+            status = str(mission.get("status") or "")
+            tone = "failing" if status == "blocked" else "pending" if status in {"proposed", "review"} else "normal"
+            mission_evidence = {
+                "table": "missions",
+                "mission_id": mission_id,
+                "status": status,
+                "priority": mission.get("priority"),
+            }
+            for worker in mission.get("workers") or []:
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="runtime",
+                    target_id=str(worker.get("adapter_id") or ""),
+                    kind="involves_worker",
+                    tone=tone,
+                    evidence=mission_evidence | {"adapter_id": worker.get("adapter_id")},
+                    observed_at=str(worker.get("linked_at") or mission.get("updated_at") or ""),
+                )
+            for room in mission.get("rooms") or []:
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="room",
+                    target_id=str(room.get("room_name") or ""),
+                    kind="uses_room",
+                    tone=tone,
+                    evidence=mission_evidence | {"room_name": room.get("room_name")},
+                    observed_at=str(room.get("linked_at") or mission.get("updated_at") or ""),
+                )
+            for proposal in mission.get("proposals") or []:
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="proposal-detail",
+                    target_id=str(proposal.get("proposal_id") or ""),
+                    kind="has_proposal",
+                    tone=tone_for_status(str(proposal.get("status") or ""), str(proposal.get("risk_level") or "")),
+                    evidence=mission_evidence | {"proposal_id": proposal.get("proposal_id")},
+                    observed_at=str(proposal.get("linked_at") or proposal.get("updated_at") or ""),
+                )
+            for incident in mission.get("incidents") or []:
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="incident",
+                    target_id="primary",
+                    kind="impacted_by_incident",
+                    tone="failing",
+                    evidence=mission_evidence | {"incident_id": incident.get("incident_id")},
+                    observed_at=str(incident.get("linked_at") or mission.get("updated_at") or ""),
+                )
+            for outcome in mission.get("outcomes") or []:
+                outcome_id = str(outcome.get("outcome_id") or "")
+                outcome_status = str(outcome.get("status") or "")
+                outcome_tone = "failing" if outcome_status == "blocked" else "pending" if outcome_status in {"not_started", "in_progress", "review"} else "normal"
+                outcome_evidence = mission_evidence | {
+                    "table": "outcomes",
+                    "outcome_id": outcome_id,
+                    "outcome_status": outcome_status,
+                    "confidence": outcome.get("confidence"),
+                }
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="outcome",
+                    target_id=outcome_id,
+                    kind="has_outcome",
+                    tone=outcome_tone,
+                    evidence=outcome_evidence,
+                    observed_at=str(outcome.get("updated_at") or mission.get("updated_at") or ""),
+                )
+                for worker in outcome.get("workers") or []:
+                    add(
+                        source_type="outcome",
+                        source_id=outcome_id,
+                        target_type="runtime",
+                        target_id=str(worker.get("adapter_id") or ""),
+                        kind="contributed_by",
+                        tone=outcome_tone,
+                        evidence=outcome_evidence | {"adapter_id": worker.get("adapter_id")},
+                        observed_at=str(worker.get("linked_at") or outcome.get("updated_at") or ""),
+                    )
+                for proposal in outcome.get("proposals") or []:
+                    add(
+                        source_type="outcome",
+                        source_id=outcome_id,
+                        target_type="proposal-detail",
+                        target_id=str(proposal.get("proposal_id") or ""),
+                        kind="has_proposal",
+                        tone=tone_for_status(str(proposal.get("status") or ""), str(proposal.get("risk_level") or "")),
+                        evidence=outcome_evidence | {"proposal_id": proposal.get("proposal_id")},
+                        observed_at=str(proposal.get("linked_at") or proposal.get("updated_at") or ""),
+                    )
+                for incident in outcome.get("incidents") or []:
+                    add(
+                        source_type="outcome",
+                        source_id=outcome_id,
+                        target_type="incident",
+                        target_id="primary",
+                        kind="impacted_by_incident",
+                        tone="failing",
+                        evidence=outcome_evidence | {"incident_id": incident.get("incident_id")},
+                        observed_at=str(incident.get("linked_at") or outcome.get("updated_at") or ""),
+                    )
+                for trace in outcome.get("traces") or []:
+                    add(
+                        source_type="outcome",
+                        source_id=outcome_id,
+                        target_type="trace",
+                        target_id=str(trace.get("trace_id") or ""),
+                        kind="evidenced_by_trace",
+                        tone=outcome_tone,
+                        evidence=outcome_evidence | {"trace_id": trace.get("trace_id")},
+                        observed_at=str(trace.get("linked_at") or outcome.get("updated_at") or ""),
+                    )
+
+        for assignment in self.list_assignments(limit=limit):
+            assignment_id = str(assignment.get("assignment_id") or "")
+            status = str(assignment.get("status") or "")
+            tone = "failing" if status == "blocked" else "pending" if status in {"assigned", "in_progress", "waiting", "handoff", "review"} else "normal"
+            evidence = {
+                "table": "assignments",
+                "assignment_id": assignment_id,
+                "status": status,
+                "owner_worker": assignment.get("owner_worker"),
+            }
+            mission_id = str(assignment.get("mission_id") or "")
+            outcome_id = str(assignment.get("outcome_id") or "")
+            owner = str(assignment.get("owner_worker") or "")
+            if mission_id:
+                add(
+                    source_type="mission",
+                    source_id=mission_id,
+                    target_type="assignment",
+                    target_id=assignment_id,
+                    kind="has_assignment",
+                    tone=tone,
+                    evidence=evidence | {"mission_id": mission_id},
+                    observed_at=str(assignment.get("updated_at") or ""),
+                )
+            if outcome_id:
+                add(
+                    source_type="outcome",
+                    source_id=outcome_id,
+                    target_type="assignment",
+                    target_id=assignment_id,
+                    kind="contributes_assignment",
+                    tone=tone,
+                    evidence=evidence | {"outcome_id": outcome_id},
+                    observed_at=str(assignment.get("updated_at") or ""),
+                )
+            if owner:
+                add(
+                    source_type="assignment",
+                    source_id=assignment_id,
+                    target_type="runtime",
+                    target_id=owner,
+                    kind="owned_by",
+                    tone=tone,
+                    evidence=evidence | {"owner_worker": owner},
+                    observed_at=str(assignment.get("updated_at") or ""),
+                )
+            for contributor in assignment.get("contributor_workers") or []:
+                add(
+                    source_type="assignment",
+                    source_id=assignment_id,
+                    target_type="runtime",
+                    target_id=str(contributor),
+                    kind="assisted_by",
+                    tone=tone,
+                    evidence=evidence | {"contributor_worker": contributor},
+                    observed_at=str(assignment.get("updated_at") or ""),
+                )
+
+        relationships.sort(key=lambda item: (str(item.get("observed_at") or ""), str(item.get("id") or "")), reverse=True)
+        return relationships[:limit]
+
+    # ── missions ─────────────────────────────────────────────────────────
+
+    def _mission_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        outcomes = self.list_mission_outcomes(data["mission_id"])
+        data["workers"] = self.mission_workers(data["mission_id"])
+        data["rooms"] = self._mission_rooms(data["mission_id"])
+        data["traces"] = self._mission_traces(data["mission_id"])
+        data["incidents"] = self.mission_incidents(data["mission_id"])
+        data["proposals"] = self.mission_proposals(data["mission_id"])
+        data["relationships"] = self._mission_relationships(data["mission_id"])
+        data["activity"] = self.mission_activity(data["mission_id"], limit=8) or []
+        data["outcomes"] = outcomes
+        data["assignments"] = self.mission_assignments(data["mission_id"]) or []
+        completed = sum(1 for outcome in outcomes if outcome.get("status") == "completed")
+        total = len(outcomes)
+        data["progress"] = {
+            "completed": completed,
+            "total": total,
+            "percent": int((completed / total) * 100) if total else 0,
+        }
+        return data
+
+    def create_mission(
+        self,
+        *,
+        mission_id: str,
+        title: str,
+        description: str = "",
+        status: str = "proposed",
+        priority: str = "medium",
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        owner: str = "",
+        goal: str = "",
+        outcome: str = "",
+        risk_level: str = "medium",
+        workers: list[str] | None = None,
+        rooms: list[str] | None = None,
+        traces: list[str] | None = None,
+        incidents: list[str] | None = None,
+        proposals: list[str] | None = None,
+    ) -> dict:
+        if status not in MISSION_STATUSES:
+            raise ValueError(f"invalid mission status: {status}")
+        if priority not in MISSION_PRIORITIES:
+            raise ValueError(f"invalid mission priority: {priority}")
+        now = created_at or utc_now_iso()
+        updated = updated_at or now
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO missions (
+                    mission_id, title, description, status, priority,
+                    created_at, updated_at, owner, goal, outcome, risk_level
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (mission_id, title, description, status, priority, now, updated, owner, goal, outcome, risk_level),
+            )
+            for adapter_id in workers or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO mission_workers (mission_id, adapter_id, role, linked_at) VALUES (?, ?, '', ?)",
+                    (mission_id, adapter_id, updated),
+                )
+            for room_name in rooms or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO mission_rooms (mission_id, room_name, linked_at) VALUES (?, ?, ?)",
+                    (mission_id, room_name, updated),
+                )
+            for trace_id in traces or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO mission_traces (mission_id, trace_id, linked_at) VALUES (?, ?, ?)",
+                    (mission_id, trace_id, updated),
+                )
+            for incident_id in incidents or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO mission_incidents (mission_id, incident_id, incident_type, linked_at) VALUES (?, ?, '', ?)",
+                    (mission_id, incident_id, updated),
+                )
+            for proposal_id in proposals or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO mission_proposals (mission_id, proposal_id, linked_at) VALUES (?, ?, ?)",
+                    (mission_id, proposal_id, updated),
+                )
+            self._conn.execute(
+                """
+                INSERT INTO mission_events (event_id, mission_id, event_type, actor, details, created_at)
+                VALUES (?, ?, 'mission_recorded', 'system', ?, ?)
+                """,
+                (str(uuid.uuid4()), mission_id, title, now),
+            )
+        mission = self.get_mission(mission_id)
+        assert mission is not None
+        return mission
+
+    def list_missions(self, status: str | None = None, limit: int = 100) -> list[dict]:
+        limit = max(1, min(int(limit), 500))
+        sql = "SELECT * FROM missions"
+        params: list[object] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY updated_at DESC, created_at DESC, mission_id ASC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._mission_from_row(row) for row in rows]
+
+    def get_mission(self, mission_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM missions WHERE mission_id = ?", (mission_id,)).fetchone()
+        return self._mission_from_row(row) if row else None
+
+    def mission_summary(self) -> dict:
+        missions = self.list_missions(limit=500)
+        counts = {status: 0 for status in sorted(MISSION_STATUSES)}
+        for mission in missions:
+            status = str(mission.get("status") or "")
+            counts[status] = counts.get(status, 0) + 1
+        active = [mission for mission in missions if mission.get("status") == "active"]
+        blocked = [mission for mission in missions if mission.get("status") == "blocked"]
+        review = [mission for mission in missions if mission.get("status") == "review"]
+        completed = [mission for mission in missions if mission.get("status") == "completed"]
+        priority_source = blocked or review or active or missions[:1]
+        return {
+            "total": len(missions),
+            "counts": counts,
+            "active_missions": len(active),
+            "blocked_missions": len(blocked),
+            "review_missions": len(review),
+            "completed_missions": len(completed),
+            "highest_priority": priority_source[0]["title"] if priority_source else "No missions recorded.",
+            "missions": missions[:12],
+        }
+
+    def _mission_rooms(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT room_name, linked_at FROM mission_rooms WHERE mission_id = ? ORDER BY room_name ASC",
+                (mission_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _mission_traces(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT trace_id, linked_at FROM mission_traces WHERE mission_id = ? ORDER BY linked_at DESC, trace_id ASC",
+                (mission_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mission_workers(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mw.adapter_id, mw.role, mw.linked_at, a.runtime_name, a.status, a.current_room
+                FROM mission_workers mw
+                LEFT JOIN agents a ON a.adapter_id = mw.adapter_id
+                WHERE mw.mission_id = ?
+                ORDER BY mw.adapter_id ASC
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mission_proposals(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.*, mp.linked_at
+                FROM mission_proposals mp
+                LEFT JOIN proposals p ON p.proposal_id = mp.proposal_id
+                WHERE mp.mission_id = ?
+                ORDER BY COALESCE(p.updated_at, mp.linked_at) DESC
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [self._proposal_from_row(row) | {"linked_at": row["linked_at"]} for row in rows if row["proposal_id"]]
+
+    def mission_incidents(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mission_id, incident_id, incident_type, linked_at
+                FROM mission_incidents
+                WHERE mission_id = ?
+                ORDER BY linked_at DESC, incident_id ASC
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _mission_relationships(self, mission_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT relationship_id, mission_id, target_type, target_id, kind, evidence_json, observed_at
+                FROM mission_relationships
+                WHERE mission_id = ?
+                ORDER BY observed_at DESC, relationship_id ASC
+                """,
+                (mission_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            except json.JSONDecodeError:
+                item["evidence"] = {}
+            result.append(item)
+        return result
+
+    def _mission_link_index(self) -> dict[str, dict[str, list[str]]]:
+        index: dict[str, dict[str, list[str]]] = {"worker": {}, "room": {}, "trace": {}, "incident": {}, "proposal": {}}
+        with self._lock:
+            workers = self._conn.execute("SELECT mission_id, adapter_id FROM mission_workers").fetchall()
+            rooms = self._conn.execute("SELECT mission_id, room_name FROM mission_rooms").fetchall()
+            traces = self._conn.execute("SELECT mission_id, trace_id FROM mission_traces").fetchall()
+            incidents = self._conn.execute("SELECT mission_id, incident_id FROM mission_incidents").fetchall()
+            proposals = self._conn.execute("SELECT mission_id, proposal_id FROM mission_proposals").fetchall()
+        for row in workers:
+            index["worker"].setdefault(str(row["adapter_id"]), []).append(str(row["mission_id"]))
+        for row in rooms:
+            index["room"].setdefault(str(row["room_name"]), []).append(str(row["mission_id"]))
+        for row in traces:
+            index["trace"].setdefault(str(row["trace_id"]), []).append(str(row["mission_id"]))
+        for row in incidents:
+            index["incident"].setdefault(str(row["incident_id"]), []).append(str(row["mission_id"]))
+        for row in proposals:
+            index["proposal"].setdefault(str(row["proposal_id"]), []).append(str(row["mission_id"]))
+        return index
+
+    def _attach_missions_to_activity(self, records: list[dict]) -> list[dict]:
+        index = self._mission_link_index()
+        for record in records:
+            mission_ids: list[str] = [str(record["mission_id"])] if record.get("mission_id") else []
+            for key, value in (
+                ("worker", record.get("runtime") or record.get("actor")),
+                ("room", record.get("room") or record.get("room_id")),
+                ("trace", record.get("trace_id")),
+                ("incident", record.get("incident_id") or record.get("dead_letter_id")),
+                ("proposal", record.get("proposal_id")),
+            ):
+                if value is not None:
+                    mission_ids.extend(index[key].get(str(value), []))
+            unique = sorted(dict.fromkeys(mission_ids))
+            record["mission_ids"] = unique
+            record["mission_id"] = unique[0] if unique else None
+        return records
+
+    def mission_activity(self, mission_id: str, limit: int = 50) -> list[dict] | None:
+        with self._lock:
+            exists = self._conn.execute("SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)).fetchone()
+        if exists is None:
+            return None
+        return self.list_live_activity(limit=max(limit, 100), mission=mission_id)["activity"][:limit]
+
+    def current_mission_for_worker(self, adapter_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT m.mission_id, m.title, m.status, m.priority, m.updated_at
+                FROM mission_workers mw
+                JOIN missions m ON m.mission_id = mw.mission_id
+                WHERE mw.adapter_id = ?
+                  AND m.status IN ('active', 'blocked', 'review')
+                ORDER BY
+                  CASE m.status WHEN 'blocked' THEN 0 WHEN 'active' THEN 1 WHEN 'review' THEN 2 ELSE 3 END,
+                  m.updated_at DESC
+                LIMIT 1
+                """,
+                (adapter_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def current_mission_for_room(self, room_name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT m.mission_id, m.title, m.status, m.priority, m.updated_at
+                FROM mission_rooms mr
+                JOIN missions m ON m.mission_id = mr.mission_id
+                WHERE mr.room_name = ?
+                  AND m.status IN ('active', 'blocked', 'review')
+                ORDER BY
+                  CASE m.status WHEN 'blocked' THEN 0 WHEN 'active' THEN 1 WHEN 'review' THEN 2 ELSE 3 END,
+                  m.updated_at DESC
+                LIMIT 1
+                """,
+                (room_name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ── outcomes ─────────────────────────────────────────────────────────
+
+    def _outcome_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        outcome_id = str(data["outcome_id"])
+        data["workers"] = self.outcome_workers(outcome_id)
+        data["traces"] = self._outcome_traces(outcome_id)
+        data["incidents"] = self.outcome_incidents(outcome_id)
+        data["proposals"] = self.outcome_proposals(outcome_id)
+        data["relationships"] = self._outcome_relationships(outcome_id)
+        data["activity"] = self.outcome_activity(outcome_id, limit=8) or []
+        data["assignments"] = self.outcome_assignments(outcome_id) or []
+        data["evidence_count"] = len(data["traces"]) + len(data["relationships"])
+        data["proposal_count"] = len(data["proposals"])
+        data["incident_count"] = len(data["incidents"])
+        return data
+
+    def create_outcome(
+        self,
+        *,
+        outcome_id: str,
+        mission_id: str,
+        title: str,
+        description: str = "",
+        status: str = "not_started",
+        confidence: str = "medium",
+        owner: str = "",
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        completed_at: str | None = None,
+        workers: list[str] | None = None,
+        traces: list[str] | None = None,
+        incidents: list[str] | None = None,
+        proposals: list[str] | None = None,
+    ) -> dict:
+        if status not in OUTCOME_STATUSES:
+            raise ValueError(f"invalid outcome status: {status}")
+        if confidence not in OUTCOME_CONFIDENCE:
+            raise ValueError(f"invalid outcome confidence: {confidence}")
+        now = created_at or utc_now_iso()
+        updated = updated_at or now
+        with self._lock, self._conn:
+            if self._conn.execute("SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)).fetchone() is None:
+                raise ValueError(f"mission not found: {mission_id}")
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO outcomes (
+                    outcome_id, mission_id, title, description, status,
+                    confidence, owner, created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (outcome_id, mission_id, title, description, status, confidence, owner, now, updated, completed_at),
+            )
+            for adapter_id in workers or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO outcome_workers (outcome_id, adapter_id, role, linked_at) VALUES (?, ?, '', ?)",
+                    (outcome_id, adapter_id, updated),
+                )
+            for trace_id in traces or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO outcome_traces (outcome_id, trace_id, linked_at) VALUES (?, ?, ?)",
+                    (outcome_id, trace_id, updated),
+                )
+            for incident_id in incidents or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO outcome_incidents (outcome_id, incident_id, incident_type, linked_at) VALUES (?, ?, '', ?)",
+                    (outcome_id, incident_id, updated),
+                )
+            for proposal_id in proposals or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO outcome_proposals (outcome_id, proposal_id, linked_at) VALUES (?, ?, ?)",
+                    (outcome_id, proposal_id, updated),
+                )
+            self._conn.execute(
+                """
+                INSERT INTO outcome_events (event_id, outcome_id, event_type, actor, details, created_at)
+                VALUES (?, ?, 'outcome_recorded', 'system', ?, ?)
+                """,
+                (str(uuid.uuid4()), outcome_id, title, now),
+            )
+        outcome = self.get_outcome(outcome_id)
+        assert outcome is not None
+        return outcome
+
+    def list_outcomes(self, status: str | None = None, mission_id: str | None = None, limit: int = 100) -> list[dict]:
+        limit = max(1, min(int(limit), 500))
+        clauses = []
+        params: list[object] = []
+        if status:
+            clauses.append("o.status = ?")
+            params.append(status)
+        if mission_id:
+            clauses.append("o.mission_id = ?")
+            params.append(mission_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT o.*, m.title AS mission_title, m.status AS mission_status
+                FROM outcomes o
+                LEFT JOIN missions m ON m.mission_id = o.mission_id
+                {where}
+                ORDER BY o.updated_at DESC, o.created_at DESC, o.outcome_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._outcome_from_row(row) for row in rows]
+
+    def get_outcome(self, outcome_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT o.*, m.title AS mission_title, m.status AS mission_status
+                FROM outcomes o
+                LEFT JOIN missions m ON m.mission_id = o.mission_id
+                WHERE o.outcome_id = ?
+                """,
+                (outcome_id,),
+            ).fetchone()
+        return self._outcome_from_row(row) if row else None
+
+    def list_mission_outcomes(self, mission_id: str, limit: int = 100) -> list[dict]:
+        return self.list_outcomes(mission_id=mission_id, limit=limit)
+
+    def outcome_summary(self) -> dict:
+        outcomes = self.list_outcomes(limit=500)
+        counts = {status: 0 for status in sorted(OUTCOME_STATUSES)}
+        for outcome in outcomes:
+            status = str(outcome.get("status") or "")
+            counts[status] = counts.get(status, 0) + 1
+        priority_source = [outcome for outcome in outcomes if outcome.get("status") in {"blocked", "review", "in_progress"}] or outcomes[:1]
+        return {
+            "total": len(outcomes),
+            "counts": counts,
+            "completed": counts.get("completed", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "review": counts.get("review", 0),
+            "blocked": counts.get("blocked", 0),
+            "highest_priority": priority_source[0]["title"] if priority_source else "No outcomes recorded.",
+            "outcomes": outcomes[:12],
+        }
+
+    def _outcome_traces(self, outcome_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT trace_id, linked_at FROM outcome_traces WHERE outcome_id = ? ORDER BY linked_at DESC, trace_id ASC",
+                (outcome_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def outcome_workers(self, outcome_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT ow.adapter_id, ow.role, ow.linked_at, a.runtime_name, a.status, a.current_room
+                FROM outcome_workers ow
+                LEFT JOIN agents a ON a.adapter_id = ow.adapter_id
+                WHERE ow.outcome_id = ?
+                ORDER BY ow.adapter_id ASC
+                """,
+                (outcome_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def outcome_proposals(self, outcome_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.*, op.linked_at
+                FROM outcome_proposals op
+                LEFT JOIN proposals p ON p.proposal_id = op.proposal_id
+                WHERE op.outcome_id = ?
+                ORDER BY COALESCE(p.updated_at, op.linked_at) DESC
+                """,
+                (outcome_id,),
+            ).fetchall()
+        return [self._proposal_from_row(row) | {"linked_at": row["linked_at"]} for row in rows if row["proposal_id"]]
+
+    def outcome_incidents(self, outcome_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT outcome_id, incident_id, incident_type, linked_at
+                FROM outcome_incidents
+                WHERE outcome_id = ?
+                ORDER BY linked_at DESC, incident_id ASC
+                """,
+                (outcome_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _outcome_relationships(self, outcome_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT relationship_id, outcome_id, target_type, target_id, kind, evidence_json, observed_at
+                FROM outcome_relationships
+                WHERE outcome_id = ?
+                ORDER BY observed_at DESC, relationship_id ASC
+                """,
+                (outcome_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            except json.JSONDecodeError:
+                item["evidence"] = {}
+            result.append(item)
+        return result
+
+    def _outcome_link_index(self) -> dict[str, dict[str, list[str]]]:
+        index: dict[str, dict[str, list[str]]] = {"worker": {}, "trace": {}, "incident": {}, "proposal": {}, "mission": {}}
+        with self._lock:
+            workers = self._conn.execute("SELECT outcome_id, adapter_id FROM outcome_workers").fetchall()
+            traces = self._conn.execute("SELECT outcome_id, trace_id FROM outcome_traces").fetchall()
+            incidents = self._conn.execute("SELECT outcome_id, incident_id FROM outcome_incidents").fetchall()
+            proposals = self._conn.execute("SELECT outcome_id, proposal_id FROM outcome_proposals").fetchall()
+            outcomes = self._conn.execute("SELECT outcome_id, mission_id FROM outcomes").fetchall()
+        for row in workers:
+            index["worker"].setdefault(str(row["adapter_id"]), []).append(str(row["outcome_id"]))
+        for row in traces:
+            index["trace"].setdefault(str(row["trace_id"]), []).append(str(row["outcome_id"]))
+        for row in incidents:
+            index["incident"].setdefault(str(row["incident_id"]), []).append(str(row["outcome_id"]))
+        for row in proposals:
+            index["proposal"].setdefault(str(row["proposal_id"]), []).append(str(row["outcome_id"]))
+        for row in outcomes:
+            index["mission"].setdefault(str(row["mission_id"]), []).append(str(row["outcome_id"]))
+        return index
+
+    def _attach_outcomes_to_activity(self, records: list[dict]) -> list[dict]:
+        index = self._outcome_link_index()
+        for record in records:
+            outcome_ids: list[str] = [str(record["outcome_id"])] if record.get("outcome_id") else []
+            for key, value in (
+                ("worker", record.get("runtime") or record.get("actor")),
+                ("trace", record.get("trace_id")),
+                ("incident", record.get("incident_id") or record.get("dead_letter_id")),
+                ("proposal", record.get("proposal_id")),
+                ("mission", record.get("mission_id")),
+            ):
+                if value is not None:
+                    outcome_ids.extend(index[key].get(str(value), []))
+            unique = sorted(dict.fromkeys(outcome_ids))
+            record["outcome_ids"] = unique
+            record["outcome_id"] = unique[0] if unique else None
+        return records
+
+    def outcome_activity(self, outcome_id: str, limit: int = 50) -> list[dict] | None:
+        with self._lock:
+            exists = self._conn.execute("SELECT 1 FROM outcomes WHERE outcome_id = ?", (outcome_id,)).fetchone()
+        if exists is None:
+            return None
+        return self.list_live_activity(limit=max(limit, 100), outcome=outcome_id)["activity"][:limit]
+
+    def current_outcome_for_worker(self, adapter_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT o.outcome_id, o.mission_id, o.title, o.status, o.confidence, o.updated_at,
+                       m.title AS mission_title
+                FROM outcome_workers ow
+                JOIN outcomes o ON o.outcome_id = ow.outcome_id
+                LEFT JOIN missions m ON m.mission_id = o.mission_id
+                WHERE ow.adapter_id = ?
+                  AND o.status IN ('in_progress', 'blocked', 'review')
+                ORDER BY
+                  CASE o.status WHEN 'blocked' THEN 0 WHEN 'review' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END,
+                  o.updated_at DESC
+                LIMIT 1
+                """,
+                (adapter_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def current_outcome_for_room(self, room_name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT o.outcome_id, o.mission_id, o.title, o.status, o.confidence, o.updated_at,
+                       m.title AS mission_title
+                FROM mission_rooms mr
+                JOIN outcomes o ON o.mission_id = mr.mission_id
+                LEFT JOIN missions m ON m.mission_id = o.mission_id
+                WHERE mr.room_name = ?
+                  AND o.status IN ('in_progress', 'blocked', 'review')
+                ORDER BY
+                  CASE o.status WHEN 'blocked' THEN 0 WHEN 'review' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END,
+                  o.updated_at DESC
+                LIMIT 1
+                """,
+                (room_name,),
+            ).fetchone()
+        return dict(row) if row else None
 
     # ── flight summary ───────────────────────────────────────────────────
 
@@ -1730,7 +4060,22 @@ class Storage:
     # ── shared memory ─────────────────────────────────────────────────────
 
     def _memory_from_row(self, row: sqlite3.Row) -> dict:
-        return dict(row)
+        data = dict(row)
+        if data.get("status") == "peer_approved":
+            data["status"] = "approved"
+        if not data.get("body"):
+            data["body"] = data.get("content") or ""
+        if not data.get("title"):
+            data["title"] = str(data.get("body") or data.get("content") or "")[:80]
+        if not data.get("scope_type"):
+            data["scope_type"] = "room" if data.get("room_name") else "global"
+        if not data.get("scope_id") and data.get("room_name"):
+            data["scope_id"] = data.get("room_name")
+        if not data.get("source_type"):
+            data["source_type"] = "operator"
+        if not data.get("importance"):
+            data["importance"] = "medium"
+        return data
 
     def _record_memory_event_locked(
         self,
@@ -1807,6 +4152,14 @@ class Storage:
         confidence: int,
         created_by: str | None,
         created_at: str,
+        title: str | None = None,
+        body: str | None = None,
+        scope_type: str = "global",
+        scope_id: str | None = None,
+        source_type: str = "operator",
+        source_id: str | None = None,
+        importance: str = "medium",
+        expires_at: str | None = None,
         source_team_run_id: str | None = None,
         source_task_id: str | None = None,
         source_message_id: str | None = None,
@@ -1815,27 +4168,46 @@ class Storage:
             raise ValueError(f"invalid memory_type: {memory_type}")
         if status not in SHARED_MEMORY_STATUSES:
             raise ValueError(f"invalid memory status: {status}")
+        if importance not in SHARED_MEMORY_IMPORTANCE:
+            raise ValueError(f"invalid memory importance: {importance}")
+        if scope_type not in SHARED_MEMORY_SCOPES:
+            raise ValueError(f"invalid memory scope_type: {scope_type}")
+        if status == "peer_approved":
+            status = "approved"
+        body = body if body is not None else content
+        title = title or str(body or content)[:80]
         token_cost = max(1, len(content) // 4) if content else 0
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO shared_memory (
-                    memory_id, room_name, workspace, memory_type, content, status,
-                    confidence, created_by, created_at, source_team_run_id,
+                    memory_id, room_name, workspace, memory_type, title, content,
+                    body, scope_type, scope_id, source_type, source_id, status,
+                    importance, confidence, created_by, created_at, updated_at,
+                    expires_at, source_team_run_id,
                     source_task_id, source_message_id, token_cost_estimate,
                     use_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     memory_id,
                     room_name,
                     workspace,
                     memory_type,
+                    title,
                     content,
+                    body,
+                    scope_type,
+                    scope_id,
+                    source_type,
+                    source_id,
                     status,
+                    importance,
                     int(confidence),
                     created_by,
                     created_at,
+                    created_at,
+                    expires_at,
                     source_team_run_id,
                     source_task_id,
                     source_message_id,
@@ -1846,7 +4218,7 @@ class Storage:
                 memory_id,
                 "memory_proposed",
                 created_by,
-                {"memory_type": memory_type, "status": status, "confidence": int(confidence)},
+                {"memory_type": memory_type, "status": status, "importance": importance, "scope_type": scope_type, "scope_id": scope_id},
                 created_at,
             )
         memory = self.get_shared_memory(memory_id)
@@ -1862,6 +4234,10 @@ class Storage:
         self,
         *,
         status: str | None = None,
+        memory_type: str | None = None,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        importance: str | None = None,
         room_name: str | None = None,
         workspace: str | None = None,
         limit: int = 50,
@@ -1869,8 +4245,22 @@ class Storage:
         clauses = []
         params: list[object] = []
         if status:
+            if status == "peer_approved":
+                status = "approved"
             clauses.append("status = ?")
             params.append(status)
+        if memory_type:
+            clauses.append("memory_type = ?")
+            params.append(memory_type)
+        if scope_type:
+            clauses.append("scope_type = ?")
+            params.append(scope_type)
+        if scope_id is not None:
+            clauses.append("scope_id = ?")
+            params.append(scope_id)
+        if importance:
+            clauses.append("importance = ?")
+            params.append(importance)
         if room_name is not None:
             clauses.append("room_name = ?")
             params.append(room_name)
@@ -1904,7 +4294,7 @@ class Storage:
                    OR LOWER(COALESCE(room_name, '')) LIKE ?
                    OR LOWER(COALESCE(workspace, '')) LIKE ?
                 ORDER BY
-                  CASE status WHEN 'peer_approved' THEN 0 WHEN 'proposed' THEN 1 ELSE 2 END,
+                  CASE status WHEN 'approved' THEN 0 WHEN 'peer_approved' THEN 0 WHEN 'proposed' THEN 1 ELSE 2 END,
                   created_at DESC
                 LIMIT ?
                 """,
@@ -1916,7 +4306,9 @@ class Storage:
         if not fields:
             return self.get_shared_memory(memory_id)
         allowed = {
-            "room_name", "workspace", "memory_type", "content", "status", "confidence",
+            "room_name", "workspace", "memory_type", "title", "content", "body",
+            "scope_type", "scope_id", "source_type", "source_id", "status",
+            "importance", "confidence", "updated_at", "expires_at",
             "reviewed_by", "review_result", "review_reason", "reviewed_at",
             "approved_by", "approved_at", "source_team_run_id", "source_task_id",
             "source_message_id", "token_cost_estimate", "use_count", "last_used_at",
@@ -1926,8 +4318,16 @@ class Storage:
             raise ValueError(f"invalid memory_type: {clean['memory_type']}")
         if "status" in clean and clean["status"] not in SHARED_MEMORY_STATUSES:
             raise ValueError(f"invalid memory status: {clean['status']}")
+        if clean.get("status") == "peer_approved":
+            clean["status"] = "approved"
+        if "importance" in clean and clean["importance"] not in SHARED_MEMORY_IMPORTANCE:
+            raise ValueError(f"invalid memory importance: {clean['importance']}")
+        if "scope_type" in clean and clean["scope_type"] not in SHARED_MEMORY_SCOPES:
+            raise ValueError(f"invalid memory scope_type: {clean['scope_type']}")
+        clean.setdefault("updated_at", utc_now_iso())
         if "content" in clean:
             clean["token_cost_estimate"] = max(1, len(str(clean["content"])) // 4) if clean["content"] else 0
+            clean.setdefault("body", clean["content"])
         if not clean:
             return self.get_shared_memory(memory_id)
         assignments = ", ".join(f"{key} = ?" for key in clean)
@@ -1972,13 +4372,31 @@ class Storage:
         max_chars: int,
         min_confidence: int,
     ) -> list[dict]:
-        clauses = ["status = 'peer_approved'", "confidence >= ?"]
+        return self.select_workforce_memory_context(
+            scopes=[("room", room_name)] if room_name else [],
+            workspace=workspace,
+            max_items=max_items,
+            max_chars=max_chars,
+            min_confidence=min_confidence,
+        )
+
+    def select_workforce_memory_context(
+        self,
+        *,
+        scopes: list[tuple[str, str | None]],
+        workspace: str | None,
+        max_items: int,
+        max_chars: int,
+        min_confidence: int = 0,
+    ) -> list[dict]:
+        active_scopes = [(scope_type, scope_id) for scope_type, scope_id in scopes if scope_type and scope_id]
+        clauses = ["status = 'approved'", "confidence >= ?"]
         params: list[object] = [int(min_confidence)]
-        if room_name:
-            clauses.append("(room_name = ? OR room_name IS NULL)")
-            params.append(room_name)
-        else:
-            clauses.append("room_name IS NULL")
+        scope_clauses = ["scope_type = 'global'"]
+        for scope_type, scope_id in active_scopes:
+            scope_clauses.append("(scope_type = ? AND scope_id = ?)")
+            params.extend([scope_type, scope_id])
+        clauses.append(f"({' OR '.join(scope_clauses)})")
         if workspace:
             clauses.append("(workspace = ? OR workspace IS NULL)")
             params.append(workspace)
@@ -1989,19 +4407,28 @@ class Storage:
             rows = self._conn.execute(
                 f"""
                 SELECT *,
-                  CASE WHEN room_name = ? THEN 0 WHEN workspace = ? THEN 1 ELSE 2 END AS scope_rank
+                  CASE
+                    WHEN scope_type = 'assignment' THEN 0
+                    WHEN scope_type = 'outcome' THEN 1
+                    WHEN scope_type = 'mission' THEN 2
+                    WHEN scope_type = 'room' THEN 3
+                    WHEN scope_type = 'runtime' THEN 4
+                    WHEN scope_type = 'global' THEN 5
+                    ELSE 6
+                  END AS scope_rank,
+                  CASE importance WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END AS importance_rank
                 FROM shared_memory
                 WHERE {' AND '.join(clauses)}
-                ORDER BY scope_rank ASC, COALESCE(last_used_at, approved_at, created_at) DESC, created_at DESC
+                ORDER BY scope_rank ASC, importance_rank ASC, COALESCE(approved_at, updated_at, created_at) DESC, created_at DESC
                 LIMIT ?
                 """,
-                [room_name, workspace, *params],
+                params,
             ).fetchall()
         selected: list[dict] = []
         used_chars = 0
         for row in rows:
             memory = self._memory_from_row(row)
-            line_len = len(f"- {memory.get('memory_type')}: {memory.get('content')}")
+            line_len = len(f"- {memory.get('memory_id')} {memory.get('title')}: {memory.get('body') or memory.get('content')}")
             if selected and used_chars + line_len > max_chars:
                 continue
             if line_len > max_chars:
@@ -2411,6 +4838,7 @@ class Storage:
         }
 
     def list_rooms(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -2424,7 +4852,45 @@ class Storage:
                 ) DESC
                 """,
             ).fetchall()
-        return [dict(row) for row in rows]
+            room_names = [str(row["name"]) for row in rows]
+            live_rows: dict[str, list[sqlite3.Row]] = {}
+            for name in room_names:
+                live_rows[name] = self._conn.execute(
+                    """
+                    SELECT source, timestamp, body
+                    FROM messages
+                    WHERE target = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                    """,
+                    (f"room:{name}",),
+                ).fetchall()
+        result = []
+        for row in rows:
+            room = dict(row)
+            events = live_rows.get(str(row["name"]), [])
+            room["current_mission"] = self.current_mission_for_room(str(row["name"]))
+            room["current_outcome"] = self.current_outcome_for_room(str(row["name"]))
+            workers: dict[str, int] = {}
+            for event in events:
+                source = str(event["source"] or "")
+                if source and source != "operator" and not source.startswith("synkraken-"):
+                    workers[source] = workers.get(source, 0) + 1
+            recent_count = 0
+            for event in events:
+                seconds = self._presence_seconds_since(now, event["timestamp"])
+                if seconds is not None and seconds <= 3600:
+                    recent_count += 1
+            latest = events[0] if events else None
+            room["most_active_workers"] = [
+                {"runtime": worker, "events": count}
+                for worker, count in sorted(workers.items(), key=lambda item: (-item[1], item[0]))[:3]
+            ]
+            room["last_room_event"] = self._activity_summary_subject(latest["body"], "No room events recorded.") if latest else ""
+            room["activity_rate"] = round(recent_count / 60, 2)
+            room["activity_rate_label"] = f"{recent_count} events/hour"
+            result.append(room)
+        return result
 
     def get_room_messages(self, name: str, limit: int = 50) -> list[dict]:
         target = f"room:{name}"
@@ -3449,6 +5915,482 @@ class Storage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # ── assignments ───────────────────────────────────────────────────────
+
+    def _assignment_from_row(self, row: sqlite3.Row) -> dict:
+        data = dict(row)
+        assignment_id = str(data["assignment_id"])
+        data["id"] = assignment_id
+        contributors = self.assignment_contributors(assignment_id)
+        data["contributor_workers"] = [item["worker_id"] for item in contributors]
+        data["contributors"] = contributors
+        data["handoffs"] = self.assignment_handoffs(assignment_id)
+        data["proposals"] = self.assignment_proposals(assignment_id)
+        data["traces"] = self.assignment_traces(assignment_id)
+        data["last_activity"] = self._assignment_last_activity(data)
+        mission_id = data.get("mission_id")
+        outcome_id = data.get("outcome_id")
+        with self._lock:
+            mission = self._conn.execute(
+                "SELECT mission_id, title, status FROM missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone() if mission_id else None
+            outcome = self._conn.execute(
+                "SELECT outcome_id, mission_id, title, status FROM outcomes WHERE outcome_id = ?",
+                (outcome_id,),
+            ).fetchone() if outcome_id else None
+        if mission:
+            data["mission"] = dict(mission)
+        if outcome:
+            data["outcome"] = dict(outcome)
+        return data
+
+    def _assignment_last_activity(self, assignment: dict) -> str:
+        values = [str(assignment.get("updated_at") or assignment.get("created_at") or "")]
+        assignment_id = str(assignment.get("assignment_id") or assignment.get("id") or "")
+        with self._lock:
+            event = self._conn.execute(
+                "SELECT MAX(created_at) AS last_at FROM assignment_events WHERE assignment_id = ?",
+                (assignment_id,),
+            ).fetchone()
+            handoff = self._conn.execute(
+                "SELECT MAX(created_at) AS last_at FROM handoffs WHERE assignment_id = ?",
+                (assignment_id,),
+            ).fetchone()
+        for row in (event, handoff):
+            if row and row["last_at"]:
+                values.append(str(row["last_at"]))
+        return max(value for value in values if value)
+
+    def _save_assignment_event(
+        self,
+        assignment_id: str,
+        event_type: str,
+        actor: str,
+        old_value: object | None,
+        new_value: object | None,
+        details: dict | str | None,
+        created_at: str,
+    ) -> None:
+        detail_text = json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
+        old_text = json.dumps(old_value, ensure_ascii=False) if isinstance(old_value, (dict, list)) else old_value
+        new_text = json.dumps(new_value, ensure_ascii=False) if isinstance(new_value, (dict, list)) else new_value
+        self._conn.execute(
+            """
+            INSERT INTO assignment_events (event_id, assignment_id, event_type, actor, old_value, new_value, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), assignment_id, event_type, actor or "operator", old_text, new_text, detail_text, created_at),
+        )
+
+    def create_assignment(
+        self,
+        *,
+        assignment_id: str,
+        title: str,
+        description: str = "",
+        status: str = "assigned",
+        owner_worker: str,
+        contributor_workers: list[str] | None = None,
+        mission_id: str | None = None,
+        outcome_id: str | None = None,
+        room_id: str | None = None,
+        actor: str = "operator",
+        created_at: str | None = None,
+    ) -> dict:
+        if status not in ASSIGNMENT_STATUSES:
+            raise ValueError(f"invalid assignment status: {status}")
+        if not owner_worker:
+            raise ValueError("owner_worker required")
+        now = created_at or utc_now_iso()
+        contributors = [worker for worker in dict.fromkeys(contributor_workers or []) if worker and worker != owner_worker]
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO assignments (
+                    assignment_id, title, description, status, owner_worker,
+                    mission_id, outcome_id, room_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (assignment_id, title, description or "", status, owner_worker, mission_id, outcome_id, room_id, now, now),
+            )
+            for worker in contributors:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO assignment_contributors (assignment_id, worker_id, linked_at) VALUES (?, ?, ?)",
+                    (assignment_id, worker, now),
+                )
+            self._save_assignment_event(
+                assignment_id,
+                "created",
+                actor,
+                None,
+                status,
+                {"owner_worker": owner_worker, "contributor_workers": contributors},
+                now,
+            )
+        assignment = self.get_assignment(assignment_id)
+        assert assignment is not None
+        return assignment
+
+    def get_assignment(self, assignment_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM assignments WHERE assignment_id = ?",
+                (assignment_id,),
+            ).fetchone()
+        return self._assignment_from_row(row) if row else None
+
+    def list_assignments(
+        self,
+        *,
+        status: str | None = None,
+        owner_worker: str | None = None,
+        contributor_worker: str | None = None,
+        mission_id: str | None = None,
+        outcome_id: str | None = None,
+        room_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if status:
+            clauses.append("a.status = ?")
+            params.append(status)
+        if owner_worker:
+            clauses.append("a.owner_worker = ?")
+            params.append(owner_worker)
+        if contributor_worker:
+            clauses.append("EXISTS (SELECT 1 FROM assignment_contributors ac WHERE ac.assignment_id = a.assignment_id AND ac.worker_id = ?)")
+            params.append(contributor_worker)
+        if mission_id:
+            clauses.append("a.mission_id = ?")
+            params.append(mission_id)
+        if outcome_id:
+            clauses.append("a.outcome_id = ?")
+            params.append(outcome_id)
+        if room_id:
+            clauses.append("a.room_id = ?")
+            params.append(room_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT a.* FROM assignments a {where} ORDER BY a.updated_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._assignment_from_row(row) for row in rows]
+
+    def assignment_summary(self) -> dict:
+        assignments = self.list_assignments(limit=1000)
+        counts = {status: 0 for status in ASSIGNMENT_STATUSES}
+        for assignment in assignments:
+            status = str(assignment.get("status") or "")
+            if status in counts:
+                counts[status] += 1
+        return {
+            "total": len(assignments),
+            "counts": counts,
+            "assigned": counts["assigned"],
+            "in_progress": counts["in_progress"],
+            "waiting": counts["waiting"],
+            "blocked": counts["blocked"],
+            "review": counts["review"],
+            "completed": counts["completed"],
+            "assignments": assignments[:25],
+        }
+
+    def assignment_contributors(self, assignment_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT worker_id, linked_at
+                FROM assignment_contributors
+                WHERE assignment_id = ?
+                ORDER BY linked_at ASC, worker_id ASC
+                """,
+                (assignment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def assignment_events(self, assignment_id: str) -> list[dict] | None:
+        if not self._assignment_exists(assignment_id):
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT event_id, assignment_id, event_type, actor, old_value, new_value, details, created_at
+                FROM assignment_events
+                WHERE assignment_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (assignment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _assignment_exists(self, assignment_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM assignments WHERE assignment_id = ?", (assignment_id,)).fetchone()
+        return row is not None
+
+    def update_assignment(
+        self,
+        assignment_id: str,
+        fields: dict,
+        *,
+        actor: str = "operator",
+        updated_at: str | None = None,
+    ) -> dict | None:
+        before = self.get_assignment(assignment_id)
+        if before is None:
+            return None
+        allowed = {"title", "description", "status", "owner_worker", "mission_id", "outcome_id", "room_id"}
+        clean: dict[str, object | None] = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "status" and value not in ASSIGNMENT_STATUSES:
+                raise ValueError(f"invalid assignment status: {value}")
+            clean[key] = value
+        if not clean:
+            return before
+        now = updated_at or utc_now_iso()
+        clean["updated_at"] = now
+        assignments = ", ".join(f"{key} = ?" for key in clean)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE assignments SET {assignments} WHERE assignment_id = ?",
+                [*clean.values(), assignment_id],
+            )
+            if "owner_worker" in clean:
+                self._conn.execute(
+                    "DELETE FROM assignment_contributors WHERE assignment_id = ? AND worker_id = ?",
+                    (assignment_id, clean["owner_worker"]),
+                )
+            self._save_assignment_event(assignment_id, "updated", actor, before, clean, clean, now)
+        return self.get_assignment(assignment_id)
+
+    def update_assignment_status(self, assignment_id: str, status: str, *, actor: str = "operator") -> dict | None:
+        before = self.get_assignment(assignment_id)
+        updated = self.update_assignment(assignment_id, {"status": status}, actor=actor)
+        if updated and before:
+            with self._lock, self._conn:
+                self._save_assignment_event(assignment_id, f"marked_{status}", actor, before.get("status"), status, None, utc_now_iso())
+        return updated
+
+    def set_assignment_owner(self, assignment_id: str, owner_worker: str, *, actor: str = "operator") -> dict | None:
+        return self.update_assignment(assignment_id, {"owner_worker": owner_worker}, actor=actor)
+
+    def add_assignment_contributor(self, assignment_id: str, worker_id: str, *, actor: str = "operator") -> dict | None:
+        assignment = self.get_assignment(assignment_id)
+        if assignment is None:
+            return None
+        if worker_id == assignment.get("owner_worker"):
+            return assignment
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO assignment_contributors (assignment_id, worker_id, linked_at) VALUES (?, ?, ?)",
+                (assignment_id, worker_id, now),
+            )
+            self._conn.execute("UPDATE assignments SET updated_at = ? WHERE assignment_id = ?", (now, assignment_id))
+            if cur.rowcount:
+                self._save_assignment_event(assignment_id, "contributor_added", actor, None, worker_id, None, now)
+        return self.get_assignment(assignment_id)
+
+    def remove_assignment_contributor(self, assignment_id: str, worker_id: str, *, actor: str = "operator") -> dict | None:
+        if not self._assignment_exists(assignment_id):
+            return None
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM assignment_contributors WHERE assignment_id = ? AND worker_id = ?",
+                (assignment_id, worker_id),
+            )
+            self._conn.execute("UPDATE assignments SET updated_at = ? WHERE assignment_id = ?", (now, assignment_id))
+            if cur.rowcount:
+                self._save_assignment_event(assignment_id, "contributor_removed", actor, worker_id, None, None, now)
+        return self.get_assignment(assignment_id)
+
+    def assignment_handoffs(self, assignment_id: str) -> list[dict]:
+        return self.list_handoffs(assignment_id=assignment_id, limit=100)
+
+    def assignment_proposals(self, assignment_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.*
+                FROM proposals p
+                JOIN assignment_proposals ap ON ap.proposal_id = p.proposal_id
+                WHERE ap.assignment_id = ?
+                ORDER BY p.created_at DESC
+                """,
+                (assignment_id,),
+            ).fetchall()
+        return [self._proposal_from_row(row) for row in rows]
+
+    def assignment_traces(self, assignment_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT trace_id, linked_at
+                FROM assignment_traces
+                WHERE assignment_id = ?
+                ORDER BY linked_at DESC
+                """,
+                (assignment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def assignment_activity(self, assignment_id: str, limit: int = 50) -> list[dict] | None:
+        assignment = self.get_assignment(assignment_id)
+        if assignment is None:
+            return None
+        workers = {assignment["owner_worker"], *assignment.get("contributor_workers", [])}
+        room_id = assignment.get("room_id")
+        activity: list[dict] = []
+        for event in self.assignment_events(assignment_id) or []:
+            activity.append({
+                "activity_id": event["event_id"],
+                "timestamp": event["created_at"],
+                "event_type": event["event_type"],
+                "activity_type": "assignment",
+                "actor": event["actor"],
+                "assignment_id": assignment_id,
+                "summary": event.get("new_value") or event.get("details") or event["event_type"],
+            })
+        for handoff in self.assignment_handoffs(assignment_id):
+            activity.append({
+                "activity_id": handoff["handoff_id"],
+                "timestamp": handoff["created_at"],
+                "event_type": "handoff",
+                "activity_type": "handoff",
+                "actor": handoff.get("from_agent"),
+                "assignment_id": assignment_id,
+                "summary": f"{handoff.get('from_agent')} -> {handoff.get('to_agent')}: {handoff.get('summary')}",
+            })
+        if room_id and workers:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT message_id, timestamp, source, body
+                    FROM messages
+                    WHERE target = ? AND source IN ({})
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """.format(",".join("?" for _ in workers)),
+                    [f"room:{room_id}", *sorted(workers), limit],
+                ).fetchall()
+            for row in rows:
+                activity.append({
+                    "activity_id": row["message_id"],
+                    "timestamp": row["timestamp"],
+                    "event_type": "message",
+                    "activity_type": "message",
+                    "actor": row["source"],
+                    "assignment_id": assignment_id,
+                    "room_id": room_id,
+                    "summary": self._activity_summary_subject(row["body"], "room activity"),
+                })
+        activity.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+        return activity[:limit]
+
+    def worker_assignments(self, worker_id: str, limit: int = 100) -> dict:
+        owned = self.list_assignments(owner_worker=worker_id, limit=limit)
+        contributing = self.list_assignments(contributor_worker=worker_id, limit=limit)
+        all_items = {item["assignment_id"]: item for item in [*owned, *contributing]}
+        counts = {
+            "owned": len(owned),
+            "contributor": len(contributing),
+            "waiting": len([item for item in all_items.values() if item.get("status") == "waiting"]),
+            "blocked": len([item for item in all_items.values() if item.get("status") == "blocked"]),
+            "review": len([item for item in all_items.values() if item.get("status") == "review"]),
+        }
+        return {"worker_id": worker_id, "counts": counts, "owned": owned, "contributing": contributing}
+
+    def mission_assignments(self, mission_id: str, limit: int = 100) -> list[dict] | None:
+        with self._lock:
+            exists = self._conn.execute("SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)).fetchone()
+        if exists is None:
+            return None
+        return self.list_assignments(mission_id=mission_id, limit=limit)
+
+    def outcome_assignments(self, outcome_id: str, limit: int = 100) -> list[dict] | None:
+        with self._lock:
+            exists = self._conn.execute("SELECT 1 FROM outcomes WHERE outcome_id = ?", (outcome_id,)).fetchone()
+        if exists is None:
+            return None
+        return self.list_assignments(outcome_id=outcome_id, limit=limit)
+
+    def room_assignments(self, room_id: str, limit: int = 100) -> list[dict] | None:
+        if not self.room_exists(room_id):
+            return None
+        member_ids = set(self.get_room_members(room_id))
+        assignments = self.list_assignments(room_id=room_id, limit=limit)
+        for assignment in self.list_assignments(limit=limit):
+            if assignment["assignment_id"] in {item["assignment_id"] for item in assignments}:
+                continue
+            workers = {assignment.get("owner_worker"), *assignment.get("contributor_workers", [])}
+            if member_ids.intersection(worker for worker in workers if worker):
+                assignments.append(assignment)
+        assignments.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return assignments[:limit]
+
+    def recent_assignment_handoffs(self, limit: int = 50) -> list[dict]:
+        return self.list_handoffs(limit=limit)
+
+    def create_assignment_handoff(
+        self,
+        assignment_id: str,
+        *,
+        to_worker: str,
+        reason: str,
+        context_summary: str = "",
+        actor: str = "operator",
+        created_at: str | None = None,
+    ) -> dict | None:
+        assignment = self.get_assignment(assignment_id)
+        if assignment is None:
+            return None
+        now = created_at or utc_now_iso()
+        from_worker = str(assignment.get("owner_worker") or "")
+        handoff = self.create_handoff(
+            handoff_id=str(uuid.uuid4()),
+            from_agent=from_worker,
+            to_agent=to_worker,
+            assignment_id=assignment_id,
+            room_id=assignment.get("room_id"),
+            summary=reason,
+            recommended_next_step=context_summary,
+            created_at=now,
+        )
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE assignments SET owner_worker = ?, status = 'handoff', updated_at = ? WHERE assignment_id = ?",
+                (to_worker, now, assignment_id),
+            )
+            self._conn.execute(
+                "DELETE FROM assignment_contributors WHERE assignment_id = ? AND worker_id = ?",
+                (assignment_id, to_worker),
+            )
+            self._save_assignment_event(
+                assignment_id,
+                "handoff",
+                actor,
+                from_worker,
+                to_worker,
+                {"reason": reason, "context_summary": context_summary, "handoff_id": handoff["handoff_id"]},
+                now,
+            )
+        self.append_handoff_event(
+            handoff["handoff_id"],
+            "assignment_handoff",
+            actor,
+            {"assignment_id": assignment_id, "from_worker": from_worker, "to_worker": to_worker, "reason": reason, "context_summary": context_summary},
+            now,
+        )
+        updated = self.get_assignment(assignment_id)
+        return {"handoff": self.get_handoff(handoff["handoff_id"]), "assignment": updated}
+
     # ── handoffs ──────────────────────────────────────────────────────────
 
     def _handoff_from_row(self, row: sqlite3.Row) -> dict:
@@ -3459,6 +6401,11 @@ class Storage:
         data["handoff_id"] = handoff_id
         data["room_id"] = room_id
         data["room_name"] = room_id
+        data["assignment_id"] = data.get("assignment_id") or ""
+        data["from_worker"] = data.get("from_worker") or data.get("from_agent") or ""
+        data["to_worker"] = data.get("to_worker") or data.get("to_agent") or ""
+        data["reason"] = data.get("reason") or data.get("summary") or ""
+        data["context_summary"] = data.get("context_summary") or data.get("recommended_next_step") or ""
         open_questions_raw = data.get("open_questions") or data.pop("open_questions_json", "") or "[]"
         risks_raw = data.get("risks") or data.pop("risks_json", "") or "[]"
         data["open_questions"] = json.loads(open_questions_raw) if open_questions_raw.startswith("[") else open_questions_raw
@@ -3475,6 +6422,7 @@ class Storage:
         from_agent: str | None = None,
         to_agent: str | None = None,
         task_id: str | None = None,
+        assignment_id: str | None = None,
         room_id: str | None = None,
         room_name: str | None = None,
         goal_id: str | None = None,
@@ -3502,14 +6450,14 @@ class Storage:
             self._conn.execute(
                 """
                 INSERT INTO handoffs (
-                    id, handoff_id, created_at, updated_at, room_id, room_name, task_id,
+                    id, handoff_id, created_at, updated_at, room_id, room_name, task_id, assignment_id,
                     goal_id, from_agent, to_agent, status, summary, open_questions, risks,
                     recommended_next_step, confidence, linked_message_ids_json,
                     linked_decision_ids_json, accepted_at, rejected_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                 """,
                 (
-                    record_id, record_id, now, now, room, room, task_id, goal_id,
+                    record_id, record_id, now, now, room, room, task_id, assignment_id, goal_id,
                     from_agent, to_agent, summary, questions_text, risks_text,
                     recommended_next_step, confidence,
                     json.dumps(linked_message_ids or [], ensure_ascii=False),
@@ -3532,6 +6480,7 @@ class Storage:
         self,
         room_id: str | None = None,
         room_name: str | None = None,
+        assignment_id: str | None = None,
         status: str | None = None,
         agent: str | None = None,
         limit: int = 50,
@@ -3545,6 +6494,9 @@ class Storage:
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
+        if assignment_id is not None:
+            clauses.append("assignment_id = ?")
+            params.append(assignment_id)
         if agent is not None:
             clauses.append("(from_agent = ? OR to_agent = ?)")
             params.extend([agent, agent])
@@ -3562,6 +6514,7 @@ class Storage:
             return self.get_handoff(handoff_id)
         allowed = {
             "from_agent", "to_agent", "task_id", "room_id", "room_name", "goal_id",
+            "assignment_id",
             "summary", "open_questions", "risks", "recommended_next_step", "confidence",
             "status", "linked_message_ids", "linked_decision_ids", "accepted_at",
             "rejected_at", "completed_at",

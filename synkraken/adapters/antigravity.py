@@ -42,8 +42,8 @@ class AntigravityAdapter(BaseAdapter):
         base_command = self.config.get("command", ["agy"])
         timeout = int(self.config.get("timeout_seconds", 120))
         command = list(base_command) + [
-            "--print",
             "--dangerously-skip-permissions",
+            "--print",
             message.body,
         ]
 

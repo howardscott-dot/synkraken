@@ -2,8 +2,9 @@
 
 ## Purpose
 
-SynKraken coordinates AI workforces without becoming the worker, model, or
-runtime. It is the local control plane around heterogeneous runtimes.
+SynKraken is an open-source AI Workforce Operating System. It coordinates AI
+workforces without becoming the worker, model, or runtime. Its core is the
+local operator control plane around heterogeneous runtimes.
 
 ## Responsibilities
 
@@ -22,6 +23,8 @@ SynKraken is responsible for:
   trust scores, health statuses, and lightweight incident summaries
 - runtime discovery that inventories local tools without executing work,
   inferring subscriptions, or storing secrets
+- spatial operations over workforce objects through Console canvas nodes,
+  relationships, inspector views, and detail screens
 
 SynKraken is not responsible for:
 
@@ -111,3 +114,11 @@ replayable.
 This governance layer is not RBAC, enterprise IAM, a policy DSL, hidden
 autonomy, or an agent permission system. It is the local authority ledger for
 operator-controlled execution flow.
+
+## Product Boundary
+
+SynKraken may be ambitious as an operating layer for AI workforces, but public
+documentation must stay honest about current scope. It is local-first. It is
+not a cloud SaaS claim. Proposal execution for sensitive actions is simulated
+in v0.1. Operator surfaces should not imply hidden autonomous production
+execution.

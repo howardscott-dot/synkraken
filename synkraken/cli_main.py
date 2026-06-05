@@ -789,11 +789,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_rooms.add_argument("--limit", type=int, default=50)
     add_base_url_arg(p_rooms)
 
-    p_memory = sub.add_parser("memory", help="List or govern shared memory")
-    p_memory.add_argument("action", nargs="?", choices=["list", "approve", "reject", "archive", "edit"], default="list")
+    p_memory = sub.add_parser("memory", help="List or govern shared workforce memory")
+    p_memory.add_argument("action", nargs="?", choices=["list", "pending", "note", "approve", "reject", "archive", "edit"], default="list")
     p_memory.add_argument("id", nargs="?", help="Memory id for approve/reject/archive")
+    p_memory.add_argument("--title", default=None, help="Memory note title")
+    p_memory.add_argument("--body", default=None, help="Memory note body")
     p_memory.add_argument("--content", default=None, help="Replacement memory content for edit")
     p_memory.add_argument("--type", dest="memory_type", default=None, help="Replacement memory type for edit")
+    p_memory.add_argument("--scope-type", default="global", help="Memory scope type")
+    p_memory.add_argument("--scope-id", default=None, help="Memory scope id")
+    p_memory.add_argument("--importance", default="medium", help="Memory importance")
     p_memory.add_argument("--confidence", type=int, default=None, help="Replacement confidence for edit")
     p_memory.add_argument("--status", default=None, help="Filter by status")
     p_memory.add_argument("--room", default=None, help="Filter by room")
@@ -1113,9 +1118,11 @@ def main() -> None:
                     print(f"{room.get('name')} members={room.get('member_count')} last={room.get('last_activity') or room.get('created_at')}")
             return
         if args.command == "memory":
-            if args.action == "list":
+            if args.action in {"list", "pending"}:
                 query = [f"limit={args.limit}"]
-                if args.status:
+                if args.action == "pending":
+                    query.append("status=proposed")
+                elif args.status:
                     query.append(f"status={urllib.parse.quote(args.status)}")
                 if args.room:
                     query.append(f"room={urllib.parse.quote(args.room)}")
@@ -1124,6 +1131,19 @@ def main() -> None:
                     print(json.dumps(data, indent=2, ensure_ascii=False))
                 else:
                     print_memory(data)
+                return
+            if args.action == "note":
+                if not args.title or not args.body:
+                    raise ValueError("memory note requires --title and --body")
+                result = post_json(f"{base}/v1/memory/operator-note", {
+                    "title": args.title,
+                    "body": args.body,
+                    "scope_type": args.scope_type,
+                    "scope_id": args.scope_id,
+                    "importance": args.importance,
+                    "actor": "operator",
+                })
+                print(json.dumps(result, indent=2, ensure_ascii=False))
                 return
             if not args.id:
                 raise ValueError(f"memory id required for {args.action}")

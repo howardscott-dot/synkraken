@@ -97,6 +97,14 @@ def main() -> None:
                     "timestamp": "2026-05-24T12:00:02+00:00",
                     "body": "   ",
                 },
+                {
+                    "message_id": "m4",
+                    "source": "new-runtime-42",
+                    "target": "synkraken-tui",
+                    "timestamp": "2026-05-24T12:00:04+00:00",
+                    "body": "wrapped result",
+                    "metadata": {"quality": "suspicious_output"},
+                },
             ],
             "deliveries": [
                 {
@@ -113,14 +121,16 @@ def main() -> None:
     chat_text = "\n".join(str(line[0]) for line in chat_lines)
     assert "crush" in chat_text
     assert "google-antigravity" in chat_text
+    assert "new-runtime-42" in chat_text
     assert "[empty reply]" in chat_text
+    assert "[suspicious output]" in chat_text
 
     deliveries = [
-        {"adapter_id": "claude", "runtime_name": "claude", "ok": True, "body": "ack"},
+        {"adapter_id": "claude", "runtime_name": "claude", "ok": True, "body": "ack", "duration_ms": 4774},
         {"adapter_id": "goose", "runtime_name": "goose", "ok": True, "body": ""},
         {"adapter_id": "hermes", "runtime_name": "hermes", "ok": False, "error": "failed"},
         {"adapter_id": "openclaw-main", "runtime_name": "openclaw-main", "ok": False, "error": "timeout"},
-        {"adapter_id": "crush", "runtime_name": "crush", "ok": True, "body": "ack"},
+        {"adapter_id": "crush", "runtime_name": "crush", "ok": True, "body": "ack", "quality": "suspicious_output"},
         {"adapter_id": "google-antigravity", "runtime_name": "google-antigravity", "ok": True, "body": "ack"},
     ]
     result_lines = _captured_panel_lines(
@@ -135,10 +145,32 @@ def main() -> None:
     for adapter_id in agent_ids:
         assert adapter_id in result_text, adapter_id
     assert result_text.count("acknowledged") == 3
+    assert "targets: 6" in result_text
+    assert "Broadcast result" in result_text
     assert "empty_reply" in result_text
     assert "failed" in result_text
-    assert "timed_out" in result_text
+    assert "timeout" in result_text
     assert "[empty reply]" in result_text
+    assert "suspicious_output" in result_text
+
+    label, workforce_lines = tui._workforce_command_lines(
+        {
+            "agents": {
+                "agents": [
+                    dict(agent, cost_tier="premium", usage_risk="medium")
+                    for agent in data["agents"]["agents"]
+                ]
+            },
+            "deliveries": {"deliveries": deliveries},
+        },
+        "http://127.0.0.1:0",
+    )
+    workforce_text = "\n".join(workforce_lines)
+    assert label == "workforce"
+    for adapter_id in agent_ids:
+        assert adapter_id in workforce_text, adapter_id
+    assert "quality: suspicious_output" in workforce_text
+    assert "recent empty_reply: 1" in workforce_text
 
     source = Path(tui.__file__).read_text(encoding="utf-8")
     assert "_AGENT_COLOR_PAIRS" not in source

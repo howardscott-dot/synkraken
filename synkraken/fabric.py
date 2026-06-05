@@ -15,7 +15,7 @@ import time
 from .adapters import build_adapter
 from .models import AdapterReply, FabricMessage, new_id, utc_now_iso
 from .router import resolve_targets
-from .storage import PROPOSAL_TYPES, SHARED_MEMORY_TYPES, Storage
+from .storage import LEGACY_SHARED_MEMORY_TYPES, PROPOSAL_TYPES, SHARED_MEMORY_IMPORTANCE, SHARED_MEMORY_SCOPES, SHARED_MEMORY_TYPES, Storage
 
 
 class EventBus:
@@ -74,7 +74,7 @@ class AgentFabric:
         self.retry_limit = int(routing.get("retry_limit", 1))
         self.retry_backoff_seconds = int(routing.get("retry_backoff_seconds", 1))
         memory = config.get("memory", {})
-        self.memory_max_items_injected = int(memory.get("max_items_injected", 5))
+        self.memory_max_items_injected = int(memory.get("max_items_injected", 8))
         self.memory_max_chars_injected = int(memory.get("max_chars_injected", 1200))
         self.memory_max_memory_chars = int(memory.get("max_memory_chars", 500))
         self.memory_min_confidence = int(memory.get("min_confidence", 70))
@@ -138,6 +138,35 @@ class AgentFabric:
             })
         summary["workforce"] = rows
         return summary
+
+    def workforce_presence(self) -> dict[str, Any]:
+        return self.storage.workforce_presence()
+
+    def recent_activity(self, limit: int = 50) -> dict[str, Any]:
+        return self.storage.list_recent_activity(limit=limit)
+
+    def live_activity(
+        self,
+        limit: int = 50,
+        *,
+        runtime: str | None = None,
+        room: str | None = None,
+        event_type: str | None = None,
+        mission: str | None = None,
+        outcome: str | None = None,
+        assignment: str | None = None,
+        active_missions: bool = False,
+    ) -> dict[str, Any]:
+        return self.storage.list_live_activity(
+            limit=limit,
+            runtime=runtime,
+            room=room,
+            event_type=event_type,
+            mission=mission,
+            outcome=outcome,
+            assignment=assignment,
+            active_missions=active_missions,
+        )
 
     def update_agent_profile(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         actor = str(payload.get("actor", "operator")).strip() or "operator"
@@ -438,13 +467,36 @@ class AgentFabric:
             return body
         return f"Room context:\n{memory_context}\n\nMessage:\n{body}"
 
-    def _shared_memory_context(self, room_name: str | None, *, mark_used: bool = True) -> tuple[str, list[dict[str, Any]]]:
-        memories = self.storage.select_shared_memory_for_injection(
-            room_name=room_name,
+    def _memory_scopes_from_context(
+        self,
+        *,
+        room_name: str | None = None,
+        runtime_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[tuple[str, str | None]]:
+        metadata = metadata or {}
+        return [
+            ("assignment", str(metadata.get("assignment_id") or "").strip() or None),
+            ("outcome", str(metadata.get("outcome_id") or "").strip() or None),
+            ("mission", str(metadata.get("mission_id") or "").strip() or None),
+            ("room", room_name),
+            ("runtime", runtime_id),
+        ]
+
+    def _shared_memory_context(
+        self,
+        room_name: str | None,
+        *,
+        runtime_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        mark_used: bool = True,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        memories = self.storage.select_workforce_memory_context(
+            scopes=self._memory_scopes_from_context(room_name=room_name, runtime_id=runtime_id, metadata=metadata),
             workspace=self.workspace,
             max_items=self.memory_max_items_injected,
             max_chars=self.memory_max_chars_injected,
-            min_confidence=self.memory_min_confidence,
+            min_confidence=0,
         )
         if not memories:
             return "", []
@@ -452,7 +504,9 @@ class AgentFabric:
         used_chars = len(lines[0])
         included: list[dict[str, Any]] = []
         for memory in memories:
-            line = f"- {memory.get('memory_type')}: {str(memory.get('content') or '').strip()}"
+            title = str(memory.get("title") or memory.get("memory_type") or "").strip()
+            body = str(memory.get("body") or memory.get("content") or "").strip()
+            line = f"- {memory.get('memory_id')} [{memory.get('memory_type')}] {title}: {body}"
             if included and used_chars + 1 + len(line) > self.memory_max_chars_injected:
                 continue
             if len(line) > self.memory_max_chars_injected:
@@ -464,12 +518,19 @@ class AgentFabric:
             self.storage.mark_shared_memory_used([memory["memory_id"] for memory in included])
         return "\n".join(lines), included
 
-    def _prompt_memory_context(self, room_name: str | None, *, mark_used: bool = True) -> tuple[str, list[dict[str, Any]]]:
+    def _prompt_memory_context(
+        self,
+        room_name: str | None,
+        *,
+        runtime_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        mark_used: bool = True,
+    ) -> tuple[str, list[dict[str, Any]]]:
         parts = []
         room_context = self._room_memory_context(room_name)
         if room_context:
             parts.append(f"Room context:\n{room_context}")
-        shared_context, memories = self._shared_memory_context(room_name, mark_used=mark_used)
+        shared_context, memories = self._shared_memory_context(room_name, runtime_id=runtime_id, metadata=metadata, mark_used=mark_used)
         if shared_context:
             parts.append(shared_context)
         return "\n\n".join(parts), memories
@@ -1171,7 +1232,7 @@ class AgentFabric:
         text = str(body or "").strip()
         if not text or "NO_MEMORY" in text.upper():
             return None
-        memory_type = "lesson"
+        memory_type = "handoff_memory"
         type_match = re.search(r"^\s*type\s*[:=-]\s*([a-z_]+)", text, flags=re.IGNORECASE | re.MULTILINE)
         if type_match and type_match.group(1).lower() in SHARED_MEMORY_TYPES:
             memory_type = type_match.group(1).lower()
@@ -1202,7 +1263,7 @@ class AgentFabric:
             f"Final report:\n{final_report}\n\n"
             "If this run produced a useful, durable, safe-to-reuse memory for future work, propose exactly one. "
             "Otherwise reply exactly NO_MEMORY.\n\n"
-            "Use this format when proposing:\nType: fact|decision|preference|rule|lesson|technical_note|project_context\nMemory: <one concise memory under the configured limit>\n"
+            "Use this format when proposing:\nType: room_summary|decision_memory|handoff_memory|mission_context|outcome_context|assignment_context|runtime_observation\nMemory: <one concise memory under the configured limit>\n"
             "Do not include transient details from the current message."
         )
         for agent in agents:
@@ -1223,7 +1284,8 @@ class AgentFabric:
             memory_type, content = parsed
             proposed = self.propose_memory({
                 "created_by": agent,
-                "room_name": room_name,
+                "scope_type": "room",
+                "scope_id": room_name,
                 "workspace": self.workspace,
                 "memory_type": memory_type,
                 "content": content,
@@ -1791,11 +1853,11 @@ class AgentFabric:
             workspace=self.workspace,
             max_items=self.memory_max_items_injected,
             max_chars=self.memory_max_chars_injected,
-            min_confidence=self.memory_min_confidence,
+            min_confidence=0,
         )
-        text = "\n".join(f"- {item['memory_type']}: {item['content']}" for item in memories)
+        text = "\n".join(f"- {item['memory_id']} {item['title']}: {item['body']}" for item in memories)
         return {
-            "approved_memories": len(self.storage.list_shared_memory(status="peer_approved", limit=1000)),
+            "approved_memories": len(self.storage.list_shared_memory(status="approved", limit=1000)),
             "injected_max_items": self.memory_max_items_injected,
             "injected_max_chars": self.memory_max_chars_injected,
             "max_memory_chars": self.memory_max_memory_chars,
@@ -1805,18 +1867,91 @@ class AgentFabric:
             "selected": memories,
         }
 
-    def propose_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
-        content = " ".join(str(payload.get("content", "")).split())
-        if not content:
-            raise ValueError("content required")
-        memory_type = str(payload.get("memory_type", "fact")).strip() or "fact"
-        if memory_type not in SHARED_MEMORY_TYPES:
-            raise ValueError(f"invalid memory_type: {memory_type}")
-        room_name = payload.get("room_name")
-        room_name = str(room_name).strip() if room_name is not None else None
-        room_name = room_name or None
+    def memory_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        scope_type = str(payload.get("scope_type") or "").strip()
+        scope_id = str(payload.get("scope_id") or "").strip() or None
+        scopes = [(scope_type, scope_id)] if scope_type and scope_id else []
+        if scope_type == "global":
+            scopes = []
+        memories = self.storage.select_workforce_memory_context(
+            scopes=scopes,
+            workspace=self.workspace,
+            max_items=int(payload.get("max_items") or self.memory_max_items_injected),
+            max_chars=int(payload.get("max_chars") or self.memory_max_chars_injected),
+            min_confidence=0,
+        )
+        return {
+            "scope_type": scope_type or "global",
+            "scope_id": scope_id,
+            "max_items": int(payload.get("max_items") or self.memory_max_items_injected),
+            "memories": memories,
+            "memory_ids": [item["memory_id"] for item in memories],
+        }
+
+    def create_operator_memory_note(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title") or "").strip()
+        body = " ".join(str(payload.get("body") or payload.get("content") or "").split())
+        if not title:
+            raise ValueError("title required")
+        if not body:
+            raise ValueError("body required")
+        scope_type = str(payload.get("scope_type") or "global").strip() or "global"
+        scope_id = str(payload.get("scope_id") or "").strip() or None
+        if scope_type not in SHARED_MEMORY_SCOPES:
+            raise ValueError(f"invalid scope_type: {scope_type}")
+        if scope_type != "global" and not scope_id:
+            raise ValueError("scope_id required for scoped memory")
+        importance = str(payload.get("importance") or "medium").strip() or "medium"
+        if importance not in SHARED_MEMORY_IMPORTANCE:
+            raise ValueError(f"invalid importance: {importance}")
+        room_name = scope_id if scope_type == "room" else None
         if room_name and not self.storage.room_exists(room_name):
             raise ValueError(f"room not found: {room_name}")
+        actor = str(payload.get("created_by") or payload.get("actor") or "operator").strip() or "operator"
+        now = utc_now_iso()
+        memory = self.storage.create_shared_memory(
+            memory_id=str(payload.get("memory_id") or "").strip() or new_id(),
+            room_name=room_name,
+            workspace=str(payload.get("workspace") or self.workspace or "").strip() or None,
+            memory_type="operator_note",
+            title=title,
+            body=body,
+            content=body,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            source_type="operator",
+            source_id=str(payload.get("source_id") or "").strip() or None,
+            status="approved",
+            importance=importance,
+            confidence=100,
+            created_by=actor,
+            created_at=now,
+            expires_at=str(payload.get("expires_at") or "").strip() or None,
+        )
+        self.storage.record_shared_memory_event(memory["memory_id"], "memory_approved", actor=actor, details={"operator_note": True})
+        self._memory_visible(room_name, f"Operator memory note approved: {memory['memory_id']}\nTitle: {title}", memory_id=memory["memory_id"], actor=actor, event="memory_approved")
+        self.event_bus.publish("memory.created", {"memory_id": memory["memory_id"], "status": "approved", "actor": actor})
+        return {"memory": memory}
+
+    def propose_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        content = " ".join(str(payload.get("body", payload.get("content", ""))).split())
+        if not content:
+            raise ValueError("body required")
+        memory_type = str(payload.get("memory_type", "operator_note")).strip() or "operator_note"
+        if memory_type not in SHARED_MEMORY_TYPES:
+            raise ValueError(f"invalid memory_type: {memory_type}")
+        scope_type = str(payload.get("scope_type") or ("room" if payload.get("room_name") else "global")).strip() or "global"
+        scope_id = str(payload.get("scope_id") or payload.get("room_name") or "").strip() or None
+        if scope_type not in SHARED_MEMORY_SCOPES:
+            raise ValueError(f"invalid scope_type: {scope_type}")
+        if scope_type != "global" and not scope_id:
+            raise ValueError("scope_id required for scoped memory")
+        room_name = scope_id if scope_type == "room" else None
+        if room_name and not self.storage.room_exists(room_name):
+            raise ValueError(f"room not found: {room_name}")
+        importance = str(payload.get("importance") or "medium").strip() or "medium"
+        if importance not in SHARED_MEMORY_IMPORTANCE:
+            raise ValueError(f"invalid importance: {importance}")
         workspace = str(payload.get("workspace") or self.workspace or "").strip() or None
         actor = str(payload.get("created_by") or payload.get("actor") or "operator").strip() or "operator"
         now = utc_now_iso()
@@ -1830,8 +1965,15 @@ class AgentFabric:
             room_name=room_name,
             workspace=workspace,
             memory_type=memory_type,
+            title=str(payload.get("title") or memory_type.replace("_", " ").title()).strip(),
+            body=content,
             content=content,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            source_type=str(payload.get("source_type") or "operator").strip() or "operator",
+            source_id=str(payload.get("source_id") or "").strip() or None,
             status=initial_status,
+            importance=importance,
             confidence=confidence,
             created_by=actor,
             created_at=now,
@@ -1883,7 +2025,7 @@ class AgentFabric:
                 actor="synkraken",
                 event="peer_review_requested",
             )
-            if payload.get("auto_review", True):
+            if payload.get("auto_review", False):
                 return self.review_memory(memory_id, {"actor": reviewer, "reviewer": reviewer, "auto": True})
         return {"memory": memory, "reviewer": reviewer, "status": memory["status"]}
 
@@ -1942,7 +2084,7 @@ class AgentFabric:
         duplicate_detected = bool(duplicate and duplicate.get("memory_id") != memory_id)
         too_long = len(str(memory.get("content") or "")) > self.memory_max_memory_chars
         approve = decision == "approve" and confidence >= self.memory_min_confidence and not duplicate_detected and not too_long
-        status = "peer_approved" if approve else "rejected"
+        status = "approved" if approve else "rejected"
         if duplicate_detected:
             reason = reason or "duplicate memory"
         if too_long:
@@ -1965,14 +2107,14 @@ class AgentFabric:
             memory_id,
             fields,
             actor=reviewer,
-            event_type="peer_approved" if approve else "peer_rejected",
+            event_type="memory_approved" if approve else "memory_rejected",
         )
         self._memory_visible(
             memory.get("room_name"),
             f"Shared memory peer {'approved' if approve else 'rejected'}: {memory_id}\nReviewer: {reviewer}\nConfidence: {confidence}\nReason: {reason or '(none)'}",
             memory_id=memory_id,
             actor=reviewer,
-            event="peer_approved" if approve else "peer_rejected",
+            event="memory_approved" if approve else "memory_rejected",
         )
         self.event_bus.publish("memory.reviewed", {"memory_id": memory_id, "status": status, "reviewer": reviewer})
         return {"memory": updated, "review": parsed, "delivery": delivery, "status": status}
@@ -1984,11 +2126,11 @@ class AgentFabric:
         now = utc_now_iso()
         updated = self.storage.update_shared_memory(
             memory_id,
-            {"status": "peer_approved", "approved_by": actor, "approved_at": now},
+            {"status": "approved", "approved_by": actor, "approved_at": now, "confidence": max(100, int(memory.get("confidence") or 0))},
             actor=actor,
-            event_type="human_overridden",
+            event_type="memory_approved",
         )
-        self._memory_visible(memory.get("room_name"), f"Shared memory approved by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        self._memory_visible(memory.get("room_name"), f"Shared memory approved: {memory_id}", memory_id=memory_id, actor=actor, event="memory_approved")
         self.event_bus.publish("memory.approved", {"memory_id": memory_id, "actor": actor})
         return {"memory": updated}
 
@@ -2012,7 +2154,7 @@ class AgentFabric:
             fields["memory_type"] = memory_type
         if "confidence" in payload:
             fields["confidence"] = max(0, min(100, int(payload.get("confidence") or 0)))
-        if memory.get("status") == "peer_approved" and fields:
+        if memory.get("status") == "approved" and fields:
             fields["status"] = "proposed"
             fields["approved_by"] = None
             fields["approved_at"] = None
@@ -2036,9 +2178,9 @@ class AgentFabric:
             memory_id,
             {"status": "rejected", "review_result": "reject", "review_reason": reason or "human override"},
             actor=actor,
-            event_type="human_overridden",
+            event_type="memory_rejected",
         )
-        self._memory_visible(memory.get("room_name"), f"Shared memory rejected by human override: {memory_id}", memory_id=memory_id, actor=actor, event="human_overridden")
+        self._memory_visible(memory.get("room_name"), f"Shared memory rejected: {memory_id}", memory_id=memory_id, actor=actor, event="memory_rejected")
         self.event_bus.publish("memory.rejected", {"memory_id": memory_id, "actor": actor})
         return {"memory": updated}
 
@@ -2901,7 +3043,13 @@ class AgentFabric:
         )
         reply_context = room_context or (original_target if original_target.startswith("room:") else None)
         memory_room = self._presence_room(reply_context)
-        memory_context, memory_items = self._prompt_memory_context(memory_room)
+        memory_context, memory_items = self._prompt_memory_context(memory_room, metadata=message.metadata, mark_used=False)
+        if memory_items:
+            message.metadata = dict(message.metadata) | {
+                "memory_context_available": True,
+                "available_memory_ids": [item["memory_id"] for item in memory_items],
+            }
+            self.storage.save_message(message)
         transcript_target = reply_context or ("broadcast" if original_target == "broadcast" else None)
         deliveries: list[dict[str, Any]] = []
         dead_letters: list[dict[str, Any]] = []
@@ -2914,9 +3062,20 @@ class AgentFabric:
             adapter = self.adapters[delivery_target]
             runtime_name = adapter.health().get('runtime_name', delivery_target)
             delivery_message = self._delivery_message_for_target(message, delivery_target)
-            if memory_context:
-                delivery_message.body = self._with_memory_context(delivery_message.body, memory_context)
-                delivery_message.metadata = dict(delivery_message.metadata) | {"room_memory_injected": True}
+            target_memory_context, target_memory_items = self._prompt_memory_context(
+                memory_room,
+                runtime_id=delivery_target,
+                metadata=message.metadata,
+                mark_used=True,
+            )
+            if target_memory_context:
+                memory_ids = [item["memory_id"] for item in target_memory_items]
+                delivery_message.body = self._with_memory_context(delivery_message.body, target_memory_context)
+                delivery_message.metadata = dict(delivery_message.metadata) | {
+                    "room_memory_injected": True,
+                    "shared_memory_injected": True,
+                    "injected_memory_ids": memory_ids,
+                }
             target_deliveries: list[dict[str, Any]] = []
             target_dead_letters: list[dict[str, Any]] = []
             last_reply: AdapterReply | None = None
@@ -2945,6 +3104,9 @@ class AgentFabric:
                     reply_context=reply_context,
                     status=terminal_status,
                 )
+                if target_memory_items:
+                    delivery_payload["injected_memory_ids"] = [item["memory_id"] for item in target_memory_items]
+                    delivery_payload["injected_memory"] = target_memory_items
                 reply_message = self._persist_reply_message(
                     message, delivery_target, reply, transcript_target,
                 )

@@ -1,154 +1,100 @@
 # Product Vision
 
-## SynKraken in one sentence
+SynKraken is an open-source Company Operating System powered by an AI
+Workforce.
 
-SynKraken is the **open-source control plane for AI workforces**: a
-local-first, runtime-neutral place to see, direct, govern, coordinate, and
-recover work across heterogeneous AI runtimes.
+It exists because AI work is becoming multi-worker. Operators increasingly use
+more than one model, CLI, coding assistant, and local runtime. Each tool can be
+useful alone, but real work needs shared context, durable authority, visible
+handoffs, traceable failures, and a way to decide which worker should be
+trusted with which work.
 
-## Release posture
+## Why Governance Matters
 
-SynKraken is not trying to become another coding agent, orchestration LLM,
-chatbot, CrewAI clone, or hidden autonomous swarm. It is trying to become the
-best local control plane for people who deliberately use multiple agents and
-want the work to remain visible, steerable, and theirs.
+AI workers can draft plans, inspect code, propose changes, review outputs, and
+summarize incidents. They can also fail silently, hallucinate confidence, drift
+from instructions, emit empty replies, time out, or propose actions that should
+not run without review.
 
-## Product thesis
+Governance is the difference between using AI as a chat window and operating
+AI as a workforce. SynKraken treats proposals, approvals, decisions, handoffs,
+memory, failures, and runtime quality as first-class operational records.
 
-AI agents are becoming useful in plural. The problem is no longer only how to
-run one assistant, but how to understand and steer several of them without
-handing control to a remote orchestration platform.
+## Why Chat Is Insufficient
 
-SynKraken should make local AI workforce operation legible:
+Chat is a good interaction primitive, but not a complete operating model.
+Persistent AI work needs:
 
-- the human remains the operator
-- agents remain distinct runtimes with their own strengths
-- coordination is explicit, inspectable, and durable
-- the system stays small enough to trust
+- rooms with durable transcripts
+- visible worker participation
+- decisions and handoffs that survive the chat scrollback
+- approval records for sensitive actions
+- replayable traces after something fails
+- trust and health signals for each runtime
+- recovery paths for dead letters and timeouts
 
-Users own subscriptions, API keys, costs, and runtimes. SynKraken owns
-visibility, governance, coordination, and recovery.
+SynKraken keeps chat where it is useful, then surrounds it with operational
+state.
 
-## Product principles
+## Why Persistent Operational Systems Matter
 
-### Local-first
+AI work often fails later than the initial prompt. A response may be empty. A
+runtime may identify as the wrong worker. A proposal may need review. A room
+may need memory of a decision made yesterday. A team run may block halfway
+through.
 
-The default operating model is one local machine, local storage, and loopback
-networking. SynKraken should work without SaaS infrastructure and should keep
-conversation history under the operator's control.
+If that state lives only in terminals, it disappears. SynKraken stores the
+operational trail in SQLite and exposes it through daemon APIs and operator
+surfaces.
 
-### Human-controlled coordination
+## Why Workforce Management Matters
 
-SynKraken coordinates agents; it does not replace operator judgment. The human
-chooses the room, message, task, and next action. Automation may grow later,
-but the command deck must remain understandable and interruptible.
+Different runtimes have different strengths, costs, permissions, speed, and
+failure modes. SynKraken does not assume all workers are equal. Runtime
+reputation and workforce health make observed reliability visible without
+turning it into opaque AI scoring.
 
-### One backend, multiple operator surfaces
+The operator remains in charge of which runtimes are enabled and how they are
+used.
 
-The TUI and Web GUI are peers over the same backend. A message sent from either
-surface should create the same stored record, delivery history, and live events.
-No client should become a private fork of the product model.
+## Why Auditability Matters
 
-### First-class work objects
+AI work should be inspectable after the fact. SynKraken's flight recorder and
+trace views reconstruct what happened from messages, deliveries, dead letters,
+decisions, handoffs, proposals, tasks, goals, and memory events. This is
+necessary for debugging, trust, governance, and recovery.
 
-The product model is broader than chat. SynKraken should treat these as durable
-objects rather than incidental UI state:
+## Why Human Approval Matters
 
-- rooms
-- messages
-- agents
-- memory
-- tasks
-- decisions
+SynKraken's authority doctrine is:
 
-Rooms, messages, and agents exist today. Memory, tasks, and decisions define
-the next durable layer of the command deck.
+```text
+Agents propose.
+Humans approve.
+SynKraken executes and records.
+```
 
-Agent presence is part of the operational agent record: it tells the operator
-whether an agent is online, idle, working, blocked, offline, or disabled, and
-when SynKraken last saw activity. Presence is not memory, decisions,
-autonomous scheduling, or chain-of-thought.
+In the current governance model, execution records are simulated for sensitive
+proposal actions. That limitation is deliberate. SynKraken is building the
+authority ledger before expanding governed execution.
 
-These objects should be:
+## Direction
 
-- durable enough to survive a UI session
-- inspectable without special tooling
-- linkable to one another
-- portable across current and future client surfaces
+Over the next several years SynKraken should become the open-source operating
+layer for company work powered by AI workforces:
 
-### Heterogeneous by design
+- project-centric company workspaces that gather conversations, knowledge,
+  deliverables, team activity, and decisions
+- richer spatial operations over workers, rooms, proposals, traces, incidents,
+  decisions, and handoffs
+- better runtime reputation and historical inspection
+- deeper room, memory, decision, and handoff workflows
+- stronger packaging for local operators
+- governed execution extensions under explicit human approval
+- optional product integrations that preserve the local-first control-plane
+  model
 
-SynKraken should work with Claude Code, Goose, OpenClaw, Hermes, and future
-agents through small adapters rather than forcing a single runtime choice.
-
-### Lightweight by default
-
-The project should continue to avoid heavy dependencies unless they buy a
-clear product advantage. Small stdlib-first pieces are preferred over large
-framework commitments.
-
-## Product surfaces
-
-### TUI
-
-The TUI is the fast, keyboard-driven operator console. It should remain a
-first-class interface for people who live in terminals.
-
-### Web GUI
-
-The Web GUI is the visual command deck: easier to scan, easier to share on one
-screen, and a better foundation for richer work objects over time.
-
-### Runtime communication
-
-The runtime communication skill lets participating agents call back into
-SynKraken so the system is not only a human broadcast console; it is a shared
-local fabric under operator-visible governance.
-
-## Product boundaries
-
-SynKraken **is**:
-
-- a local-first control plane
-- a runtime-neutral management harness
-- a governance layer
-- a memory layer
-- a coordination system
-- an observability layer
-- a durable record of multi-agent work
-
-SynKraken is **not**:
-
-- another coding agent
-- an orchestration LLM
-- a chatbot
-- a CrewAI clone
-- a hidden autonomous swarm
-
-## Near-term product direction
-
-Version 0.2 should establish the foundation:
-
-1. document the product and architecture clearly
-2. preserve the existing daemon and TUI
-3. add the first Web Command Deck over the same backend
-4. prepare the object model for memory, tasks, and decisions without rushing
-   those features into an unstable design
-
-## Success measures for v0.2
-
-Version 0.2 succeeds if:
-
-1. a new contributor can understand the product shape from the docs
-2. the TUI and Web GUI both operate over the same backend concepts
-3. an operator can see agents, rooms, and live messages at a glance
-4. adding richer work objects later does not require rethinking the core model
-
-## Later integrations
-
-External product integrations belong later, after the local command deck has a
-stable product shape and durable object model. They should integrate with
-SynKraken's concepts rather than define them prematurely.
-
-The product stack is OSS, then Packs, then Vertical products. The OSS layer
-defines generic durable concepts; packs and vertical products extend them.
+The future SynKraken experience is a project-centric company workspace where
+operators can create projects, talk to workers, store knowledge, review
+deliverables, and make decisions, with technical operations available in
+Advanced when inspection is needed.

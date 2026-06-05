@@ -2,8 +2,9 @@
 
 ## Purpose
 
-SynKraken treats multiple AI runtimes as an operator-visible workforce. The
-workforce model is about coordination and governance, not anthropomorphic
+SynKraken treats multiple AI runtimes as an operator-visible workforce inside
+an open-source AI Workforce Operating System. The workforce model is about
+coordination, governance, reliability, and recovery, not anthropomorphic
 identity or hidden autonomy.
 
 ## Core Objects
@@ -30,6 +31,8 @@ identity or hidden autonomy.
 - flight records: read-only reconstructions of work assembled from existing
   messages, deliveries, failures, decisions, handoffs, task events, and goal
   events
+- canvas nodes and relationships: spatial Console representations of
+  daemon-owned workforce objects and evidence-backed links
 
 ## Bounded Workflows
 
@@ -160,3 +163,10 @@ tracked in the registry, but they are not treated as active agents until an
 adapter exists and the operator enables them. Once a leaf adapter is registered
 and configured (e.g. Goose, Hermes, OpenClaw, Claude Code, Crush,
 Google Antigravity), the runtime becomes a supported, active worker.
+
+## Canonical Vocabulary
+
+Canonical product vocabulary is maintained in
+[`CORE_CONCEPTS.md`](CORE_CONCEPTS.md). Workforce documentation should reuse
+those terms rather than introducing parallel names for workers, rooms,
+proposals, traces, incidents, relationships, or canvas nodes.

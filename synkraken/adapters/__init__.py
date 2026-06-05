@@ -5,6 +5,7 @@ from .goose import GooseAdapter
 from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 from .antigravity import AntigravityAdapter
+from .odysseus import OdysseusAdapter
 
 ADAPTER_TYPES = {
     "claude": ClaudeAdapter,
@@ -13,6 +14,7 @@ ADAPTER_TYPES = {
     "hermes": HermesAdapter,
     "openclaw": OpenClawAdapter,
     "google_antigravity": AntigravityAdapter,
+    "odysseus": OdysseusAdapter,
 }
 
 
@@ -21,4 +23,3 @@ def build_adapter(adapter_id: str, config: dict) -> BaseAdapter:
     if adapter_type not in ADAPTER_TYPES:
         raise ValueError(f"Unsupported adapter type: {adapter_type}")
     return ADAPTER_TYPES[adapter_type](adapter_id=adapter_id, config=config)
-

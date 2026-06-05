@@ -2,9 +2,11 @@
 
 ## Locked Position
 
-SynKraken is a local-first, runtime-neutral AI workforce control plane. It is a
-management harness, governance layer, memory layer, coordination system, and
-observability layer around AI runtimes the user owns.
+SynKraken is an open-source AI Workforce Operating System. Its core is a
+local-first, runtime-neutral operator control plane for heterogeneous AI
+workers. It is a management harness, runtime governance platform, memory
+layer, coordination system, and observability layer around AI runtimes the user
+owns.
 
 It is not another coding agent, an orchestration LLM, a chatbot, a CrewAI
 clone, or a hidden autonomous swarm.
@@ -27,18 +29,19 @@ products extend the same durable concepts rather than creating parallel models.
 
 ## Current system
 
-SynKraken is a local message fabric with two operator surfaces:
+SynKraken is a local AI workforce control plane with multiple operator
+surfaces:
 
 ```text
-                         ┌────────────────────┐
-                         │   TUI / Web GUI    │
-                         └─────────┬──────────┘
-                                   │ HTTP + SSE
-                                   ▼
+             ┌─────────────────────────────────────────┐
+             │ TUI / Web Command Deck / Console desktop │
+             └───────────────────┬─────────────────────┘
+                                 │ HTTP + SSE where used
+                                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ synkraken daemon                                              │
 │ - HTTP API                                                    │
-│ - AgentFabric dispatch                                        │
+│ - Runtime fabric dispatch                                     │
 │ - retry / dead-letter handling                                │
 │ - EventBus → SSE                                              │
 │ - SQLite persistence                                          │
@@ -48,8 +51,31 @@ SynKraken is a local message fabric with two operator surfaces:
       Claude Code / Goose / OpenClaw / Hermes / Crush / Google Antigravity / future agents
 ```
 
-The daemon remains the source of truth. Client surfaces should render and
-invoke backend concepts; they should not create parallel data models.
+The daemon remains the source of truth. Client surfaces render and invoke
+daemon-owned workforce concepts; they should not create parallel data models.
+
+Console adds the Spatial Operations Canvas as the desktop Console home. It is
+a React/TypeScript spatial operator surface over the same daemon APIs, not a
+second backend. Canvas nodes represent daemon-owned objects such as runtimes,
+rooms, proposals, traces, incidents, and dead letters. Canvas layout state is
+local UI state persisted in browser localStorage; durable business state,
+execution authority, governance, recovery, and trace data remain owned by the
+daemon. Rust remains limited to Tauri shell, packaging, native integration, and
+future native affordances.
+
+Console v0.4 extends that canvas with client-side inspector and focus controls.
+Those controls are still presentation and navigation state only: they create or
+focus local node panels and route operators to existing detail screens. They do
+not add daemon state, direct SQLite access, Rust business logic, or alternate
+execution authority.
+
+Console v0.5 introduces a daemon-owned canvas relationship read model exposed
+at `GET /v1/canvas/relationships`. The endpoint derives relationship records
+from persisted proposals, proposal links, rooms, dead letters, runtime
+reputation, and latest incident anchors. Console renders relationship lines and
+inspector jumps from these records instead of deriving production graph edges
+in the browser. The endpoint is a read model only; it does not create new
+workflow state or layout state.
 
 Runtime discovery is a config-time control-plane action. It checks local
 executables, common binary directories, safe version output, and generic config
@@ -66,7 +92,7 @@ or infer provider account state.
 | Leaf adapters | new runtimes should not destabilize the fabric |
 | Separate web server | isolates browser concerns while preserving daemon APIs |
 | Generic shipped defaults | keeps project-specific context in install/workspace/room/runtime config |
-| Control plane, not agent brain | keeps SynKraken responsible for visibility and governance rather than runtime behavior |
+| Operator control plane, not agent brain | keeps SynKraken responsible for visibility and governance rather than runtime behavior |
 | Roles separate from identities | lets bounded workflows assign responsibilities without shipping private aliases or personal context |
 
 ## Existing backend components
@@ -121,7 +147,7 @@ decisions, or cloud sync.
 Peer-reviewed workspace knowledge proposed by agents or operators and approved
 by SynKraken rules. Shared Memory entries are inspectable, bounded, and linked
 to optional room, workspace, team run, task, or source message context. Only
-`peer_approved` entries may be injected, and injection is labelled visibly.
+`approved` entries may be injected, and injection is labelled visibly.
 
 Shared Memory is not hidden autonomous memory, vector search, RAG, personal
 profiling, cloud sync, unlimited context stuffing, or autonomous background
@@ -317,6 +343,15 @@ context, or industry assumptions.
 ### TUI
 
 The TUI calls the daemon directly on `127.0.0.1:9460`.
+
+### Console Desktop
+
+SynKraken Console v0.1 lives in `apps/console`. It is a Tauri v2 desktop client
+using React, TypeScript, and Tailwind. It connects to the daemon HTTP API at
+`http://127.0.0.1:9460` by default and focuses on workforce health, proposals,
+proposal detail, trace inspection, latest incident context, dead letters, and
+command-palette navigation. It must not read or mutate SQLite directly, run a
+separate backend service, or duplicate daemon governance logic.
 
 ### Web Command Deck
 
@@ -539,10 +574,9 @@ When adding a new runtime:
 2. reuse shared normalization where practical
 3. update discovery and docs only when the runtime is stable enough to support
 
-## Non-goals for the v0.2 foundation
+## Non-goals for the current foundation
 
-- replacing the TUI
 - adding autonomous scheduling
-- building memory or decisions before their model is designed
 - introducing a heavyweight frontend or backend framework
 - making an external product integration a prerequisite for local use
+- claiming cloud SaaS, enterprise IAM, or autonomous production execution

@@ -66,8 +66,8 @@ def main() -> None:
             "setSelectedNode(id)",
             'key={node.id}',
             "nodeErrors[node.id]",
-            '"Room not found"',
-            'message.toLowerCase().includes("not found") ? "Room not found"',
+            "roomMissingWarning",
+            "isRoomNotFoundError(roomError)",
         ],
         "node identity and local room errors",
     )

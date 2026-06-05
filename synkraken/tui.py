@@ -1412,7 +1412,7 @@ def _memory_command_lines(cmd: str, base: str, state: dict) -> tuple[str, list[s
     if cmd in {'/memory', '/memory pending', '/memory approved', '/memory rejected'}:
         status_map = {
             '/memory pending': 'proposed',
-            '/memory approved': 'peer_approved',
+            '/memory approved': 'approved',
             '/memory rejected': 'rejected',
         }
         status = status_map.get(cmd)

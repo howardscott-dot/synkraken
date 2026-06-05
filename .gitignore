@@ -9,6 +9,7 @@ __pycache__/
 # Local data and logs
 data/
 audits/
+cache/
 *.db
 *.sqlite
 *.sqlite3
@@ -19,6 +20,11 @@ config.local.json
 
 # Local runtime state
 *.pid
+
+# Node / Tauri
+node_modules/
+dist/
+apps/console/src-tauri/target/
 
 # OS/editor
 .DS_Store

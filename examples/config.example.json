@@ -65,6 +65,15 @@
       "permission_mode": "bypassPermissions",
       "output_format": "text",
       "message_prefix": "Keep replies focused and structured."
+    },
+    "odysseus": {
+      "_comment": "Experimental optional adapter. Odysseus must be installed, running separately, token-authenticated, and already configured with its internal model endpoint. SynKraken does not install skills, MCP, tasks, or webhooks into Odysseus yet.",
+      "type": "odysseus",
+      "enabled": false,
+      "base_url": "http://127.0.0.1:7000",
+      "token_env": "ODYSSEUS_TOKEN",
+      "model": "mistral-small:latest",
+      "timeout_seconds": 120
     }
   }
 }

@@ -13,6 +13,7 @@ SKIP_DIRS = {
     ".pytest_cache",
     "__pycache__",
     "audits",
+    "cache",
     "data",
     "dist",
     "build",

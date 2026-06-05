@@ -7,6 +7,141 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- SynKraken Console v2.0 Project-Centric Company OS: reframed SynKraken as a
+  Company Operating System powered by an AI Workforce. Primary navigation is
+  now Home, Projects, Conversations, Knowledge, Workforce, and Advanced.
+  Projects become the daily operating centre with Overview, Conversations,
+  Knowledge, Deliverables, Team, and Decisions tabs. Deliverables become a
+  first-class project surface; Decisions is the human-facing governance layer;
+  and Advanced now contains governance, assignments, outcomes, missions,
+  traces, canvas, incidents, runtime diagnostics, proposal internals, dead
+  letters, and memory internals. Existing governance, memory, assignment,
+  mission, outcome, proposal, trace, incident, and workforce capabilities are
+  preserved behind the new project-centric model.
+- SynKraken Console v1.6 Living Workforce UX: reframed the Console around
+  conversation first, work second, governance third, and diagnostics last.
+  Primary navigation is now Home, Conversations, Work, Knowledge, Workforce,
+  Governance, and Search. Home is a deterministic chief-of-staff briefing;
+  Conversations gives the transcript the majority of the screen with members,
+  knowledge, assignments, delivery results, proposals, handoffs, and
+  diagnostics in drawers; Work uses educational empty states; Knowledge
+  replaces Memory language; Workforce uses worker cards; Governance becomes an
+  inbox; Activity is timeline-first; and Search provides one Spotlight-style
+  result surface. This is a product experience redesign only and does not
+  change daemon behavior, storage, entities, or APIs.
+- SynKraken Console v1.5 Apple Operator Redesign: reorganized the native
+  Console around operator intent with Home as the default briefing, Rooms as a
+  chat-first workforce communication space, Work as the combined Missions /
+  Outcomes / Assignments area, Workforce Memory with Teach Workforce copy,
+  Governance for approvals/decisions/handoffs, and Canvas reframed as an
+  advanced spatial view. The visual system now uses a restrained Apple-style
+  dark shell, system typography, soft surfaces, Apple blue primary actions,
+  amber attention, red only for critical/destructive states, and raw technical
+  details behind inspectors/details where practical. This is a UI architecture
+  sprint only; daemon behavior, storage, APIs, and entities are unchanged.
+- SynKraken v1.4 Shared Workforce Memory: added visible, governed memory
+  records with title/body/scope/source/importance/status fields; operator
+  notes; proposed/approved/rejected/archived governance; active context
+  retrieval; bounded approved-memory dispatch injection; Memory Centre;
+  scoped memory sections; Memory canvas node; and minimal CLI parity.
+- SynKraken Console v1.3 Operational Briefing: added a top-level Briefing
+  screen directly beneath Canvas plus a Briefing canvas node in the Operations
+  preset. The Briefing is a deterministic read model over existing daemon
+  records: workforce categories, mission health, outcome health, assignment
+  health, recent meaningful activity, operator-review counts, and up to five
+  recommended next actions. This does not add workflow automation, autonomous
+  planning, project management, AI summarisation, daemon behavior, storage,
+  entities, or APIs.
+- SynKraken Console v1.2 Operator UX Sweep: Console now applies Calm
+  Operations doctrine to reduce cognitive load without changing daemon
+  behavior. Rooms use a fixed-height three-column messaging layout with
+  independently scrolling room list, transcript, member list, and side context;
+  the multiline composer stays visible, supports Ctrl+Enter/Cmd+Enter, and is
+  paste-safe. Workforce rows now classify workers as Available, Monitor, Avoid
+  for now, or Unavailable with issue, impact, and recommended action copy while
+  raw health/trust remains accessible. Delivery results render compact
+  target/reply/empty/failure summaries with raw details collapsed by default.
+- SynKraken v1.1 Workforce Assignment & Handoffs: Assignment is now a
+  first-class accountability object for work currently owned by one worker,
+  with many contributors, mission/outcome/room links, explicit status changes,
+  and auditable handoffs. Added SQLite assignment and assignment event tables,
+  assignment contributors, assignment-linked handoffs, assignment read/write
+  APIs, assignment-aware activity filtering, worker assignment counts,
+  mission/outcome/room assignment context, Assignment Centre, assignment
+  detail cockpit, handoff timeline, Assignment canvas nodes, and command
+  palette actions for create, assign, contribute, block, review, complete,
+  view handoffs, and focus assignment. This deliberately avoids tasks,
+  tickets, scheduling, kanban, gantt charts, automatic reassignment, workflow
+  automation, and autonomous execution.
+- SynKraken Console v0.95 Workforce Operations: Console Rooms now supports the
+  core day-to-day operating loop through existing daemon APIs: create/open/
+  delete rooms, create room presets, add/remove workers, add all workers,
+  refresh rooms, record room notes, send `@everyone`, send room-scoped
+  `@worker-id` messages, search and summarize room history, and render
+  delivery summaries with replied, empty reply, timeout, failed, blocked, and
+  suspicious-output states. Added a Workforce Operations panel, chat-style room
+  transcript, command palette room operations, and operational room-node
+  controls. Room rename and bulk remove-all-members remain explicit daemon/API
+  gaps.
+- SynKraken v1.0 Outcome Governance: Outcome is now the primary success object
+  linked to missions. Added deterministic SQLite outcome read models,
+  outcome-to-worker/trace/incident/proposal links, outcome summary/activity
+  APIs, mission progress derived from completed outcomes, outcome-aware
+  activity filtering, Outcome Centre, outcome detail cockpit, Outcome canvas
+  nodes, and current/affected outcome context in Workforce, Rooms, and
+  Incidents. This remains read-only and deliberately avoids tasks, tickets,
+  kanban, schedules, gantt charts, and AI-generated progress summaries.
+- SynKraken Console v0.9 Mission Control: Mission is now a first-class
+  governance container for meaningful AI workforce outcomes. Added SQLite
+  mission read models, mission link tables for workers, rooms, traces,
+  incidents, proposals, and relationships, mission summary/activity APIs,
+  mission-aware activity filtering, Mission Centre, mission detail cockpit,
+  Mission canvas nodes in Operations/Research/Incident Response presets, and
+  mission context in Rooms, Workforce, and Incidents. This is read-model-first
+  and deliberately avoids scheduling, boards, tickets, projects, or
+  workload-specific entities.
+- SynKraken Console v0.7 Workforce Presence & Activity: daemon read endpoints
+  now expose deterministic workforce presence and recent activity, while the
+  Console shows active, idle, watching, unavailable, and needs-attention
+  workers, an Activity Feed node, presence-aware runtime nodes, room member
+  presence, incident impact framing, and command-palette focus commands.
+- SynKraken Console UX Softening and Operator Guidance v0.6: Console now
+  separates daemon raw health from operator-facing display severity, adds
+  Operator Summary panels to Canvas, Workforce, and Incident Centre, softens
+  nonblocking runtime failures from red critical language to amber
+  `Needs attention`/`Degraded` language, groups incidents by operator priority,
+  and documents the Calm Truth principle: expose real failures without
+  exaggerating urgency.
+- Documentation and GitHub readiness sprint: README rewritten as the project
+  landing page for the open-source AI Workforce Operating System positioning,
+  with new product vision, core concepts, governance model, spatial canvas
+  model, Console doctrine, operator guide, rationale, GitHub description, and
+  screenshot inventory docs.
+- SynKraken Console v0.5: real daemon-backed Operations Canvas relationships
+  through `GET /v1/canvas/relationships`. Relationship lines and inspector
+  jumps now use relationship records derived from persisted proposals, proposal
+  links, rooms, dead letters, runtime reputation, and latest incident anchors,
+  each with evidence attached. Client-side production relationship inference
+  was removed from canvas rendering.
+- SynKraken Console v0.4: Operations Canvas now has a selected-node Canvas
+  Inspector, object focus/search, expanded add-node controls, clear saved layout
+  control, and command-palette entries for runtime, room, proposal detail, trace,
+  incident, dead-letter, workforce, and proposal queue nodes. The work stays in
+  React/TypeScript over existing daemon APIs; Rust remains the Tauri shell and
+  packaging boundary.
+- SynKraken Console v0.3: Operations Canvas becomes the desktop Console home,
+  beginning the shift from page-based dashboard navigation to a spatial AI
+  workforce operating system. The canvas uses real daemon APIs, movable node
+  panels, 24px dot grid, localStorage layout persistence, deterministic Coding,
+  Operations, Research, and Incident Response workspace presets, simple
+  relationship lines, and node types for workforce summary, runtimes, rooms,
+  proposal queue/detail, incidents, traces, and dead letters. Existing Console
+  v0.2 screens remain accessible as detail/backstop views.
+- SynKraken Console v0.1: a Tauri v2 desktop client in `apps/console` using
+  React, TypeScript, and Tailwind. It connects to the local daemon over HTTP,
+  shows workforce health, proposals, proposal detail, trace inspection, latest
+  incident context, dead letters, and a `Ctrl+K` command palette without
+  duplicating daemon state or replacing the CLI, TUI, or Web Command Deck.
 - Approval & Execution Governance v0.1: first-class proposals with append-only
   proposal events, deterministic hardcoded governance rules, approval/rejection/
   cancellation/simulated-execution lifecycle APIs, CLI/TUI/Web controls, replay

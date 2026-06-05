@@ -15,6 +15,9 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE = "http://127.0.0.1:9460"
+CONTROL_TIMEOUT = 20
+DISCOVERY_TIMEOUT = 10
+WORKFORCE_TIMEOUT = 10
 
 
 def _json(url: str, payload: dict | None = None, timeout: int = 180) -> dict:
@@ -29,6 +32,17 @@ def _json(url: str, payload: dict | None = None, timeout: int = 180) -> dict:
     )
     with urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def _enabled_agents(base: str) -> list[dict]:
+    payload = _json(f"{base}/v1/agents", timeout=DISCOVERY_TIMEOUT)
+    rows = payload.get("agents")
+    if not isinstance(rows, list):
+        raise ValueError("/v1/agents response did not include an agents list")
+    return [
+        agent for agent in rows
+        if isinstance(agent, dict) and agent.get("adapter_id") and bool(agent.get("enabled"))
+    ]
 
 
 def _wait_for_health(base: str, timeout_seconds: int) -> tuple[bool, dict, str]:
@@ -102,7 +116,7 @@ def _test_decision(base: str, run_id: str, agents: list[dict]) -> tuple[dict, st
         "reason": "The repeatable stress runner verifies flight recorder APIs.",
         "proposed_by": "cli-stress",
         "linked_runtime_ids": linked_runtime_ids,
-    })
+    }, timeout=CONTROL_TIMEOUT)
     decision = result.get("decision") or {}
     return result, str(decision.get("id") or decision.get("decision_id") or "")
 
@@ -116,7 +130,7 @@ def _test_handoff(base: str, run_id: str, agents: list[dict], decision_id: str) 
         "summary": "CLI stress test handoff record.",
         "recommended_next_step": "Review the generated CLI stress report.",
         "linked_decision_ids": [decision_id] if decision_id else [],
-    })
+    }, timeout=CONTROL_TIMEOUT)
     handoff = result.get("handoff") or {}
     return result, str(handoff.get("id") or handoff.get("handoff_id") or "")
 
@@ -155,6 +169,11 @@ def _write_report(path: Path, report: dict) -> None:
     lines.extend(_markdown_table(
         ["agent", "classification", "status", "quality", "duration_ms", "preview"],
         report["broadcast_rows"],
+    ))
+    lines.extend(["", "## Runtime Reputation", ""])
+    lines.extend(_markdown_table(
+        ["agent", "trust", "health", "issue"],
+        report.get("reputation_rows") or [],
     ))
     lines.extend([
         "",
@@ -242,15 +261,31 @@ def main() -> int:
 
     final_status = "PASS"
     try:
-        agents = [
-            agent for agent in (_json(f"{base}/v1/agents").get("agents") or [])
-            if agent.get("enabled")
-        ]
+        agents = _enabled_agents(base)
         if not agents:
-            final_status = "DEGRADED"
-            notes.append("no enabled adapter agents were available")
+            report_path = ROOT / "audits" / f"cli-stress-{run_id}" / "report.md"
+            notes.append("/v1/agents returned no enabled adapter agents")
+            _write_report(report_path, {
+                "run_id": run_id,
+                "daemon_status": "ok" if health.get("ok") else "not_ok",
+                "final_status": "FAIL",
+                "dead_letter_count": 0,
+                "agents": [],
+                "direct_rows": [],
+                "broadcast_rows": [],
+                "reputation_rows": [],
+                "decision_result": "skipped",
+                "handoff_result": "skipped",
+                "replay_result": "skipped",
+                "incident_result": "skipped",
+                "notes": notes,
+            })
+            print("CLI stress test: FAIL")
+            print(f"report: {report_path}")
+            return 1
 
         direct_rows: list[list[object]] = []
+        reputation_rows: list[list[object]] = []
         for agent in agents:
             agent_id = str(agent["adapter_id"])
             expected = f"ADAPTER_OK: {agent_id}"
@@ -314,12 +349,12 @@ def main() -> int:
         replay_target = handoff_id or decision_id
         if replay_target:
             try:
-                replay = _json(f"{base}/v1/replay/{replay_target}")
+                replay = _json(f"{base}/v1/replay/{replay_target}", timeout=CONTROL_TIMEOUT)
                 replay_result = "ok" if replay.get("kind") in {"handoff", "decision"} else "failed"
             except Exception as exc:
                 notes.append(f"replay error: {exc}")
         try:
-            incident = _json(f"{base}/v1/incident/latest")
+            incident = _json(f"{base}/v1/incident/latest", timeout=CONTROL_TIMEOUT)
             incident_result = "ok" if "incident" in incident else "failed"
         except Exception as exc:
             notes.append(f"incident error: {exc}")
@@ -328,9 +363,22 @@ def main() -> int:
             final_status = "FAIL"
 
         try:
-            dead_letter_count = int(_json(f"{base}/v1/flight").get("dead_letters") or 0)
+            dead_letter_count = int(_json(f"{base}/v1/flight", timeout=CONTROL_TIMEOUT).get("dead_letters") or 0)
         except Exception:
-            dead_letter_count = len(_json(f"{base}/v1/dead-letters?limit=100").get("dead_letters") or [])
+            dead_letter_count = len(_json(f"{base}/v1/dead-letters?limit=100", timeout=CONTROL_TIMEOUT).get("dead_letters") or [])
+
+        try:
+            workforce = _json(f"{base}/v1/workforce", timeout=WORKFORCE_TIMEOUT)
+            for row in workforce.get("workforce") or []:
+                reputation = row.get("reputation") or {}
+                reputation_rows.append([
+                    row.get("runtime_id") or row.get("adapter_id") or "",
+                    reputation.get("trust_score", ""),
+                    reputation.get("health_status", ""),
+                    reputation.get("incident_summary") or "",
+                ])
+        except Exception as exc:
+            notes.append(f"workforce reputation error: {exc}")
 
         report_path = ROOT / "audits" / f"cli-stress-{run_id}" / "report.md"
         _write_report(report_path, {
@@ -341,6 +389,7 @@ def main() -> int:
             "agents": agents,
             "direct_rows": direct_rows,
             "broadcast_rows": broadcast_rows,
+            "reputation_rows": reputation_rows,
             "decision_result": decision_result,
             "handoff_result": handoff_result,
             "replay_result": replay_result,

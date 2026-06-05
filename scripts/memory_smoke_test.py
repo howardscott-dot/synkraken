@@ -94,9 +94,10 @@ def main() -> None:
                 "room_name": "memtest",
                 "memory_type": "fact",
                 "content": "Always keep memory proposals concise and inspectable.",
+                "auto_review": True,
             })
             approved_memory = approved["memory"]
-            assert approved_memory["status"] == "peer_approved"
+            assert approved_memory["status"] == "approved"
             assert approved_memory["reviewed_by"] == "hermes"
             assert approved_memory["confidence"] >= 70
 
@@ -105,6 +106,7 @@ def main() -> None:
                 "room_name": "memtest",
                 "memory_type": "fact",
                 "content": "reject-me",
+                "auto_review": True,
             })
             assert rejected["memory"]["status"] == "rejected"
 
@@ -158,7 +160,7 @@ def main() -> None:
 
             fetched = get_json(base, f"/v1/memory/{approved_memory['memory_id']}")
             event_types = {event["event_type"] for event in fetched["events"]}
-            assert {"memory_proposed", "peer_review_requested", "peer_approved", "memory_used"} <= event_types
+            assert {"memory_proposed", "peer_review_requested", "memory_approved", "memory_used"} <= event_types
         finally:
             server.shutdown()
             server.server_close()

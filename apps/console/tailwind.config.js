@@ -4,14 +4,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        abyss: "#090a0c",
-        panel: "#0f1115",
-        panel2: "#141820",
-        line: "#29313a",
-        cyanop: "#00d9ff",
-        amberop: "#ffb300",
-        danger: "#ff5252",
-        muted: "#8b96a5",
+        abyss: "#0b0b0d",
+        panel: "#111113",
+        panel2: "#1c1c1e",
+        line: "rgba(255,255,255,0.08)",
+        cyanop: "#2997ff",
+        amberop: "#f5a623",
+        danger: "#ff453a",
+        muted: "#a1a1a6",
       },
       fontFamily: {
         mono: [
@@ -23,7 +23,7 @@ export default {
           "Liberation Mono",
           "monospace",
         ],
-        sans: ["Inter", "system-ui", "sans-serif"],
+        sans: ["-apple-system", "BlinkMacSystemFont", "SF Pro Display", "Inter", "sans-serif"],
       },
     },
   },

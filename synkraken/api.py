@@ -15,10 +15,13 @@ from .models import new_id
 _ROOM_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
 _TASK_STATUSES = {"open", "in_progress", "blocked", "done"}
 _TASK_PRIORITIES = {"low", "normal", "high"}
-_MEMORY_STATUSES = {"proposed", "peer_approved", "rejected", "archived"}
+_MEMORY_STATUSES = {"proposed", "approved", "peer_approved", "rejected", "archived"}
 _DECISION_STATUSES = {"proposed", "approved", "rejected", "superseded"}
 _HANDOFF_STATUSES = {"pending", "accepted", "rejected", "completed"}
 _PROPOSAL_STATUSES = {"proposed", "approved", "rejected", "executed", "expired", "cancelled"}
+_MISSION_STATUSES = {"proposed", "active", "blocked", "review", "completed", "cancelled"}
+_OUTCOME_STATUSES = {"not_started", "in_progress", "review", "completed", "blocked", "cancelled"}
+_ASSIGNMENT_STATUSES = {"assigned", "in_progress", "waiting", "blocked", "handoff", "review", "completed", "cancelled"}
 _PROFILE_FIELDS = {
     "cost_tier",
     "usage_risk",
@@ -75,8 +78,253 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/workforce":
             self._send(HTTPStatus.OK, self.fabric.workforce())
             return
+        if path == "/v1/workforce/presence":
+            self._send(HTTPStatus.OK, self.fabric.workforce_presence())
+            return
         if path == "/v1/workforce/health":
             self._send(HTTPStatus.OK, self.fabric.storage.workforce_summary())
+            return
+        m = re.fullmatch(r"/v1/workforce/([^/]+)/assignments", path)
+        if m:
+            worker_id = unquote(m.group(1))
+            self._send(HTTPStatus.OK, self.fabric.storage.worker_assignments(worker_id))
+            return
+        if path == "/v1/activity/recent":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, self.fabric.recent_activity(limit=limit))
+            return
+        if path == "/v1/activity/live":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, self.fabric.live_activity(
+                limit=limit,
+                runtime=qs.get("runtime", [None])[0],
+                room=qs.get("room", [None])[0],
+                event_type=qs.get("event_type", qs.get("type", [None]))[0],
+                mission=qs.get("mission", qs.get("mission_id", [None]))[0],
+                outcome=qs.get("outcome", qs.get("outcome_id", [None]))[0],
+                assignment=qs.get("assignment", qs.get("assignment_id", [None]))[0],
+                active_missions=str(qs.get("active_missions", [""])[0]).lower() in {"1", "true", "yes"},
+            ))
+            return
+        if path == "/v1/canvas/relationships":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [500])[0])
+            self._send(HTTPStatus.OK, {"relationships": self.fabric.storage.list_canvas_relationships(limit=limit)})
+            return
+        if path == "/v1/missions":
+            qs = parse_qs(parsed.query)
+            status = qs.get("status", [None])[0]
+            limit = int(qs.get("limit", [100])[0])
+            if status and status not in _MISSION_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid mission status"})
+                return
+            self._send(HTTPStatus.OK, {"missions": self.fabric.storage.list_missions(status=status, limit=limit)})
+            return
+        if path == "/v1/missions/summary":
+            self._send(HTTPStatus.OK, self.fabric.storage.mission_summary())
+            return
+        if path == "/v1/outcomes":
+            qs = parse_qs(parsed.query)
+            status = qs.get("status", [None])[0]
+            mission_id = qs.get("mission", qs.get("mission_id", [None]))[0]
+            limit = int(qs.get("limit", [100])[0])
+            if status and status not in _OUTCOME_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid outcome status"})
+                return
+            self._send(HTTPStatus.OK, {"outcomes": self.fabric.storage.list_outcomes(status=status, mission_id=mission_id, limit=limit)})
+            return
+        if path == "/v1/outcomes/summary":
+            self._send(HTTPStatus.OK, self.fabric.storage.outcome_summary())
+            return
+        if path == "/v1/assignments":
+            qs = parse_qs(parsed.query)
+            status = qs.get("status", [None])[0]
+            owner = qs.get("owner", qs.get("owner_worker", [None]))[0]
+            contributor = qs.get("contributor", qs.get("contributor_worker", [None]))[0]
+            mission_id = qs.get("mission", qs.get("mission_id", [None]))[0]
+            outcome_id = qs.get("outcome", qs.get("outcome_id", [None]))[0]
+            room_id = qs.get("room", qs.get("room_id", [None]))[0]
+            limit = int(qs.get("limit", [100])[0])
+            if status and status not in _ASSIGNMENT_STATUSES:
+                self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid assignment status"})
+                return
+            self._send(HTTPStatus.OK, {"assignments": self.fabric.storage.list_assignments(
+                status=status,
+                owner_worker=owner,
+                contributor_worker=contributor,
+                mission_id=mission_id,
+                outcome_id=outcome_id,
+                room_id=room_id,
+                limit=limit,
+            )})
+            return
+        if path == "/v1/assignments/summary":
+            self._send(HTTPStatus.OK, self.fabric.storage.assignment_summary())
+            return
+        if path == "/v1/handoffs/recent":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, {"handoffs": self.fabric.storage.recent_assignment_handoffs(limit=limit)})
+            return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/activity", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            activity = self.fabric.storage.assignment_activity(assignment_id, limit=limit)
+            if activity is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self._send(HTTPStatus.OK, {"assignment_id": assignment_id, "activity": activity})
+            return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/handoffs", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            if not self.fabric.storage.get_assignment(assignment_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self._send(HTTPStatus.OK, {"assignment_id": assignment_id, "handoffs": self.fabric.storage.assignment_handoffs(assignment_id)})
+            return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/proposals", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            if not self.fabric.storage.get_assignment(assignment_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self._send(HTTPStatus.OK, {"assignment_id": assignment_id, "proposals": self.fabric.storage.assignment_proposals(assignment_id)})
+            return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/traces", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            if not self.fabric.storage.get_assignment(assignment_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self._send(HTTPStatus.OK, {"assignment_id": assignment_id, "traces": self.fabric.storage.assignment_traces(assignment_id)})
+            return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            assignment = self.fabric.storage.get_assignment(assignment_id)
+            if not assignment:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self._send(HTTPStatus.OK, assignment)
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)/activity", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            activity = self.fabric.storage.outcome_activity(outcome_id, limit=limit)
+            if activity is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, {"outcome_id": outcome_id, "activity": activity})
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)/workers", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            if not self.fabric.storage.get_outcome(outcome_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, {"outcome_id": outcome_id, "workers": self.fabric.storage.outcome_workers(outcome_id)})
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)/incidents", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            if not self.fabric.storage.get_outcome(outcome_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, {"outcome_id": outcome_id, "incidents": self.fabric.storage.outcome_incidents(outcome_id)})
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)/proposals", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            if not self.fabric.storage.get_outcome(outcome_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, {"outcome_id": outcome_id, "proposals": self.fabric.storage.outcome_proposals(outcome_id)})
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)/assignments", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            assignments = self.fabric.storage.outcome_assignments(outcome_id)
+            if assignments is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, {"outcome_id": outcome_id, "assignments": assignments})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/activity", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            activity = self.fabric.storage.mission_activity(mission_id, limit=limit)
+            if activity is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "activity": activity})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/workers", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            if not self.fabric.storage.get_mission(mission_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "workers": self.fabric.storage.mission_workers(mission_id)})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/incidents", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            if not self.fabric.storage.get_mission(mission_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "incidents": self.fabric.storage.mission_incidents(mission_id)})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/proposals", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            if not self.fabric.storage.get_mission(mission_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "proposals": self.fabric.storage.mission_proposals(mission_id)})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/assignments", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            assignments = self.fabric.storage.mission_assignments(mission_id)
+            if assignments is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "assignments": assignments})
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)/outcomes", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            if not self.fabric.storage.get_mission(mission_id):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, {"mission_id": mission_id, "outcomes": self.fabric.storage.list_mission_outcomes(mission_id)})
+            return
+        m = re.fullmatch(r"/v1/outcomes/([^/]+)", path)
+        if m:
+            outcome_id = unquote(m.group(1))
+            outcome = self.fabric.storage.get_outcome(outcome_id)
+            if not outcome:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"outcome not found: {outcome_id}"})
+                return
+            self._send(HTTPStatus.OK, outcome)
+            return
+        m = re.fullmatch(r"/v1/missions/([^/]+)", path)
+        if m:
+            mission_id = unquote(m.group(1))
+            mission = self.fabric.storage.get_mission(mission_id)
+            if not mission:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"mission not found: {mission_id}"})
+                return
+            self._send(HTTPStatus.OK, mission)
             return
         m = re.fullmatch(r"/v1/runtime/([^/]+)/reputation", path)
         if m:
@@ -201,6 +449,10 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/memory":
             qs = parse_qs(parsed.query)
             status = qs.get("status", [None])[0]
+            memory_type = qs.get("type", [None])[0] or qs.get("memory_type", [None])[0]
+            scope_type = qs.get("scope_type", [None])[0]
+            scope_id = qs.get("scope_id", [None])[0]
+            importance = qs.get("importance", [None])[0]
             room = qs.get("room", [None])[0]
             workspace = qs.get("workspace", [None])[0]
             limit = int(qs.get("limit", [50])[0])
@@ -210,11 +462,30 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, {
                 "memories": self.fabric.storage.list_shared_memory(
                     status=status,
+                    memory_type=memory_type,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    importance=importance,
                     room_name=room,
                     workspace=workspace,
                     limit=limit,
                 )
             })
+            return
+        if path == "/v1/memory/pending":
+            self._send(HTTPStatus.OK, {
+                "memories": self.fabric.storage.list_shared_memory(status="proposed", limit=100)
+            })
+            return
+        if path == "/v1/memory/context":
+            qs = parse_qs(parsed.query)
+            result = self.fabric.memory_context({
+                "scope_type": qs.get("scope_type", ["global"])[0],
+                "scope_id": qs.get("scope_id", [None])[0],
+                "max_items": qs.get("max_items", [None])[0],
+                "max_chars": qs.get("max_chars", [None])[0],
+            })
+            self._send(HTTPStatus.OK, result)
             return
         if path == "/v1/memory/search":
             qs = parse_qs(parsed.query)
@@ -385,6 +656,15 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 "messages": messages,
             })
             return
+        m = re.fullmatch(r"/v1/rooms/([^/]+)/assignments", path)
+        if m:
+            room = unquote(m.group(1))
+            assignments = self.fabric.storage.room_assignments(room)
+            if assignments is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
+            self._send(HTTPStatus.OK, {"room": room, "assignments": assignments})
+            return
         m = re.fullmatch(r"/v1/rooms/([^/]+)", path)
         if m:
             room = unquote(m.group(1))
@@ -521,6 +801,92 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, result)
             return
 
+        if path == "/v1/assignments":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                owner_worker = str(payload.get("owner_worker") or payload.get("owner") or "").strip()
+                if not owner_worker:
+                    raise ValueError("owner_worker required")
+                status = str(payload.get("status", "assigned")).strip()
+                if status not in _ASSIGNMENT_STATUSES:
+                    raise ValueError("invalid assignment status")
+                contributors = payload.get("contributor_workers") or payload.get("contributors") or []
+                if not isinstance(contributors, list) or not all(isinstance(item, str) for item in contributors):
+                    raise ValueError("contributor_workers must be a list of worker ids")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                assignment = self.fabric.storage.create_assignment(
+                    assignment_id=str(payload.get("id") or payload.get("assignment_id") or "").strip() or new_id(),
+                    title=title,
+                    description=str(payload.get("description", "")).strip(),
+                    status=status,
+                    owner_worker=owner_worker,
+                    contributor_workers=contributors,
+                    mission_id=str(payload.get("mission_id") or "").strip() or None,
+                    outcome_id=str(payload.get("outcome_id") or "").strip() or None,
+                    room_id=str(payload.get("room_id") or payload.get("room") or "").strip() or None,
+                    actor=actor,
+                    created_at=_utc_now_iso(),
+                )
+                self.fabric.event_bus.publish("assignment.created", {"assignment_id": assignment["assignment_id"], "owner_worker": owner_worker})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, assignment)
+            return
+
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/contributors", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                worker_id = str(payload.get("worker_id") or payload.get("adapter_id") or "").strip()
+                if not worker_id:
+                    raise ValueError("worker_id required")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                assignment = self.fabric.storage.add_assignment_contributor(assignment_id, worker_id, actor=actor)
+                if assignment is None:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                    return
+                self.fabric.event_bus.publish("assignment.contributor_added", {"assignment_id": assignment_id, "worker_id": worker_id})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, assignment)
+            return
+
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/handoff", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                to_worker = str(payload.get("to_worker") or payload.get("to_agent") or "").strip()
+                if not to_worker:
+                    raise ValueError("to_worker required")
+                reason = str(payload.get("reason", "")).strip()
+                if not reason:
+                    raise ValueError("reason required")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                result = self.fabric.storage.create_assignment_handoff(
+                    assignment_id,
+                    to_worker=to_worker,
+                    reason=reason,
+                    context_summary=str(payload.get("context_summary", "")).strip(),
+                    actor=actor,
+                    created_at=_utc_now_iso(),
+                )
+                if result is None:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                    return
+                self.fabric.event_bus.publish("assignment.handoff", {"assignment_id": assignment_id, "to_worker": to_worker})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
         if path == "/v1/proposal/create":
             try:
                 payload = self._read_json()
@@ -629,6 +995,35 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json()
                 result = self.fabric.propose_memory(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path == "/v1/memory/operator-note":
+            try:
+                payload = self._read_json()
+                result = self.fabric.create_operator_memory_note(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, result)
+            return
+
+        if path in {"/v1/memory/approve", "/v1/memory/reject", "/v1/memory/archive"}:
+            try:
+                payload = self._read_json()
+                memory_id = str(payload.get("memory_id") or payload.get("id") or "").strip()
+                if not memory_id:
+                    raise ValueError("memory_id required")
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if path.endswith("/approve"):
+                    result = self.fabric.approve_memory(memory_id, actor)
+                elif path.endswith("/reject"):
+                    result = self.fabric.reject_memory(memory_id, actor, str(payload.get("reason", "")).strip() or None)
+                else:
+                    result = self.fabric.archive_memory(memory_id, actor)
             except Exception as exc:  # noqa: BLE001
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -985,6 +1380,50 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send(HTTPStatus.OK, {"profile": profile})
             return
+        m = re.fullmatch(r"/v1/assignments/([^/]+)", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                allowed = {"title", "description", "status", "owner_worker", "owner", "mission_id", "outcome_id", "room_id", "room", "actor"}
+                extra = set(payload) - allowed
+                if extra:
+                    raise ValueError(f"unknown assignment fields: {', '.join(sorted(extra))}")
+                fields: dict = {}
+                actor = str(payload.get("actor", "operator")).strip() or "operator"
+                if "title" in payload:
+                    title = str(payload["title"]).strip()
+                    if not title:
+                        raise ValueError("title cannot be empty")
+                    fields["title"] = title
+                if "description" in payload:
+                    fields["description"] = str(payload["description"]).strip()
+                if "status" in payload:
+                    status = str(payload["status"]).strip()
+                    if status not in _ASSIGNMENT_STATUSES:
+                        raise ValueError("invalid assignment status")
+                    fields["status"] = status
+                if "owner_worker" in payload or "owner" in payload:
+                    owner = str(payload.get("owner_worker") or payload.get("owner") or "").strip()
+                    if not owner:
+                        raise ValueError("owner_worker cannot be empty")
+                    fields["owner_worker"] = owner
+                if "mission_id" in payload:
+                    fields["mission_id"] = str(payload["mission_id"]).strip() or None
+                if "outcome_id" in payload:
+                    fields["outcome_id"] = str(payload["outcome_id"]).strip() or None
+                if "room_id" in payload or "room" in payload:
+                    fields["room_id"] = str(payload.get("room_id") or payload.get("room") or "").strip() or None
+                assignment = self.fabric.storage.update_assignment(assignment_id, fields, actor=actor, updated_at=_utc_now_iso())
+                if assignment is None:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                    return
+                self.fabric.event_bus.publish("assignment.updated", {"assignment_id": assignment_id})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, assignment)
+            return
         m = re.fullmatch(r"/v1/tasks/([^/]+)", path)
         if not m:
             self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -1079,6 +1518,18 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+
+        m = re.fullmatch(r"/v1/assignments/([^/]+)/contributors/([^/]+)", path)
+        if m:
+            assignment_id = unquote(m.group(1))
+            worker_id = unquote(m.group(2))
+            assignment = self.fabric.storage.remove_assignment_contributor(assignment_id, worker_id, actor="operator")
+            if assignment is None:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"assignment not found: {assignment_id}"})
+                return
+            self.fabric.event_bus.publish("assignment.contributor_removed", {"assignment_id": assignment_id, "worker_id": worker_id})
+            self._send(HTTPStatus.OK, assignment)
+            return
 
         m = re.fullmatch(r"/v1/rooms/([^/]+)/members/([^/]+)", path)
         if m:

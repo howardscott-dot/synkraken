@@ -15,6 +15,8 @@ SynKraken owns:
 - governance
 - coordination
 - recovery
+- traceability
+- local operator workflow state
 
 ## Runtime Boundary
 
@@ -37,6 +39,8 @@ Cost-conscious features include:
 - token police roles
 - compact summaries between rounds
 - visible memory injection limits
+- runtime reputation and health signals that help prefer cheap healthy workers
+  in cheap mode and trusted premium workers in full mode
 - explicit operator approval modes where needed
 
 ## Product Rule
@@ -46,3 +50,14 @@ surfaces should make clear that users bring the runtimes and pay their costs.
 
 SynKraken may help reduce waste, prevent runaway loops, and recover from
 failures, but it must not imply free execution or vendor-owned capacity.
+
+SynKraken does not assume all runtimes are equally reliable or equally
+appropriate for every cost mode. Runtime health may bias selection, but the
+operator still owns the enabled runtime set, subscriptions, and cost exposure.
+Health bias must never silently remove or disable a configured worker.
+
+## Positioning Rule
+
+Documentation may describe SynKraken as an open-source AI Workforce Operating
+System, but it must not imply that SynKraken owns provider capacity, absorbs
+model cost, brokers subscriptions, or provides cloud execution by default.

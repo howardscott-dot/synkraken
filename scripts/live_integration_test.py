@@ -393,7 +393,7 @@ class LiveTest:
             self.fail(f"shared memory review failed: {status} {reviewed.get('error', reviewed)}")
             return
         memory = reviewed.get("memory") or {}
-        if memory.get("status") == "peer_approved":
+        if memory.get("status") == "approved":
             self.pass_check("shared memory peer approved", self.memory_id)
         else:
             self.fail(f"shared memory was not peer approved: {memory}")
