@@ -35,6 +35,9 @@ def main() -> None:
     assert _parse_leading_mentions('@hermes @openclaw please confer', aliases) == (
         ["hermes", "openclaw-main"], 'please confer'
     )
+    pasted = "@everyone discuss this\n1. choose roles\n2. do not run code"
+    assert tui._prompt_display(pasted) == "@everyone discuss this ↵ 1. choose roles ↵ 2. do not run code"
+    assert tui._normalize_command(pasted) == pasted
 
     sent: list[tuple[str, str]] = []
     original_handle_send = tui._handle_send

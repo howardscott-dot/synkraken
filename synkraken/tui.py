@@ -5,6 +5,7 @@ import json
 import re
 import shlex
 import signal
+import sys
 import threading
 import time
 import urllib.parse
@@ -2414,17 +2415,18 @@ def _draw_status_bar(stdscr, y, w, state, connected, dead_count, typing_names, v
 
 
 def _draw_prompt(stdscr, y, w, command, hint, in_room: str | None):
+    display_command = _prompt_display(command)
     if hint:
         _safe_addstr(stdscr, y - 1, 0, hint[:w - 1], w - 1, C_TEAL, curses.A_DIM)
     if in_room:
         prefix = f' #{in_room} › '
         _safe_addstr(stdscr, y, 0, prefix, len(prefix) + 1, C_ROOM, curses.A_BOLD)
-        _safe_addstr(stdscr, y, len(prefix), command[:max(0, w - 1 - len(prefix))],
+        _safe_addstr(stdscr, y, len(prefix), display_command[:max(0, w - 1 - len(prefix))],
                      max(0, w - 1 - len(prefix)), C_BRIGHT, curses.A_BOLD)
     else:
         prefix = ' › '
         _safe_addstr(stdscr, y, 0, prefix, len(prefix) + 1, C_TEAL, curses.A_BOLD)
-        _safe_addstr(stdscr, y, len(prefix), command[:max(0, w - 1 - len(prefix))],
+        _safe_addstr(stdscr, y, len(prefix), display_command[:max(0, w - 1 - len(prefix))],
                      max(0, w - 1 - len(prefix)), C_BRIGHT, curses.A_BOLD)
 
 
@@ -2434,6 +2436,51 @@ SPINNER_FRAMES = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇',
 
 def _spinner_frame() -> str:
     return SPINNER_FRAMES[int(time.time() * 10) % len(SPINNER_FRAMES)]
+
+
+def _enable_bracketed_paste() -> None:
+    try:
+        sys.stdout.write('\x1b[?2004h')
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _disable_bracketed_paste() -> None:
+    try:
+        sys.stdout.write('\x1b[?2004l')
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _read_escape_sequence(stdscr, first: str) -> str:
+    sequence = first
+    try:
+        stdscr.nodelay(True)
+        deadline = time.time() + 0.05
+        while time.time() < deadline and len(sequence) < 16:
+            try:
+                ch = stdscr.get_wch()
+            except curses.error:
+                time.sleep(0.002)
+                continue
+            if not isinstance(ch, str):
+                break
+            sequence += ch
+            if ch == '~':
+                break
+    finally:
+        try:
+            stdscr.nodelay(False)
+            stdscr.timeout(120)
+        except Exception:
+            pass
+    return sequence
+
+
+def _prompt_display(command: str) -> str:
+    return command.replace('\n', ' ↵ ').replace('\r', ' ↵ ')
 
 
 def _handle_send(base: str, target: str, body: str) -> dict:
@@ -3314,12 +3361,14 @@ def _main(stdscr):
         'last_chat_viewport_h': 1,
         'last_team_run_id': None,
         'last_goal_run_id': None,
+        'paste_mode': False,
     }
     _init_colors()
     curses.curs_set(1)
     stdscr.keypad(True)
     # 120 ms tick gives ~8 fps — enough for a smooth spinner without burning CPU.
     stdscr.timeout(120)
+    _enable_bracketed_paste()
     base = DEFAULT_BASE
     command = ''
     hint = ''
@@ -3539,6 +3588,23 @@ def _main(stdscr):
                 continue
             except KeyboardInterrupt:
                 break
+
+            if ch == '\x1b':
+                sequence = _read_escape_sequence(stdscr, ch)
+                if sequence == '\x1b[200~':
+                    state['paste_mode'] = True
+                    hint = 'paste mode: newlines will stay in this message'
+                    continue
+                if sequence == '\x1b[201~':
+                    state['paste_mode'] = False
+                    hint = 'pasted text ready  ·  Enter to send'
+                    continue
+                continue
+
+            if state.get('paste_mode') and isinstance(ch, str):
+                command += ch
+                hint = 'pasting…'
+                continue
 
             if ch in ('\n', '\r'):
                 raw = command.strip()
@@ -4071,6 +4137,7 @@ def _main(stdscr):
                 hint = ''
 
     finally:
+        _disable_bracketed_paste()
         _restore_sigint_handler(previous_sigint)
         _SIGINT_STATE['count'] = 0
         save_preferences(state)
