@@ -160,9 +160,9 @@ if [[ "$RUN_CONFIG" -eq 1 ]]; then
     echo "Run this later:"
     echo "  cd \"$SRC_DIR\" && synkraken config ${CONFIG_ARGS[*]}"
   fi
+else
+  echo
+  echo "Next:"
+  echo "  cd \"$SRC_DIR\""
+  echo "  synkraken config"
 fi
-
-echo
-echo "Next:"
-echo "  synkraken-daemon --config \"$SRC_DIR/config.local.json\""
-echo "  synkraken tui"

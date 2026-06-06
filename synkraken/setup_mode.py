@@ -384,14 +384,12 @@ def _update_config_from_selection(runtimes: list[dict], selected: list[dict], *,
         replaced = summary.get('adapters_replaced') or []
         registry = summary.get('registry_added') or []
         if adapters:
-            print(f'     added adapters: {", ".join(adapters)}')
+            print(f'     enabled workers: {", ".join(adapters)}')
         if replaced:
-            print(f'     replaced adapters: {", ".join(replaced)}')
-        if registry:
-            print(f'     registry entries: {", ".join(registry)}')
+            print(f'     updated workers: {", ".join(replaced)}')
         unsupported = [rt['runtime_id'] for rt in selected if not rt.get('adapter_supported')]
         if unsupported:
-            print(f'     registry-only runtimes: {", ".join(unsupported)}')
+            print(f'     discovered for later: {", ".join(unsupported)}')
         return summary
     except Exception as exc:  # noqa: BLE001
         print(f'     ✗ could not update config: {exc}')
@@ -451,8 +449,7 @@ def run_setup(
     selected = _select_runtimes_for_config(runtimes)
     if remote_host:
         print()
-        print('Bridge skill installation skipped for SSH runtimes.')
-        print('Remote adapters can still receive work; install the bridge skill on the remote host only if they need callback instructions.')
+        print('Remote workers are ready to receive work over SSH.')
     elif _confirm('Install SynKraken bridge skill into supported selected workers?', default_yes=True):
         results = _install_bridge_skills_for_runtimes(selected)
         _print_bridge_skill_results(results)
@@ -469,21 +466,15 @@ def run_setup(
     )
 
     print()
-    print('Setup complete.')
+    print('SynKraken is ready.')
     print()
-    print('Next steps:')
-    print(f'  1. Review {DEFAULT_CONFIG_PATH.name} if you want custom commands or')
-    print('     additional agent instances — see README.md for adapter config reference.')
-    print('  2. Start the daemon manually:')
-    print(f'       synkraken-daemon --config ./{DEFAULT_CONFIG_PATH.name}')
-    print('     Or install the user service:')
-    print('       ./scripts/install-user-service.sh')
-    print('       systemctl --user enable --now synkraken')
-    print('  3. Open the TUI:')
-    print('       synkraken tui')
+    print('Start SynKraken:')
+    print(f'  synkraken-daemon --config ./{DEFAULT_CONFIG_PATH.name}')
     print()
-    print('Run `synkraken uninstall` to remove the bridge skill from runtimes')
-    print('and clean up. Your config.local.json and data/ are never touched.')
+    print('Then open another terminal and run:')
+    print('  synkraken tui')
+    print()
+    print('You can come back later with `synkraken config --rediscover` if your workers change.')
 
 
 def run_install_skills() -> None:

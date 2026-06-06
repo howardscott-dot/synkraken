@@ -489,7 +489,7 @@ def test_setup_prompts_for_remote_discovery(tmp: Path) -> None:
 
     rendered = out.getvalue()
     assert "Worker location" in rendered
-    assert "Bridge skill installation skipped for SSH runtimes." in rendered
+    assert "Remote workers are ready to receive work over SSH." in rendered
     remote_discover.assert_called_once()
     kwargs = remote_discover.call_args.kwargs
     assert kwargs["remote_host"] == "agent-box.local"
