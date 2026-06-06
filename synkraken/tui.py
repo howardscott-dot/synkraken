@@ -504,6 +504,17 @@ def _resolve_target(target: str) -> str:
     return lowered or target
 
 
+def _resolve_agent_token(token: str, data: dict) -> str:
+    raw = token.strip().lstrip('@')
+    aliases = _mention_alias_map(data)
+    return aliases.get(raw.lower()) or _resolve_target(raw)
+
+
+def _looks_like_agent_token(token: str, data: dict) -> bool:
+    resolved = _resolve_agent_token(token, data)
+    return resolved in {'broadcast', *_agent_ids(data)}
+
+
 def _time_ago(iso_str: str | None) -> str:
     if not iso_str:
         return ''
@@ -3288,27 +3299,31 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
                     '')
     if sub == 'add':
         if not args:
-            return ('rooms', None, 'usage: /room add [name] <adapter_id|all>')
-        if len(args) == 1 and state.get('current_room'):
+            return ('rooms', None, 'usage: /room add [name] <agent...|all>')
+        if state.get('current_room') and _looks_like_agent_token(args[0], data):
             name = str(state['current_room'])
-            adapter = _resolve_target(args[0].lstrip('@'))
+            adapters = [_resolve_agent_token(arg, data) for arg in args]
         elif len(args) >= 2:
             name = args[0].lstrip('#').lower()
-            adapter = _resolve_target(args[1].lstrip('@'))
+            adapters = [_resolve_agent_token(arg, data) for arg in args[1:]]
         else:
-            return ('rooms', None, 'usage: /room add <name> <adapter_id|all>')
+            return ('rooms', None, 'usage: /room add <name> <agent...|all>')
         try:
-            if adapter in ('all', 'broadcast'):
+            if any(adapter in ('all', 'broadcast') for adapter in adapters):
                 members = _agent_ids(data)
                 for member in members:
                     _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': member})
                 return ('rooms', None, f"added {len(members)} agent{'s' if len(members) != 1 else ''} to #{name}")
-            _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': adapter})
-            return ('rooms', None, f'added {adapter} to #{name}')
+            added: list[str] = []
+            for adapter in adapters:
+                _post_json(f'{base}/v1/rooms/{name}/members', {'adapter_id': adapter})
+                added.append(adapter)
+            return ('rooms', None, f"added {', '.join(added)} to #{name}")
         except Exception as exc:
+            adapter_label = ','.join(adapters) if 'adapters' in locals() else 'unknown'
             return ('add error',
                     {'message': {}, 'deliveries': [],
-                     'dead_letters': [{'adapter_id': adapter, 'reason': str(exc)}]},
+                     'dead_letters': [{'adapter_id': adapter_label, 'reason': str(exc)}]},
                     '')
     if sub == 'members':
         if args:

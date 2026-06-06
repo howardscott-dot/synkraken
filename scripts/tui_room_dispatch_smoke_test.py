@@ -154,6 +154,36 @@ def main() -> None:
         label, _result, hint = tui._exec_room_command("http://daemon", "members", {"current_room": "stress1"}, data)
         assert label == "room members"
         assert "#stress1: crush, goose" == hint
+
+        calls.clear()
+        label, result, hint = tui._exec_room_command(
+            "http://daemon",
+            "add @crush @goose",
+            {"current_room": "stress1"},
+            data,
+        )
+        assert label == "rooms"
+        assert result is None
+        assert hint == "added crush, goose to #stress1"
+        assert calls == [
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "crush"}),
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "goose"}),
+        ]
+
+        calls.clear()
+        label, result, hint = tui._exec_room_command(
+            "http://daemon",
+            "add stress1 @crush @goose",
+            {},
+            data,
+        )
+        assert label == "rooms"
+        assert result is None
+        assert hint == "added crush, goose to #stress1"
+        assert calls == [
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "crush"}),
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "goose"}),
+        ]
     finally:
         tui._post_json = original_post_json
         tui._get_json = original_get_json
