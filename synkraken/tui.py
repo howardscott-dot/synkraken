@@ -1933,6 +1933,19 @@ def _merge_dispatch_result_into_room_transcript(base: str, room_name: str, resul
     return transcript
 
 
+def _dispatch_result_as_chat_result(result: dict) -> dict:
+    chat_result = dict(result or {})
+    if not chat_result.get('messages'):
+        message = chat_result.get('message') or {}
+        if message:
+            chat_result['messages'] = [message]
+        else:
+            chat_result['messages'] = []
+    if chat_result.get('deliveries'):
+        chat_result['delivery_summary'] = _delivery_summary_label(list(chat_result.get('deliveries') or []))
+    return chat_result
+
+
 def _workforce_health_lines(summary: dict) -> list[str]:
     counts = summary.get('summary') or {}
     lines = [
@@ -3430,7 +3443,10 @@ def _main(stdscr):
                         )
                         state['chat_target'] = p['target']
                     else:
-                        state['command_result'] = (p['label'], p['result'])
+                        state['command_result'] = (
+                            p['label'],
+                            _dispatch_result_as_chat_result(p.get('result') or {}),
+                        )
                     # If user is browsing dashboard/chat/rooms, stay there
                     # — the new reply will appear in the relevant panel.
                     if state.get('view') not in ('dashboard', 'chat', 'rooms', 'events'):

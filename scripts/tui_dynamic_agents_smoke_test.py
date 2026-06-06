@@ -125,6 +125,44 @@ def main() -> None:
     assert "[empty reply]" in chat_text
     assert "[suspicious output]" in chat_text
 
+    dispatch_chat = tui._dispatch_result_as_chat_result(
+        {
+            "message": {
+                "message_id": "broadcast-1",
+                "source": "synkraken-tui",
+                "target": "broadcast",
+                "timestamp": "2026-05-24T12:00:00+00:00",
+                "body": "@everyone reply with your name only",
+            },
+            "deliveries": [
+                {
+                    "message_id": "broadcast-1",
+                    "adapter_id": "claude",
+                    "runtime_name": "Claude",
+                    "ok": True,
+                    "status": "replied",
+                    "body": "Claude",
+                    "created_at": "2026-05-24T12:00:01+00:00",
+                },
+                {
+                    "message_id": "broadcast-1",
+                    "adapter_id": "hermes",
+                    "runtime_name": "Hermes",
+                    "ok": True,
+                    "status": "replied",
+                    "body": "Hermes",
+                    "created_at": "2026-05-24T12:00:02+00:00",
+                },
+            ],
+            "dead_letters": [],
+        }
+    )
+    dispatch_text = "\n".join(str(line[0]) for line in tui._chat_lines(dispatch_chat, 180))
+    assert "targets: 2  replied: 2" in dispatch_text
+    assert "@everyone reply with your name only" in dispatch_text
+    assert "Claude" in dispatch_text
+    assert "Hermes" in dispatch_text
+
     deliveries = [
         {"adapter_id": "claude", "runtime_name": "claude", "ok": True, "body": "ack", "duration_ms": 4774},
         {"adapter_id": "goose", "runtime_name": "goose", "ok": True, "body": ""},
