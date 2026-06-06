@@ -4,6 +4,7 @@ import re
 
 from .base import BaseAdapter
 from .cli_utils import build_adapter_command, run_command
+from .text_normalize import normalize_text_output
 from ..models import AdapterReply, FabricMessage
 
 
@@ -22,6 +23,11 @@ class GooseAdapter(BaseAdapter):
                 continue
             if stripped.startswith("[tool") or stripped.startswith("tool_"):
                 continue
+            if "todo_write" in stripped.lower():
+                stopped_at = stripped.find("Stopped.")
+                if stopped_at >= 0:
+                    filtered.append(stripped[stopped_at:])
+                continue
             if stripped.startswith("Updated ("):
                 continue
             if stripped.startswith("goose is running"):
@@ -29,6 +35,9 @@ class GooseAdapter(BaseAdapter):
             filtered.append(stripped)
         if not filtered:
             return text.strip()
+        normalized = normalize_text_output("\n".join(filtered))
+        if normalized:
+            return normalized
         if len(filtered) == 1:
             return filtered[0]
         exact_line = None

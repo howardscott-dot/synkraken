@@ -8,8 +8,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from synkraken.adapters import ADAPTER_TYPES, build_adapter
+from synkraken.adapters.antigravity import AntigravityAdapter
 from synkraken.adapters.base import BaseAdapter
 from synkraken.adapters.cli_utils import build_adapter_command
+from synkraken.adapters.goose import GooseAdapter
+from synkraken.adapters.openclaw import OpenClawAdapter
 
 
 def main() -> None:
@@ -40,6 +43,24 @@ def main() -> None:
         "PATH=/home/operator/.nvm/versions/node/v24.15.0/bin:$PATH "
         "goose run --text 'hello remote worker'"
     ) == remote_command[-1]
+
+    goose = GooseAdapter("goose", {"type": "goose"})
+    assert goose._normalize_output(
+        "──────────────── ▸ todo_write todo content: - [ ] Stop requested Stopped. Let me know if you need anything else."
+    ) == "Stopped. Let me know if you need anything else."
+
+    openclaw = OpenClawAdapter("openclaw-main", {"type": "openclaw"})
+    assert openclaw._fallback_text(
+        {"runId": "abc", "status": "ok", "summary": "completed", "result": {"payloads": []}},
+        '{"runId":"abc","status":"ok","summary":"completed"}',
+        "",
+        True,
+    ) == "OpenClaw completed."
+
+    antigravity = AntigravityAdapter("antigravity", {"type": "google_antigravity"})
+    assert antigravity._auth_required(
+        "Authentication required. Please visit https://accounts.google.com/o/oauth2/auth"
+    )
 
     assert ADAPTER_TYPES, "no adapters registered"
     for adapter_type, adapter_class in ADAPTER_TYPES.items():

@@ -7,6 +7,7 @@ import re
 
 from .base import BaseAdapter
 from .cli_utils import build_adapter_command, run_command
+from .text_normalize import normalize_text_output, normalize_structured_output
 from ..models import AdapterReply, FabricMessage
 
 
@@ -62,6 +63,9 @@ class OpenClawAdapter(BaseAdapter):
         return None
 
     def _normalize_output(self, text: str) -> str:
+        normalized = normalize_text_output(text)
+        if normalized:
+            return normalized
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
             return text.strip()
@@ -73,6 +77,16 @@ class OpenClawAdapter(BaseAdapter):
             if re.match(r"^[A-Z0-9_-]+$", line):
                 return line
         return "\n".join(lines).strip()
+
+    def _fallback_text(self, parsed: Any, stdout: str, stderr: str, ok: bool) -> str:
+        if isinstance(parsed, dict):
+            summary = str(parsed.get("summary") or "").strip()
+            status = str(parsed.get("status") or "").strip()
+            if summary and summary.lower() not in {"completed", "ok", "success"}:
+                return summary
+            if ok and status.lower() in {"ok", "success"}:
+                return "OpenClaw completed."
+        return stdout if stdout else stderr
 
     def _compact_raw(self, parsed: Any, stderr: str, returncode: int, command: list[str]) -> dict:
         compact = {
@@ -123,9 +137,11 @@ class OpenClawAdapter(BaseAdapter):
                 parsed = json.loads(stdout)
             except json.JSONDecodeError:
                 parsed = None
-        reply_text = self._extract_text(parsed) if parsed is not None else None
+        reply_text = normalize_structured_output(parsed) if parsed is not None else None
         if not reply_text:
-            reply_text = stdout if stdout else stderr
+            reply_text = self._extract_text(parsed) if parsed is not None else None
+        if not reply_text:
+            reply_text = self._fallback_text(parsed, stdout, stderr, ok)
         reply_text = self._normalize_output(reply_text)
         raw = self._compact_raw(parsed=parsed, stderr=stderr, returncode=returncode, command=command)
         return AdapterReply(
