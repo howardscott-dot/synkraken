@@ -148,7 +148,7 @@ if [[ "$RUN_CONFIG" -eq 1 ]]; then
     echo "Using setup values provided on the install command line."
   fi
   if [[ -r /dev/tty ]]; then
-    (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config "${CONFIG_ARGS[@]}" </dev/tty)
+    (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} </dev/tty)
   else
     echo "No interactive terminal found, so setup was skipped."
     echo "Run this later:"
