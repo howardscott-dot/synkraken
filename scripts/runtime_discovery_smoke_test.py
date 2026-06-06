@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from synkraken.discovery import (  # noqa: E402
     discover_local_runtimes,
+    discover_remote_runtimes,
     merge_discovered_config,
     parse_runtime_selection,
 )
@@ -122,6 +123,61 @@ def test_config_merge(runtimes: list[dict]) -> None:
     skipped, skip_summary = merge_discovered_config(existing, runtimes, behaviour="skip")
     assert skipped is existing
     assert skip_summary["behaviour"] == "skip"
+
+
+def test_remote_discovery_preserves_ssh_config(tmp: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append(command)
+        assert command[:4] == ["ssh", "-p", "2222", "-i"]
+        assert command[4] == str(tmp / "synkraken_worker")
+        assert "-o" in command
+        assert "BatchMode=yes" in command
+        assert command[-2] == "operator@agent-box.local"
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "claude\t/home/operator/.local/bin/claude\n"
+            "goose\t/home/operator/.local/bin/goose\n"
+            "openclaw\t/home/operator/.nvm/versions/node/v24.15.0/bin/openclaw\n",
+            "",
+        )
+
+    with patch("synkraken.discovery.subprocess.run", _fake_run):
+        runtimes = discover_remote_runtimes(
+            remote_host="agent-box.local",
+            remote_user="operator",
+            remote_port=2222,
+            ssh_identity_file=str(tmp / "synkraken_worker"),
+            remote_working_dir="/workspace/project",
+            remote_path=["/opt/agents/bin"],
+            ssh_options=["-o", "BatchMode=yes"],
+            include_version=False,
+        )
+
+    by_id = {runtime["runtime_id"]: runtime for runtime in runtimes}
+    assert set(by_id) == {"claude", "goose", "openclaw-main"}
+    assert by_id["openclaw-main"]["command"] == ["/home/operator/.nvm/versions/node/v24.15.0/bin/openclaw"]
+    assert by_id["goose"]["remote_host"] == "agent-box.local"
+    assert by_id["goose"]["remote_user"] == "operator"
+    assert by_id["goose"]["remote_port"] == 2222
+    assert by_id["goose"]["ssh_identity_file"] == str(tmp / "synkraken_worker")
+    assert by_id["goose"]["remote_working_dir"] == "/workspace/project"
+    assert by_id["goose"]["remote_path"][0] == "/opt/agents/bin"
+    assert "/home/operator/.local/bin" in by_id["goose"]["remote_path"]
+    assert "/home/operator/.nvm/versions/node/v24.15.0/bin" in by_id["goose"]["remote_path"]
+
+    merged, _summary = merge_discovered_config({"adapters": {}, "runtime_registry": {}}, runtimes, behaviour="replace")
+    goose = merged["adapters"]["goose"]
+    openclaw = merged["adapters"]["openclaw-main"]
+    assert goose["remote_host"] == "agent-box.local"
+    assert goose["remote_user"] == "operator"
+    assert goose["remote_working_dir"] == "/workspace/project"
+    assert goose["remote_path"][0] == "/opt/agents/bin"
+    assert goose["ssh_options"] == ["-o", "BatchMode=yes"]
+    assert openclaw["remote_host"] == "agent-box.local"
+    assert merged["runtime_registry"]["goose"]["remote_host"] == "agent-box.local"
 
 
 def test_fake_agy_detected(tmp: Path) -> None:
@@ -391,6 +447,65 @@ def test_declined_bridge_skill_install_skips_cleanly(tmp: Path) -> None:
     assert config_path.exists()
 
 
+def test_setup_prompts_for_remote_discovery(tmp: Path) -> None:
+    runtime = {
+        "runtime_id": "goose",
+        "label": "Goose",
+        "runtime_type": "goose",
+        "command": ["/home/operator/.local/bin/goose"],
+        "capabilities": ["coding"],
+        "cost_tier": "medium",
+        "adapter_type": "goose",
+        "adapter_supported": True,
+        "supported_modes": ["direct"],
+        "timeout_seconds": 90,
+        "remote_host": "agent-box.local",
+        "remote_user": "operator",
+        "remote_port": 2222,
+        "ssh_identity_file": str(tmp / "synkraken_worker"),
+        "remote_working_dir": "/workspace/project",
+        "remote_path": ["/opt/agents/bin"],
+        "ssh_options": ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"],
+    }
+    config_path = tmp / "config.local.json"
+    out = io.StringIO()
+    with (
+        patch("synkraken.setup_mode.discover_remote_runtimes", return_value=[runtime]) as remote_discover,
+        patch("synkraken.setup_mode.DEFAULT_CONFIG_PATH", config_path),
+        patch("builtins.input", _input_sequence([
+            "2",
+            "agent-box.local",
+            "operator",
+            "2222",
+            str(tmp / "synkraken_worker"),
+            "/workspace/project",
+            "/opt/agents/bin",
+            "",
+            "1",
+        ])),
+        contextlib.redirect_stdout(out),
+    ):
+        setup_mode.run_setup(rediscover=False, prompt_discovery=True)
+
+    rendered = out.getvalue()
+    assert "Worker location" in rendered
+    assert "Bridge skill installation skipped for SSH runtimes." in rendered
+    remote_discover.assert_called_once()
+    kwargs = remote_discover.call_args.kwargs
+    assert kwargs["remote_host"] == "agent-box.local"
+    assert kwargs["remote_user"] == "operator"
+    assert kwargs["remote_port"] == 2222
+    assert kwargs["ssh_identity_file"] == str(tmp / "synkraken_worker")
+    assert kwargs["remote_working_dir"] == "/workspace/project"
+    assert kwargs["remote_path"] == ["/opt/agents/bin"]
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    goose = config["adapters"]["goose"]
+    assert goose["remote_host"] == "agent-box.local"
+    assert goose["ssh_identity_file"] == str(tmp / "synkraken_worker")
+    assert goose["remote_path"] == ["/opt/agents/bin"]
+
+
 def test_install_skills_command_from_existing_config(tmp: Path) -> None:
     config = {
         "adapters": {
@@ -499,6 +614,8 @@ def main() -> None:
         test_selection_parser(runtimes)
         test_config_merge(runtimes)
     with tempfile.TemporaryDirectory() as raw:
+        test_remote_discovery_preserves_ssh_config(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
         test_fake_agy_detected(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_fake_ag_requires_antigravity_probe(Path(raw))
@@ -511,6 +628,8 @@ def main() -> None:
         test_selected_bridge_skill_install_and_skips(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_declined_bridge_skill_install_skips_cleanly(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_setup_prompts_for_remote_discovery(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_install_skills_command_from_existing_config(Path(raw))
     with tempfile.TemporaryDirectory() as raw:

@@ -1,13 +1,20 @@
 # Operator Guide
 
-This guide assumes SynKraken is installed from a local checkout.
+Install SynKraken with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/howardscott-dot/synkraken/main/scripts/install.sh | bash
+```
+
+The installer clones SynKraken to `~/.synkraken/src`, creates a private venv
+at `~/.synkraken/venv`, adds command shims to `~/.local/bin`, and launches
+setup so you can choose local workers or SSH workers.
 
 ## Start The Daemon
 
 ```bash
-pip install -e .
-synkraken config
-python3 -m synkraken --config ./config.local.json
+cd ~/.synkraken/src
+synkraken-daemon --config ./config.local.json
 ```
 
 With the user service installed:

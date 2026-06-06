@@ -177,12 +177,12 @@ const initialData: AppData = {
 };
 
 const navItems: { id: View; label: string }[] = [
-  { id: "home", label: "Home" },
+  { id: "home", label: "Today" },
   { id: "projects", label: "Projects" },
   { id: "conversations", label: "Conversations" },
   { id: "knowledge", label: "Knowledge" },
-  { id: "workforce", label: "Workforce" },
-  { id: "advanced", label: "Advanced" },
+  { id: "workforce", label: "Workers" },
+  { id: "advanced", label: "More" },
 ];
 
 const workspacePresets: WorkspacePreset[] = ["Coding", "Operations", "Research", "Incident Response"];
@@ -2094,9 +2094,14 @@ export default function App() {
   return (
     <div className="app-shell min-h-screen bg-abyss text-slate-100">
       <aside className="sidebar fixed inset-y-0 left-0 w-60 border-r border-line bg-panel">
+        <div className="window-controls" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
         <div className="sidebar-brand border-b border-line px-5 py-4">
           <div className="brand-mark">SynKraken</div>
-          <div className="brand-subtitle">Company OS</div>
+          <div className="brand-subtitle">AI workforce</div>
         </div>
         <nav className="p-3">
           {navItems.map((item) => (
@@ -2109,12 +2114,12 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="absolute bottom-0 left-0 right-0 border-t border-line p-4 font-mono text-[11px] text-muted">
-          Agents propose.
+        <div className="sidebar-footer absolute bottom-0 left-0 right-0 border-t border-line p-4 font-mono text-[11px] text-muted">
+          Local daemon
           <br />
-          Humans approve.
+          Human approval
           <br />
-          SynKraken records.
+          Durable record
         </div>
       </aside>
 
@@ -2521,7 +2526,7 @@ function TopBar({
           <span className={online ? "text-slate-100" : "text-danger"}>{online ? "Daemon online" : "Daemon offline"}</span>
           <span className="truncate text-muted">{workforceState}</span>
         </button>
-        <button className="command-search" onClick={onPalette}>Search SynKraken</button>
+        <button className="command-search" onClick={onPalette}>Search or open a view</button>
         <div className="flex items-center justify-end gap-3 text-sm">
           {loading && <span className="text-amberop">Loading</span>}
           {!loading && refreshing && <span className="text-muted">Refreshing</span>}
@@ -6288,7 +6293,7 @@ function SettingsView({ data, daemonStatus, onRefresh }: { data: AppData; daemon
         </article>
         <article className="home-card">
           <div className="section-kicker">Console preferences</div>
-          <p className="quiet-copy">Apple-style dark interface, operator-first navigation, and raw technical fields behind details are active for v1.5.</p>
+          <p className="quiet-copy">Light macOS-style interface, operator-first navigation, and raw technical fields behind details are active for this redesign.</p>
         </article>
       </section>
     </div>

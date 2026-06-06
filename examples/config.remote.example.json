@@ -1,0 +1,63 @@
+{
+  "note": "Example showing adapters that run AI runtimes over SSH on another machine. Copy to config.local.json and replace remote_host, remote_user, and commands for your network.",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9460
+  },
+  "storage": {
+    "sqlite_path": "./data/synkraken.db"
+  },
+  "routing": {
+    "max_hops": 4,
+    "default_timeout_seconds": 120,
+    "retry_limit": 1,
+    "retry_backoff_seconds": 1
+  },
+  "adapters": {
+    "claude-remote": {
+      "type": "claude",
+      "enabled": true,
+      "runtime_name": "Claude Remote",
+      "command": ["claude"],
+      "remote_host": "agent-host.local",
+      "remote_user": "operator",
+      "remote_port": 22,
+      "ssh_identity_file": "~/.ssh/synkraken_worker",
+      "remote_working_dir": "/path/to/workspace",
+      "remote_path": ["/path/to/node/bin", "/path/to/user/bin"],
+      "ssh_options": ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"],
+      "timeout_seconds": 180,
+      "bare": false,
+      "permission_mode": "bypassPermissions",
+      "output_format": "text"
+    },
+    "goose-remote": {
+      "type": "goose",
+      "enabled": true,
+      "runtime_name": "Goose Remote",
+      "command": ["goose"],
+      "remote_host": "agent-host.local",
+      "remote_user": "operator",
+      "remote_port": 22,
+      "ssh_identity_file": "~/.ssh/synkraken_worker",
+      "remote_working_dir": "/path/to/workspace",
+      "remote_path": ["/path/to/node/bin", "/path/to/user/bin"],
+      "ssh_options": ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"],
+      "timeout_seconds": 180
+    },
+    "hermes-remote": {
+      "type": "hermes",
+      "enabled": true,
+      "runtime_name": "Hermes Remote",
+      "command": ["hermes"],
+      "remote_host": "agent-host.local",
+      "remote_user": "operator",
+      "remote_port": 22,
+      "ssh_identity_file": "~/.ssh/synkraken_worker",
+      "remote_working_dir": "/path/to/workspace",
+      "remote_path": ["/path/to/node/bin", "/path/to/user/bin"],
+      "ssh_options": ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"],
+      "timeout_seconds": 180
+    }
+  }
+}

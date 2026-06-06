@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from getpass import getuser
 from pathlib import Path
 import json
 import shutil
@@ -9,6 +10,7 @@ from .discovery import (
     RUNTIME_REGISTRY,
     SUPPORTED_ADAPTER_TYPES,
     discover_local_runtimes,
+    discover_remote_runtimes,
     merge_discovered_config,
     parse_runtime_selection,
 )
@@ -42,6 +44,68 @@ def _confirm(prompt: str, default_yes: bool = True) -> bool:
     if not raw:
         return default_yes
     return raw[:1] == 'y'
+
+
+def _default_ssh_identity_file() -> str:
+    candidate = Path.home() / '.ssh' / 'synkraken_worker'
+    if candidate.exists():
+        return str(candidate)
+    return str(Path.home() / '.ssh' / 'id_ed25519')
+
+
+def _default_remote_working_dir(remote_user: str | None = None) -> str:
+    user = remote_user or getuser()
+    return f'/home/{user}/synkraken'
+
+
+def _default_ssh_options(identity_file: str | None = None) -> list[str]:
+    options = ['-o', 'BatchMode=yes']
+    if identity_file:
+        options.extend(['-o', 'IdentitiesOnly=yes'])
+    return options
+
+
+def _collect_discovery_options() -> dict:
+    print('Worker location')
+    print()
+    print('1. This machine')
+    print('2. Another machine over SSH')
+    print()
+    raw = _ask('Where are your AI workers? (1 local, 2 ssh)', default='1').strip().lower()
+    if raw not in {'2', 'ssh', 'remote'}:
+        return {}
+
+    remote_host = _ask('SSH host or IP')
+    if not remote_host:
+        print()
+        print('No SSH host entered; using local discovery.')
+        return {}
+    remote_user = _ask('SSH username', default=getuser())
+    remote_port_raw = _ask('SSH port', default='22')
+    try:
+        remote_port = int(remote_port_raw)
+    except ValueError:
+        remote_port = 22
+    ssh_identity_file = _ask('SSH private key file', default=_default_ssh_identity_file())
+    remote_working_dir = _ask(
+        'Remote working directory',
+        default=_default_remote_working_dir(remote_user),
+    )
+    remote_path: list[str] = []
+    while True:
+        extra_path = _ask('Extra remote PATH directory (blank when done)', default='')
+        if not extra_path:
+            break
+        remote_path.append(extra_path)
+    return {
+        'remote_host': remote_host,
+        'remote_user': remote_user,
+        'remote_port': remote_port,
+        'ssh_identity_file': ssh_identity_file,
+        'remote_working_dir': remote_working_dir,
+        'remote_path': remote_path,
+        'ssh_options': _default_ssh_options(ssh_identity_file),
+    }
 
 
 def _copy_skill_folder(dst_dir: Path) -> None:
@@ -86,6 +150,8 @@ def _runtime_label(runtime: dict) -> str:
 
 
 def _bridge_skip_reason(runtime: dict) -> str:
+    if runtime.get('remote_host'):
+        return 'remote SSH runtime; install the bridge skill on that host if the runtime needs callback instructions'
     capabilities = set(runtime.get('capabilities') or [])
     if 'local_model' in capabilities or runtime.get('runtime_id') in {'ollama', 'lm-studio'}:
         return 'local model runtime; bridge skill not applicable'
@@ -93,6 +159,8 @@ def _bridge_skip_reason(runtime: dict) -> str:
 
 
 def _supports_bridge_skill_install(runtime: dict) -> bool:
+    if runtime.get('remote_host'):
+        return False
     adapter_type = str(runtime.get('adapter_type') or runtime.get('type') or '')
     return adapter_type in BRIDGE_SKILL_INSTALLER_TYPES and bool(runtime.get('skill_path'))
 
@@ -256,13 +324,18 @@ def _merge_choice(default: str = 'merge') -> str:
 def _print_runtime(runtime: dict, idx: int) -> None:
     support = 'adapter' if runtime.get('adapter_supported') else 'registry only'
     version = f"  {runtime['version']}" if runtime.get('version') else ''
-    print(f"     {idx}. ✓ {runtime['label']}  ({runtime['runtime_type']}, {support}){version}")
+    location = f" via ssh:{runtime['remote_host']}" if runtime.get('remote_host') else ''
+    print(f"     {idx}. ✓ {runtime['label']}  ({runtime['runtime_type']}, {support}){location}{version}")
 
 
 def _config_label(runtime: dict) -> str:
     if runtime.get('runtime_id') == 'google-antigravity':
-        return 'Antigravity'
-    return str(runtime.get('label') or runtime.get('runtime_id') or runtime.get('id'))
+        label = 'Antigravity'
+    else:
+        label = str(runtime.get('label') or runtime.get('runtime_id') or runtime.get('id'))
+    if runtime.get('remote_host'):
+        return f"{label}  ssh:{runtime['remote_host']}"
+    return label
 
 
 def _select_runtimes_for_config(runtimes: list[dict]) -> list[dict]:
@@ -326,21 +399,61 @@ def _update_config_from_selection(runtimes: list[dict], selected: list[dict], *,
 
 
 # ── install / setup walkthrough ───────────────────────────────────────────
-def run_setup(*, rediscover: bool = False) -> None:
+def run_setup(
+    *,
+    rediscover: bool = False,
+    remote_host: str | None = None,
+    remote_user: str | None = None,
+    remote_port: int | None = None,
+    ssh_identity_file: str | None = None,
+    remote_working_dir: str | None = None,
+    remote_path: list[str] | None = None,
+    ssh_options: list[str] | None = None,
+    prompt_discovery: bool = False,
+) -> None:
     if not SKILL_SOURCE.exists():
         print(f'Bridge skill source not found at {SKILL_SOURCE}.')
         print('This is unusual — did the package install correctly?')
         return
 
-    runtimes = discover_local_runtimes()
+    if prompt_discovery and not remote_host:
+        options = _collect_discovery_options()
+        remote_host = options.get('remote_host')
+        remote_user = options.get('remote_user')
+        remote_port = options.get('remote_port')
+        ssh_identity_file = options.get('ssh_identity_file')
+        remote_working_dir = options.get('remote_working_dir')
+        remote_path = options.get('remote_path')
+        ssh_options = options.get('ssh_options')
+
+    if remote_host:
+        print(f'Discovering AI workers over SSH on {remote_host}...')
+        runtimes = discover_remote_runtimes(
+            remote_host=remote_host,
+            remote_user=remote_user,
+            remote_port=remote_port,
+            ssh_identity_file=ssh_identity_file,
+            remote_working_dir=remote_working_dir,
+            remote_path=remote_path,
+            ssh_options=ssh_options,
+        )
+    else:
+        runtimes = discover_local_runtimes()
     if not runtimes:
         print('Discovered AI workers:')
         print()
         print('Total found: 0')
+        if remote_host:
+            print()
+            print('No SSH runtimes were found. Check the host, user, key, and remote PATH.')
         return
 
     selected = _select_runtimes_for_config(runtimes)
-    if _confirm('Install SynKraken bridge skill into supported selected workers?', default_yes=True):
+    if remote_host:
+        print()
+        print('Bridge skill installation skipped for SSH runtimes.')
+        print('Remote adapters can still receive work; install the bridge skill on the remote host only if they need callback instructions.')
+    elif _confirm('Install SynKraken bridge skill into supported selected workers?', default_yes=True):
         results = _install_bridge_skills_for_runtimes(selected)
         _print_bridge_skill_results(results)
     else:

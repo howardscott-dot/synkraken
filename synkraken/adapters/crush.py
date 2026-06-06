@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .base import BaseAdapter
-from .cli_utils import run_command
+from .cli_utils import build_adapter_command, is_remote_config, run_command
 from ..models import AdapterReply, FabricMessage
 
 
@@ -109,19 +109,22 @@ class CrushAdapter(BaseAdapter):
         working_dir = self.config.get("working_dir") or os.path.expanduser("~")
 
         wrapped_body = self._prompt_boundary(message.body)
-        command = list(base_command) + [
+        local_command = list(base_command) + [
             "run",
             "--quiet",
             "--",
             wrapped_body,
         ]
+        command = build_adapter_command(self.config, local_command)
+        cwd = None if is_remote_config(self.config) else working_dir
+        env = None if is_remote_config(self.config) else self.build_env()
 
         try:
             returncode, stdout, stderr, duration_ms = run_command(
                 command,
                 timeout,
-                cwd=working_dir,
-                env=self.build_env(),
+                cwd=cwd,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return AdapterReply(

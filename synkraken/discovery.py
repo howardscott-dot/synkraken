@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -208,6 +209,30 @@ def _nvm_node_bin_dirs(home: Path) -> list[Path]:
     return [path for _, path in found]
 
 
+def _remote_binary_dir_words(extra_path: Iterable[str] | None = None) -> list[str]:
+    words: list[str] = []
+    for item in extra_path or []:
+        cleaned = str(item).strip()
+        if cleaned:
+            words.append(shlex.quote(cleaned))
+    words.extend([
+        "$HOME/.local/bin",
+        "$HOME/bin",
+        "$HOME/.npm-global/bin",
+        "$HOME/.nvm/versions/node/" + "*/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",
+    ])
+    deduped: list[str] = []
+    for word in words:
+        if word not in deduped:
+            deduped.append(word)
+    return deduped
+
+
 def _find_node_bin(search_path: str | None, extra_dirs: list[Path]) -> tuple[str | None, str | None]:
     node_path = shutil.which("node", path=search_path)
     if node_path:
@@ -364,6 +389,144 @@ def _run_probe_command(command_path: str, args: tuple[str, ...], timeout_seconds
         _restore_terminal_attrs(saved)
 
 
+def _ssh_base_command(
+    *,
+    remote_host: str,
+    remote_user: str | None = None,
+    remote_port: int | None = None,
+    ssh_identity_file: str | None = None,
+    ssh_command: str = "ssh",
+    ssh_options: Iterable[str] | None = None,
+) -> list[str]:
+    command = [ssh_command]
+    if remote_port:
+        command.extend(["-p", str(remote_port)])
+    if ssh_identity_file:
+        command.extend(["-i", str(Path(ssh_identity_file).expanduser())])
+    command.extend(str(item) for item in (ssh_options or []))
+    target = f"{remote_user}@{remote_host}" if remote_user else remote_host
+    command.append(target)
+    return command
+
+
+def _run_remote_shell(
+    shell_command: str,
+    *,
+    remote_host: str,
+    remote_user: str | None = None,
+    remote_port: int | None = None,
+    ssh_identity_file: str | None = None,
+    ssh_command: str = "ssh",
+    ssh_options: Iterable[str] | None = None,
+    timeout_seconds: float = 6.0,
+) -> subprocess.CompletedProcess[str]:
+    command = _ssh_base_command(
+        remote_host=remote_host,
+        remote_user=remote_user,
+        remote_port=remote_port,
+        ssh_identity_file=ssh_identity_file,
+        ssh_command=ssh_command,
+        ssh_options=ssh_options,
+    )
+    command.append(shell_command)
+    return subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def _remote_path_assignment(remote_path: Iterable[str] | None = None) -> str:
+    parts = [str(item).strip() for item in (remote_path or []) if str(item).strip()]
+    if not parts:
+        return ""
+    joined = ":".join(shlex.quote(item) for item in parts)
+    return f"PATH={joined}:$PATH"
+
+
+def _safe_remote_version(
+    command_path: str,
+    args: tuple[str, ...],
+    *,
+    remote_host: str,
+    remote_user: str | None,
+    remote_port: int | None,
+    ssh_identity_file: str | None,
+    ssh_command: str,
+    ssh_options: Iterable[str],
+    remote_path: Iterable[str],
+    timeout_seconds: float = 4.0,
+) -> str:
+    prefix = _remote_path_assignment(remote_path)
+    command = shlex.join([command_path, *args])
+    shell_command = f"{prefix} {command}" if prefix else command
+    try:
+        result = _run_remote_shell(
+            shell_command,
+            remote_host=remote_host,
+            remote_user=remote_user,
+            remote_port=remote_port,
+            ssh_identity_file=ssh_identity_file,
+            ssh_command=ssh_command,
+            ssh_options=ssh_options,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if result.returncode != 0:
+        return ""
+    return _probe_version([result.stdout or ""])
+
+
+def _remote_verified_by_probe(
+    definition: RuntimeDefinition,
+    command_name: str,
+    command_path: str,
+    *,
+    remote_host: str,
+    remote_user: str | None,
+    remote_port: int | None,
+    ssh_identity_file: str | None,
+    ssh_command: str,
+    ssh_options: Iterable[str],
+    remote_path: Iterable[str],
+) -> tuple[bool, list[str]]:
+    if not definition.verification_keywords:
+        return True, []
+    verified_names = {name.lower() for name in definition.verified_command_names}
+    if Path(command_path).name.lower() in verified_names or command_name.lower() in verified_names:
+        return True, []
+    outputs: list[str] = []
+    for args in definition.safe_probe_args or (definition.safe_version_args,):
+        prefix = _remote_path_assignment(remote_path)
+        command = shlex.join([command_path, *args])
+        shell_command = f"{prefix} {command}" if prefix else command
+        try:
+            result = _run_remote_shell(
+                shell_command,
+                remote_host=remote_host,
+                remote_user=remote_user,
+                remote_port=remote_port,
+                ssh_identity_file=ssh_identity_file,
+                ssh_command=ssh_command,
+                ssh_options=ssh_options,
+                timeout_seconds=4.0,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if result.stdout:
+            outputs.append(result.stdout)
+    combined = "\n".join(outputs).lower()
+    for keyword in definition.verification_keywords:
+        if keyword.lower() in combined:
+            return True, outputs
+    return False, outputs
+
+
 def discover_local_runtimes(
     *,
     search_path: str | None = None,
@@ -465,6 +628,171 @@ def discover_local_runtimes(
     return results
 
 
+def discover_remote_runtimes(
+    *,
+    remote_host: str,
+    remote_user: str | None = None,
+    remote_port: int | None = None,
+    ssh_identity_file: str | None = None,
+    remote_working_dir: str | None = None,
+    remote_path: Iterable[str] | None = None,
+    ssh_command: str = "ssh",
+    ssh_options: Iterable[str] | None = None,
+    include_version: bool = True,
+    include_probe_output: bool = False,
+) -> list[dict]:
+    """Detect AI runtimes on a reachable SSH host without running agent work."""
+    if not remote_host:
+        return []
+
+    options = list(ssh_options or [])
+    command_names = sorted({name for definition in RUNTIME_REGISTRY for name in definition.command_names})
+    dirs_literal = " ".join(_remote_binary_dir_words(remote_path))
+    names_literal = " ".join(shlex.quote(item) for item in command_names)
+    shell = (
+        f"for d in {dirs_literal}; do "
+        "for expanded in $d; do "
+        "[ -d \"$expanded\" ] || continue; "
+        f"for c in {names_literal}; do "
+        "p=\"$expanded/$c\"; "
+        "[ -x \"$p\" ] && printf '%s\t%s\n' \"$c\" \"$p\"; "
+        "done; "
+        "done; "
+        "done"
+    )
+    try:
+        result = _run_remote_shell(
+            shell,
+            remote_host=remote_host,
+            remote_user=remote_user,
+            remote_port=remote_port,
+            ssh_identity_file=ssh_identity_file,
+            ssh_command=ssh_command,
+            ssh_options=options,
+            timeout_seconds=8.0,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    if result.returncode != 0:
+        return []
+
+    found: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        name, sep, path = line.partition("\t")
+        if sep and name and path and name not in found:
+            found[name] = path
+
+    discovered_bins = sorted({str(Path(path).parent) for path in found.values()})
+    adapter_remote_path = []
+    for item in [*(remote_path or []), *discovered_bins]:
+        cleaned = str(item).strip()
+        if cleaned and cleaned not in adapter_remote_path:
+            adapter_remote_path.append(cleaned)
+
+    results: list[dict] = []
+    for definition in RUNTIME_REGISTRY:
+        command_name = None
+        command_path = None
+        for candidate in definition.command_names:
+            if candidate in found:
+                command_name = candidate
+                command_path = found[candidate]
+                break
+        if not command_path or not command_name:
+            continue
+
+        probe_outputs: list[str] = []
+        verified, probe_outputs = _remote_verified_by_probe(
+            definition,
+            command_name,
+            command_path,
+            remote_host=remote_host,
+            remote_user=remote_user,
+            remote_port=remote_port,
+            ssh_identity_file=ssh_identity_file,
+            ssh_command=ssh_command,
+            ssh_options=options,
+            remote_path=adapter_remote_path,
+        )
+        if not verified:
+            continue
+
+        version = ""
+        if include_version:
+            if definition.safe_probe_args:
+                if not probe_outputs:
+                    for args in definition.safe_probe_args:
+                        version = _safe_remote_version(
+                            command_path,
+                            args,
+                            remote_host=remote_host,
+                            remote_user=remote_user,
+                            remote_port=remote_port,
+                            ssh_identity_file=ssh_identity_file,
+                            ssh_command=ssh_command,
+                            ssh_options=options,
+                            remote_path=adapter_remote_path,
+                        )
+                        if version:
+                            break
+                else:
+                    version = _probe_version(probe_outputs)
+            else:
+                version = _safe_remote_version(
+                    command_path,
+                    definition.safe_version_args,
+                    remote_host=remote_host,
+                    remote_user=remote_user,
+                    remote_port=remote_port,
+                    ssh_identity_file=ssh_identity_file,
+                    ssh_command=ssh_command,
+                    ssh_options=options,
+                    remote_path=adapter_remote_path,
+                )
+
+        runtime = {
+            "id": definition.runtime_id,
+            "runtime_id": definition.runtime_id,
+            "label": definition.label,
+            "type": definition.runtime_type,
+            "runtime_type": definition.runtime_type,
+            "command": [command_path],
+            "command_path": command_path,
+            "capabilities": list(definition.capabilities),
+            "cost_tier": definition.cost_tier,
+            "usage_risk": definition.usage_risk,
+            "preferred_roles": list(definition.preferred_roles),
+            "avoid_roles": list(definition.avoid_roles),
+            "adapter_type": definition.adapter_type,
+            "adapter_supported": definition.adapter_type in SUPPORTED_ADAPTER_TYPES,
+            "supported_modes": list(definition.supported_modes),
+            "timeout_seconds": definition.default_timeout_seconds,
+            "detected": True,
+            "detected_by": ["ssh", "path"],
+            "version": version,
+            "remote_host": remote_host,
+            "remote_user": remote_user or "",
+            "remote_port": remote_port or 22,
+            "remote_working_dir": remote_working_dir or "",
+            "remote_path": adapter_remote_path,
+            "ssh_command": ssh_command,
+            "ssh_options": options,
+        }
+        if ssh_identity_file:
+            runtime["ssh_identity_file"] = ssh_identity_file
+        if definition.runtime_id == "crush":
+            for bin_dir in adapter_remote_path:
+                if "/.nvm/versions/node/" in bin_dir:
+                    runtime["node_bin_dir"] = bin_dir
+                    runtime["node_path"] = str(Path(bin_dir) / "node")
+                    break
+        if include_probe_output:
+            runtime["probe_output"] = probe_outputs
+        results.append(runtime)
+
+    return results
+
+
 def runtime_to_adapter_config(runtime: dict) -> dict:
     adapter_type = str(runtime.get("adapter_type") or runtime.get("type") or "unsupported")
     enabled = bool(runtime.get("adapter_supported", adapter_type in SUPPORTED_ADAPTER_TYPES))
@@ -484,6 +812,19 @@ def runtime_to_adapter_config(runtime: dict) -> dict:
     }
     if runtime.get("version"):
         config["version"] = runtime["version"]
+    for key in (
+        "remote_host",
+        "remote_user",
+        "remote_port",
+        "ssh_identity_file",
+        "remote_working_dir",
+        "remote_path",
+        "ssh_command",
+        "ssh_options",
+    ):
+        value = runtime.get(key)
+        if value not in (None, "", []):
+            config[key] = value
     if adapter_type == "openclaw":
         config["agent_id"] = "main"
         config["experimental"] = True
@@ -524,6 +865,19 @@ def runtime_to_registry_config(runtime: dict, *, enabled: bool | None = None) ->
     }
     if runtime.get("version"):
         item["version"] = runtime["version"]
+    for key in (
+        "remote_host",
+        "remote_user",
+        "remote_port",
+        "ssh_identity_file",
+        "remote_working_dir",
+        "remote_path",
+        "ssh_command",
+        "ssh_options",
+    ):
+        value = runtime.get(key)
+        if value not in (None, "", []):
+            item[key] = value
     return item
 
 

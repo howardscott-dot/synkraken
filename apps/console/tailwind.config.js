@@ -4,14 +4,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        abyss: "#0b0b0d",
-        panel: "#111113",
-        panel2: "#1c1c1e",
-        line: "rgba(255,255,255,0.08)",
-        cyanop: "#2997ff",
-        amberop: "#f5a623",
-        danger: "#ff453a",
-        muted: "#a1a1a6",
+        abyss: "#f5f5f7",
+        panel: "rgba(255,255,255,0.72)",
+        panel2: "rgba(255,255,255,0.92)",
+        line: "rgba(0,0,0,0.08)",
+        cyanop: "#007aff",
+        amberop: "#b26a00",
+        danger: "#d70015",
+        muted: "#6e6e73",
       },
       fontFamily: {
         mono: [

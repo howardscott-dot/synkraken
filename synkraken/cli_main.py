@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
-from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes
+from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes, discover_remote_runtimes
 from .setup_mode import run_install_skills, run_setup, run_uninstall
 from .tui import run_tui
 from .web import serve as serve_web
@@ -659,6 +659,26 @@ def add_base_url_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Print raw JSON output")
 
 
+def add_remote_discovery_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--remote", metavar="HOST", help="Discover/configure runtimes over SSH on HOST")
+    parser.add_argument("--remote-user", help="SSH username for --remote")
+    parser.add_argument("--remote-port", type=int, default=22, help="SSH port for --remote")
+    parser.add_argument("--ssh-identity-file", help="SSH private key file for --remote")
+    parser.add_argument("--remote-working-dir", help="Working directory to use when running remote adapters")
+    parser.add_argument("--remote-path", action="append", default=[], help="Extra remote PATH directory; repeat for multiple directories")
+    parser.add_argument("--ssh-option", action="append", default=[], help="Extra ssh option; use --ssh-option=-o for option-like values")
+
+
+def _remote_ssh_options(args: argparse.Namespace) -> list[str]:
+    options = list(getattr(args, "ssh_option", []) or [])
+    if options:
+        return options
+    defaults = ["-o", "BatchMode=yes"]
+    if getattr(args, "ssh_identity_file", None):
+        defaults.extend(["-o", "IdentitiesOnly=yes"])
+    return defaults
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="synkraken",
@@ -740,10 +760,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_discover = sub.add_parser("discover", help="Discover local AI runtimes without changing config")
     p_discover.add_argument("--json", action="store_true", help="Print raw JSON output")
     p_discover.add_argument("--verbose", action="store_true", help="Print full command paths and probe output")
+    add_remote_discovery_args(p_discover)
 
     p_config = sub.add_parser("config", help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
     p_config.add_argument("--rediscover", action="store_true", help="Rescan runtimes and merge them into config.local.json")
     p_config.add_argument("--install-skills", action="store_true", help="Install bridge skills for configured workers")
+    add_remote_discovery_args(p_config)
     sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
 
     p_decisions = sub.add_parser("decisions", help="List decisions")
@@ -866,10 +888,33 @@ def main() -> None:
         if args.install_skills:
             run_install_skills()
             return
-        run_setup(rediscover=args.rediscover)
+        run_setup(
+            rediscover=args.rediscover,
+            remote_host=args.remote,
+            remote_user=args.remote_user,
+            remote_port=args.remote_port,
+            ssh_identity_file=args.ssh_identity_file,
+            remote_working_dir=args.remote_working_dir,
+            remote_path=args.remote_path,
+            ssh_options=_remote_ssh_options(args),
+            prompt_discovery=not bool(args.remote),
+        )
         return
     if args.command == 'discover':
-        data = {"runtimes": discover_local_runtimes(include_probe_output=args.verbose and not args.json)}
+        if args.remote:
+            runtimes = discover_remote_runtimes(
+                remote_host=args.remote,
+                remote_user=args.remote_user,
+                remote_port=args.remote_port,
+                ssh_identity_file=args.ssh_identity_file,
+                remote_working_dir=args.remote_working_dir,
+                remote_path=args.remote_path,
+                ssh_options=_remote_ssh_options(args),
+                include_probe_output=args.verbose and not args.json,
+            )
+        else:
+            runtimes = discover_local_runtimes(include_probe_output=args.verbose and not args.json)
+        data = {"runtimes": runtimes}
         if args.json:
             print(json.dumps(data, indent=2, ensure_ascii=False))
         else:

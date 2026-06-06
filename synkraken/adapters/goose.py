@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from .base import BaseAdapter
-from .cli_utils import run_command
+from .cli_utils import build_adapter_command, run_command
 from ..models import AdapterReply, FabricMessage
 
 
@@ -44,7 +44,7 @@ class GooseAdapter(BaseAdapter):
     def send(self, message: FabricMessage) -> AdapterReply:
         base_command = self.config.get("command", ["goose"])
         timeout = int(self.config.get("timeout_seconds", 90))
-        command = list(base_command) + [
+        local_command = list(base_command) + [
             "run",
             "--text",
             message.body,
@@ -53,7 +53,8 @@ class GooseAdapter(BaseAdapter):
         ]
         system = self.config.get("system")
         if system:
-            command.extend(["--system", str(system)])
+            local_command.extend(["--system", str(system)])
+        command = build_adapter_command(self.config, local_command)
         returncode, stdout, stderr, duration_ms = run_command(command, timeout)
         ok = returncode == 0
         clean_stdout = self._normalize_output(stdout.strip())

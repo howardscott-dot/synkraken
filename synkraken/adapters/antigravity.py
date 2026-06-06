@@ -4,7 +4,7 @@ import re
 import subprocess
 
 from .base import BaseAdapter
-from .cli_utils import run_command
+from .cli_utils import build_adapter_command, run_command
 from ..models import AdapterReply, FabricMessage
 
 
@@ -41,11 +41,12 @@ class AntigravityAdapter(BaseAdapter):
     def send(self, message: FabricMessage) -> AdapterReply:
         base_command = self.config.get("command", ["agy"])
         timeout = int(self.config.get("timeout_seconds", 120))
-        command = list(base_command) + [
+        local_command = list(base_command) + [
             "--dangerously-skip-permissions",
             "--print",
             message.body,
         ]
+        command = build_adapter_command(self.config, local_command)
 
         try:
             returncode, stdout, stderr, duration_ms = run_command(command, timeout)

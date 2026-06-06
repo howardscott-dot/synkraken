@@ -98,8 +98,18 @@ small leaf integrations around external runtimes.
 
 ## Quick Start
 
+Install SynKraken with one command:
+
 ```bash
-# Install from a checkout.
+curl -fsSL https://raw.githubusercontent.com/howardscott-dot/synkraken/main/scripts/install.sh | bash
+```
+
+The installer creates `~/.synkraken`, installs commands into `~/.local/bin`,
+and launches `synkraken config`, where you choose local workers or SSH workers.
+
+From a development checkout:
+
+```bash
 pip install -e .
 
 # Discover runtimes without changing config.

@@ -1,4 +1,4 @@
-import { fetch } from "@tauri-apps/plugin-http";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 const DEFAULT_DAEMON_URL = "http://127.0.0.1:9460";
 
@@ -501,12 +501,19 @@ export class ApiError extends Error {
   }
 }
 
+function daemonFetch(url: string, init: RequestInit): Promise<Response> {
+  if ("__TAURI_INTERNALS__" in window) {
+    return tauriFetch(url, init);
+  }
+  return window.fetch(url, init);
+}
+
 async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 8000): Promise<T> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${DAEMON_URL}${path}`, {
+    const response = await daemonFetch(`${DAEMON_URL}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -533,7 +540,11 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 8000
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new ApiError(`Request timed out after ${timeoutMs}ms`);
     }
-    throw new ApiError(error instanceof Error ? error.message : "Daemon request failed");
+    const message = error instanceof Error ? error.message : "Daemon request failed";
+    if (message === "Failed to fetch") {
+      throw new ApiError("Daemon offline or unreachable");
+    }
+    throw new ApiError(message);
   } finally {
     window.clearTimeout(timeout);
   }

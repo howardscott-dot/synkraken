@@ -9,9 +9,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from synkraken.adapters import ADAPTER_TYPES, build_adapter
 from synkraken.adapters.base import BaseAdapter
+from synkraken.adapters.cli_utils import build_adapter_command
 
 
 def main() -> None:
+    remote_command = build_adapter_command(
+        {
+            "remote_host": "agent-box.local",
+            "remote_user": "operator",
+            "remote_port": 2222,
+            "ssh_identity_file": "~/.ssh/synkraken_worker",
+            "remote_working_dir": "/workspace/project",
+            "remote_path": ["/home/operator/.nvm/versions/node/v24.15.0/bin"],
+            "ssh_options": ["-o", "BatchMode=yes"],
+        },
+        ["goose", "run", "--text", "hello remote worker"],
+    )
+    assert remote_command[:8] == [
+        "ssh",
+        "-p",
+        "2222",
+        "-i",
+        str(Path("~/.ssh/synkraken_worker").expanduser()),
+        "-o",
+        "BatchMode=yes",
+        "operator@agent-box.local",
+    ]
+    assert (
+        "cd /workspace/project && "
+        "PATH=/home/operator/.nvm/versions/node/v24.15.0/bin:$PATH "
+        "goose run --text 'hello remote worker'"
+    ) == remote_command[-1]
+
     assert ADAPTER_TYPES, "no adapters registered"
     for adapter_type, adapter_class in ADAPTER_TYPES.items():
         assert issubclass(adapter_class, BaseAdapter), f"{adapter_type} does not extend BaseAdapter"

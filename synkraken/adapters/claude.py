@@ -4,7 +4,7 @@ import json
 import re
 
 from .base import BaseAdapter
-from .cli_utils import run_command
+from .cli_utils import build_adapter_command, run_command
 from ..models import AdapterReply, FabricMessage
 
 
@@ -65,19 +65,20 @@ class ClaudeAdapter(BaseAdapter):
             dynamic_prefix = f"{dynamic_prefix} {message_prefix}"
         body = f"{dynamic_prefix}\n\n{message.body}"
 
-        command = list(base_command) + [
+        local_command = list(base_command) + [
             "-p",
             "--no-session-persistence",
             "--permission-mode", permission_mode,
             "--output-format", output_format,
         ]
         if bare:
-            command.append("--bare")
+            local_command.append("--bare")
         if model:
-            command.extend(["--model", str(model)])
+            local_command.extend(["--model", str(model)])
         if system:
-            command.extend(["--system-prompt", str(system)])
-        command.append(body)
+            local_command.extend(["--system-prompt", str(system)])
+        local_command.append(body)
+        command = build_adapter_command(self.config, local_command)
 
         returncode, stdout, stderr, duration_ms = run_command(command, timeout)
         ok = returncode == 0

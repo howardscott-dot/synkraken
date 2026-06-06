@@ -6,7 +6,7 @@ from typing import Any
 import re
 
 from .base import BaseAdapter
-from .cli_utils import run_command
+from .cli_utils import build_adapter_command, run_command
 from ..models import AdapterReply, FabricMessage
 
 
@@ -104,7 +104,7 @@ class OpenClawAdapter(BaseAdapter):
         if prefix:
             dynamic_prefix = f"{dynamic_prefix} {prefix}"
         body = f"{dynamic_prefix}\n\n{message.body}"
-        command = list(base_command) + [
+        local_command = list(base_command) + [
             "agent",
             "--agent",
             agent_id,
@@ -113,7 +113,8 @@ class OpenClawAdapter(BaseAdapter):
             "--json",
         ]
         if self.config.get("local", False):
-            command.append("--local")
+            local_command.append("--local")
+        command = build_adapter_command(self.config, local_command)
         returncode, stdout, stderr, duration_ms = run_command(command, timeout)
         ok = returncode == 0
         parsed: dict | list | str | None = None
