@@ -173,6 +173,48 @@ def main() -> None:
         calls.clear()
         label, result, hint = tui._exec_room_command(
             "http://daemon",
+            "add @crush @goose",
+            {"chat_target": "room:stress1"},
+            data,
+        )
+        assert label == "rooms"
+        assert result is None
+        assert hint == "added crush, goose to #stress1"
+        assert calls == [
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "crush"}),
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "goose"}),
+        ]
+
+        calls.clear()
+        label, result, hint = tui._exec_room_command(
+            "http://daemon",
+            "add @crush @goose",
+            {"command_result": ("#stress1", {"messages": []})},
+            data,
+        )
+        assert label == "rooms"
+        assert result is None
+        assert hint == "added crush, goose to #stress1"
+        assert calls == [
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "crush"}),
+            ("http://daemon/v1/rooms/stress1/members", {"adapter_id": "goose"}),
+        ]
+
+        calls.clear()
+        label, result, hint = tui._exec_room_command(
+            "http://daemon",
+            "add @crush @goose",
+            {},
+            data,
+        )
+        assert label == "rooms"
+        assert result is None
+        assert hint == "open a room first, or use /room add <room> <agent...>"
+        assert calls == []
+
+        calls.clear()
+        label, result, hint = tui._exec_room_command(
+            "http://daemon",
             "add stress1 @crush @goose",
             {},
             data,

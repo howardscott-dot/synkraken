@@ -515,6 +515,20 @@ def _looks_like_agent_token(token: str, data: dict) -> bool:
     return resolved in {'broadcast', *_agent_ids(data)}
 
 
+def _active_room_name(state: dict) -> str:
+    if state.get('current_room'):
+        return str(state['current_room']).lstrip('#').lower()
+    target = str(state.get('chat_target') or '')
+    if target.startswith('room:'):
+        return target.split(':', 1)[1].lstrip('#').lower()
+    result = state.get('command_result')
+    if isinstance(result, tuple) and result:
+        label = str(result[0] or '')
+        if label.startswith('#'):
+            return label[1:].lower()
+    return ''
+
+
 def _time_ago(iso_str: str | None) -> str:
     if not iso_str:
         return ''
@@ -3300,8 +3314,11 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
     if sub == 'add':
         if not args:
             return ('rooms', None, 'usage: /room add [name] <agent...|all>')
-        if state.get('current_room') and _looks_like_agent_token(args[0], data):
-            name = str(state['current_room'])
+        active_room = _active_room_name(state)
+        if _looks_like_agent_token(args[0], data):
+            if not active_room:
+                return ('rooms', None, 'open a room first, or use /room add <room> <agent...>')
+            name = active_room
             adapters = [_resolve_agent_token(arg, data) for arg in args]
         elif len(args) >= 2:
             name = args[0].lstrip('#').lower()
