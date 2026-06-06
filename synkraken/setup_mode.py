@@ -469,7 +469,7 @@ def run_setup(
     print('SynKraken is ready.')
     print()
     print('Start SynKraken:')
-    print(f'  synkraken-daemon --config ./{DEFAULT_CONFIG_PATH.name}')
+    print(f'  synkraken-daemon --config {DEFAULT_CONFIG_PATH}')
     print()
     print('Then open another terminal and run:')
     print('  synkraken tui')
