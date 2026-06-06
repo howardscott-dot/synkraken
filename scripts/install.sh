@@ -8,6 +8,7 @@ BIN_DIR="${SYNKRAKEN_BIN_DIR:-$HOME/.local/bin}"
 PYTHON_BIN="${PYTHON:-python3}"
 RUN_CONFIG=1
 CONFIG_ARGS=()
+CONFIG_ARG_COUNT=0
 
 usage() {
   cat <<EOF
@@ -60,6 +61,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --remote|--remote-user|--remote-port|--ssh-identity-file|--remote-working-dir|--remote-path)
       CONFIG_ARGS+=("$1" "${2:?missing value for $1}")
+      CONFIG_ARG_COUNT=$((CONFIG_ARG_COUNT + 2))
       shift 2
       ;;
     -h|--help)
@@ -142,13 +144,17 @@ esac
 if [[ "$RUN_CONFIG" -eq 1 ]]; then
   echo
   echo "Starting SynKraken setup."
-  if [[ "${#CONFIG_ARGS[@]}" -eq 0 ]]; then
+  if [[ "$CONFIG_ARG_COUNT" -eq 0 ]]; then
     echo "Setup will ask whether your workers are local or on another machine over SSH."
   else
     echo "Using setup values provided on the install command line."
   fi
   if [[ -r /dev/tty ]]; then
-    (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} </dev/tty)
+    if [[ "$CONFIG_ARG_COUNT" -eq 0 ]]; then
+      (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config </dev/tty)
+    else
+      (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config "${CONFIG_ARGS[@]}" </dev/tty)
+    fi
   else
     echo "No interactive terminal found, so setup was skipped."
     echo "Run this later:"
