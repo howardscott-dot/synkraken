@@ -587,3 +587,24 @@ Discourages:
 - hidden remote state
 - implying SynKraken pays runtime costs or owns provider accounts
 - storing private project context in shipped defaults
+
+## 10.1. Software Should Start Itself
+
+SynKraken is software, not a collection of processes an operator must manage.
+Installation, startup, recovery, health validation, and service lifecycle are
+platform responsibilities owned by SynKraken.
+
+Encourages:
+
+- one cross-platform install command
+- automatic startup and restart after failure
+- recovery before presenting connection errors
+- health validation before reporting installation success
+- operator language such as running, stopped, healthy, and needs attention
+
+Discourages:
+
+- requiring operators to understand service managers
+- exposing daemon, gateway, bridge, systemd, or launchctl as daily concepts
+- reporting success before the runtime passes a health check
+- manual background-process instructions

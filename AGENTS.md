@@ -38,16 +38,16 @@ python3 scripts/live_integration_test.py --skip-restart
 python3 scripts/context_audit.py
 ```
 
-### Lifecycle (requires systemd user service)
+### Lifecycle
 
 ```bash
-./scripts/install-user-service.sh
-systemctl --user enable --now synkraken
+synkraken install
 synkraken status
-synkraken start daemon
-synkraken stop daemon
-synkraken restart          # alias for restart daemon
-./scripts/uninstall-user-service.sh
+synkraken start
+synkraken stop
+synkraken restart
+synkraken doctor
+synkraken uninstall        # preserves config and data
 ```
 
 ### Setup

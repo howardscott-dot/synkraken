@@ -54,6 +54,36 @@ EXCEPTIONS = [
         "pattern": "Howard",
         "reason": "copyright notice",
     },
+    {
+        "path": "README.md",
+        "pattern": "howardscott-dot",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "README.md",
+        "pattern": "howard",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "docs/OPERATOR_GUIDE.md",
+        "pattern": "howardscott-dot",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "docs/OPERATOR_GUIDE.md",
+        "pattern": "howard",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "scripts/install.sh",
+        "pattern": "howardscott-dot",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "scripts/install.sh",
+        "pattern": "howard",
+        "reason": "public project repository URL",
+    },
 ]
 
 
@@ -116,7 +146,7 @@ def audit() -> tuple[list[dict], list[dict]]:
             for match in ABSOLUTE_USER_PATH_RE.finditer(line):
                 token = match.group(0)
                 username = match.group(2)
-                if username in {"runner", "sandbox"}:
+                if username in {"operator", "runner", "sandbox"}:
                     continue
                 findings.append({
                     "path": rel(path),

@@ -119,16 +119,13 @@ synkraken discover --json --verbose
 # Interactive setup: discover runtimes, install bridge skills, create config.
 synkraken config
 
-# Start the daemon directly.
-python3 -m synkraken --config ./config.local.json
-
-# Or install and use the user service.
-./scripts/install-user-service.sh
-synkraken start daemon
+# Install, start, and validate the runtime on Linux or macOS.
+synkraken install
 
 # Check state.
 synkraken status
 synkraken health
+synkraken doctor
 synkraken agents
 synkraken workforce
 
@@ -136,6 +133,9 @@ synkraken workforce
 synkraken tui
 synkraken web
 ```
+
+See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for Linux, macOS, uninstall,
+diagnostics, and the Windows roadmap.
 
 Run the native Console from a checkout with the daemon running:
 

@@ -13,27 +13,27 @@ synkraken-daemon --config ./config.local.json
 ```
 
 
-### User-level systemd service
+### Cross-platform runtime service
 
 ```bash
-./scripts/install-user-service.sh                 # defaults to ./config.local.json
-systemctl --user enable --now synkraken
-synkraken status                                   # service state + daemon health
-synkraken stop daemon
-synkraken start daemon
-synkraken restart                                  # short alias for restart daemon
-./scripts/uninstall-user-service.sh
+synkraken install                                  # Linux user service or macOS LaunchAgent
+synkraken status
+synkraken doctor
+synkraken stop
+synkraken start
+synkraken restart
+synkraken uninstall                                # preserves config and data
 ```
 
 Pass a different config path to the installer if needed:
 
 ```bash
-./scripts/install-user-service.sh ~/.config/synkraken/config.json
+synkraken install --config ~/.config/synkraken/config.json
 ```
 
 ### Operator CLI
 ```bash
-synkraken start daemon
+synkraken start
 synkraken status
 synkraken health
 synkraken agents

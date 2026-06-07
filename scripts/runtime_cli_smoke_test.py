@@ -37,10 +37,10 @@ def main() -> None:
     assert parser.parse_args(["runtimes"]).command == "runtimes"
     runtime_args = parser.parse_args(["runtime", "codex"])
     assert runtime_args.command == "runtime"
-    assert runtime_args.runtime_id == "codex"
+    assert runtime_args.runtime_args == ["codex"]
     doctor_args = parser.parse_args(["runtime", "doctor"])
     assert doctor_args.command == "runtime"
-    assert doctor_args.runtime_id == "doctor"
+    assert doctor_args.runtime_args == ["doctor"]
 
     original_get_json = cli_main.get_json
     original_cwd = Path.cwd()

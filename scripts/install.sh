@@ -166,3 +166,9 @@ else
   echo "  cd \"$SRC_DIR\""
   echo "  synkraken config"
 fi
+
+if [[ -f "$SRC_DIR/config.local.json" ]]; then
+  echo
+  echo "Installing and starting the SynKraken runtime."
+  (cd "$SRC_DIR" && "$BIN_DIR/synkraken" install --config "$SRC_DIR/config.local.json")
+fi

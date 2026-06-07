@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -15,6 +17,7 @@ import urllib.request
 from .branding import NAME, TAGLINE, print_logo
 from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes, discover_remote_runtimes
 from .setup_mode import run_install_skills, run_setup, run_uninstall
+from .runtime_service import RuntimeServiceError, format_uptime, runtime_service_for_platform
 from .tui import run_tui
 from .web import serve as serve_web
 
@@ -564,50 +567,7 @@ def print_result(data: dict, raw: bool) -> None:
             print(f"○ {item.get('adapter_id')}: {item.get('reason')}")
 
 
-def _systemd_service_installed() -> bool:
-    try:
-        result = subprocess.run(
-            ["systemctl", "--user", "cat", "synkraken.service"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except FileNotFoundError:
-        return False
-    return result.returncode == 0
-
-
-def _print_service_install_help() -> None:
-    print("SynKraken user service is not installed.")
-    print()
-    print("Install and start it with:")
-    print("  ./scripts/install-user-service.sh")
-    print("  systemctl --user enable --now synkraken")
-
-
-def _run_systemctl(action: str) -> int:
-    command = ["systemctl", "--user", action, "synkraken"]
-    if action == "status":
-        command.append("--no-pager")
-    try:
-        return subprocess.run(command, check=False).returncode
-    except FileNotFoundError:
-        print("systemctl was not found on PATH.", file=sys.stderr)
-        return 1
-
-
-def _print_daemon_health(base: str) -> None:
-    print()
-    print(f"Daemon URL: {base}")
-    try:
-        data = get_json(f"{base}/health")
-    except Exception as exc:  # noqa: BLE001
-        print(f"Daemon health: unavailable ({exc})")
-        return
-    print(f"Daemon health: {'OK' if bool(data.get('ok', False)) else 'NOT OK'}")
-
-
-def _wait_for_daemon_health(base: str, timeout_seconds: int) -> bool:
+def _wait_for_daemon_health(base: str, timeout_seconds: int, *, quiet: bool = False) -> bool:
     deadline = time.monotonic() + max(1, timeout_seconds)
     last_error = ""
     while time.monotonic() < deadline:
@@ -620,32 +580,208 @@ def _wait_for_daemon_health(base: str, timeout_seconds: int) -> bool:
             last_error = str(exc)
         time.sleep(0.25)
     detail = f" ({last_error})" if last_error else ""
-    print(f"Daemon did not become healthy within {timeout_seconds}s at {base}/health{detail}", file=sys.stderr)
+    if not quiet:
+        print(f"SynKraken did not become healthy within {timeout_seconds}s{detail}", file=sys.stderr)
     return False
 
 
-def handle_lifecycle_command(action: str, base: str, wait_seconds: int = 15) -> int:
-    if not _systemd_service_installed():
-        _print_service_install_help()
-        if action == "status":
-            _print_daemon_health(base)
-        return 1
+def _config_path(value: str | None = None) -> Path:
+    return Path(value or os.environ.get("SYNKRAKEN_CONFIG", "config.local.json")).expanduser().resolve()
 
-    returncode = _run_systemctl(action)
-    if action in {"start", "restart"} and returncode == 0:
-        if not _wait_for_daemon_health(base, wait_seconds):
-            return 1
+
+def recover_runtime(base: str, wait_seconds: int = 15, *, announce: bool = True) -> bool:
+    if _wait_for_daemon_health(base, 1, quiet=True):
+        return True
+    if announce:
+        print("Daemon unavailable.")
+        print("Attempting recovery...")
+    try:
+        service = runtime_service_for_platform()
+        if not service.recover():
+            if announce:
+                print("Recovery failed.")
+                print("Suggested action:")
+                print("synkraken install")
+            return False
+    except RuntimeServiceError as exc:
+        if announce:
+            print(f"Recovery failed: {exc}")
+            print("Suggested action:")
+            print("synkraken install")
+        return False
+    healthy = _wait_for_daemon_health(base, wait_seconds, quiet=True)
+    if announce:
+        print("Recovery succeeded." if healthy else "Recovery failed.")
+        if healthy:
+            print("Status: Healthy.")
+        else:
+            print("Suggested action:")
+            print("synkraken doctor")
+    return healthy
+
+
+def install_runtime(config_path: Path, base: str, wait_seconds: int) -> int:
+    if not config_path.exists():
+        print(f"Configuration not found: {config_path}", file=sys.stderr)
+        print("Run `synkraken config` first, then `synkraken install`.", file=sys.stderr)
+        return 1
+    try:
+        service = runtime_service_for_platform()
+        print(f"Installing SynKraken for {service.platform_name}...")
+        service.install(config_path)
+    except RuntimeServiceError as exc:
+        print(f"Installation failed: {exc}", file=sys.stderr)
+        return 1
+    if not _wait_for_daemon_health(base, wait_seconds):
+        print("Installation failed because SynKraken did not pass its health check.", file=sys.stderr)
+        return 1
+    print("SynKraken is installed and healthy.")
+    return 0
+
+
+def uninstall_runtime(*, remove_skills: bool = False) -> int:
+    try:
+        service = runtime_service_for_platform()
+        service.uninstall()
+    except RuntimeServiceError as exc:
+        print(f"Uninstall failed: {exc}", file=sys.stderr)
+        return 1
+    print("SynKraken runtime integration removed.")
+    print("Configuration, projects, knowledge, conversations, and database were preserved.")
+    if remove_skills:
+        run_uninstall()
+    return 0
+
+
+def print_runtime_status(base: str, *, raw: bool = False) -> int:
+    try:
+        service = runtime_service_for_platform()
+        state = service.status()
+    except RuntimeServiceError as exc:
+        print(f"Runtime status unavailable: {exc}", file=sys.stderr)
+        return 1
+    health = None
+    try:
+        health = get_json(f"{base}/health")
+    except Exception:
+        pass
+    payload = {
+        "platform": state.platform,
+        "installed": state.installed,
+        "running": state.running,
+        "healthy": bool(health and health.get("ok")),
+        "uptime": format_uptime(health.get("started_at") if health else None),
+        "url": base,
+    }
+    if raw:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("SynKraken Runtime")
+        print()
+        print(f"Platform:   {payload['platform']}")
+        print(f"Service:    {'Running' if state.running else 'Stopped' if state.installed else 'Not installed'}")
+        print(f"Health:     {'Healthy' if payload['healthy'] else 'Unavailable'}")
+        print(f"Uptime:     {payload['uptime']}")
+        print(f"Daemon URL: {base}")
+    return 0 if payload["healthy"] else 1
+
+
+def handle_lifecycle_command(action: str, base: str, wait_seconds: int = 15, *, raw: bool = False) -> int:
     if action == "status":
-        _print_daemon_health(base)
-    return returncode
+        return print_runtime_status(base, raw=raw)
+    try:
+        service = runtime_service_for_platform()
+        state = service.status()
+        if not state.installed:
+            print("SynKraken is not installed.", file=sys.stderr)
+            print("Run: synkraken install", file=sys.stderr)
+            return 1
+        getattr(service, action)()
+    except RuntimeServiceError as exc:
+        print(f"Could not {action} SynKraken: {exc}", file=sys.stderr)
+        return 1
+    if action in {"start", "restart"} and not _wait_for_daemon_health(base, wait_seconds):
+        return 1
+    print(f"SynKraken {'started' if action == 'start' else 'stopped' if action == 'stop' else 'restarted'}.")
+    return 0
+
+
+def doctor_runtime(config_path: Path, base: str) -> int:
+    checks: list[tuple[str, bool, str, str]] = []
+    checks.append(("Python", sys.version_info >= (3, 10), sys.version.split()[0], "Install Python 3.10 or newer."))
+    try:
+        service = runtime_service_for_platform()
+        state = service.status()
+        checks.append(("Runtime service", state.installed, "Running" if state.running else state.detail, "Run `synkraken install`."))
+    except RuntimeServiceError as exc:
+        checks.append(("Runtime service", False, str(exc), "Use Linux or macOS; Windows support is planned."))
+    config: dict = {}
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        checks.append(("Config", True, str(config_path), ""))
+    except Exception as exc:
+        checks.append(("Config", False, str(exc), "Run `synkraken config`."))
+    storage = (config.get("storage") or {}).get("sqlite_path") if config else None
+    if storage:
+        db_path = Path(str(storage)).expanduser()
+        if not db_path.is_absolute():
+            db_path = config_path.parent / db_path
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("PRAGMA quick_check").fetchone()
+            checks.append(("Database", True, str(db_path), ""))
+        except Exception as exc:
+            checks.append(("Database", False, str(exc), "Check database path permissions."))
+    else:
+        checks.append(("Database", False, "No database path configured", "Run `synkraken config`."))
+    healthy = _wait_for_daemon_health(base, 1, quiet=True)
+    host = str((config.get("server") or {}).get("host", "127.0.0.1"))
+    port = int((config.get("server") or {}).get("port", 9460))
+    port_ok = healthy
+    detail = "Used by healthy SynKraken" if healthy else "Available"
+    if not healthy:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((host, port))
+            port_ok = True
+        except OSError as exc:
+            port_ok = False
+            detail = f"Unavailable: {exc}"
+        finally:
+            probe.close()
+    checks.append(("Port", port_ok, f"{host}:{port} {detail}", "Stop the process using the configured port or change the port."))
+    adapters = config.get("adapters") or {}
+    enabled = [name for name, item in adapters.items() if isinstance(item, dict) and item.get("enabled", True)]
+    missing_commands = []
+    for name in enabled:
+        command = adapters[name].get("command") or []
+        executable = str(command[0]) if isinstance(command, list) and command else str(command) if command else ""
+        if executable and not (Path(executable).expanduser().is_file() or shutil.which(executable)):
+            missing_commands.append(name)
+    providers_ok = bool(enabled) and not missing_commands
+    provider_detail = f"{len(enabled)} configured"
+    if missing_commands:
+        provider_detail += f"; commands unavailable: {', '.join(missing_commands)}"
+    checks.append(("Providers", providers_ok, provider_detail, "Run `synkraken config --rediscover`."))
+    print("SynKraken Doctor")
+    print()
+    failed = False
+    for name, ok, detail, remediation in checks:
+        failed = failed or not ok
+        print(f"{'OK' if ok else 'FAIL':<4} {name}: {detail}")
+        if not ok and remediation:
+            print(f"     Suggested action: {remediation}")
+    return 1 if failed else 0
 
 
 def add_lifecycle_parser(sub: argparse._SubParsersAction, action: str) -> None:
     help_text = {
-        "start": "Start the daemon via the user service",
-        "stop": "Stop the daemon via the user service",
-        "restart": "Restart the daemon via the user service",
-        "status": "Show user-service state and daemon health",
+        "start": "Start SynKraken",
+        "stop": "Stop SynKraken",
+        "restart": "Restart SynKraken",
+        "status": "Show SynKraken runtime status",
     }[action]
     parser = sub.add_parser(action, help=help_text)
     parser.add_argument("target", nargs="?", choices=["daemon"], help="Optional explicit target")
@@ -699,8 +835,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
+    p_install = sub.add_parser("install", help="Install and start SynKraken for this platform")
+    p_install.add_argument("--config", default=None, help="Configuration file path")
+    p_install.add_argument("--wait-seconds", type=int, default=20, help="Seconds to wait for health validation")
+    add_base_url_arg(p_install)
+
     for action in ("start", "stop", "restart", "status"):
         add_lifecycle_parser(sub, action)
+
+    p_doctor = sub.add_parser("doctor", help="Check installation, runtime, database, port, config, and providers")
+    p_doctor.add_argument("--config", default=None, help="Configuration file path")
+    add_base_url_arg(p_doctor)
 
     p_health = sub.add_parser("health", help="Check bridge health")
     p_health.add_argument("scope", nargs="?", choices=["workforce"], help="Optional health scope")
@@ -766,7 +911,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--rediscover", action="store_true", help="Rescan runtimes and merge them into config.local.json")
     p_config.add_argument("--install-skills", action="store_true", help="Install bridge skills for configured workers")
     add_remote_discovery_args(p_config)
-    sub.add_parser("uninstall", help="Interactive removal: uninstall the bridge skill from runtimes and clean up local files")
+    p_uninstall = sub.add_parser("uninstall", help="Remove runtime integration while preserving user data")
+    p_uninstall.add_argument("--remove-skills", action="store_true", help="Also run the interactive bridge-skill cleanup")
 
     p_decisions = sub.add_parser("decisions", help="List decisions")
     p_decisions.add_argument("--room", help="Filter by room")
@@ -858,10 +1004,11 @@ def build_parser() -> argparse.ArgumentParser:
 def _print_no_command() -> None:
     print("SYNKRAKEN needs a command.\n")
     print("First-time setup:")
-    print("  synkraken config            # walks you through it\n")
+    print("  synkraken config            # configure workers")
+    print("  synkraken install           # install and start SynKraken\n")
     print("Day-to-day:")
-    print("  synkraken start daemon      # start the user service")
-    print("  synkraken status            # service state + daemon health")
+    print("  synkraken start             # start SynKraken")
+    print("  synkraken status            # runtime and health status")
     print("  synkraken tui               # open the TUI dashboard")
     print("  synkraken web               # open the local web command deck")
     print("  synkraken health            # is the daemon ok?")
@@ -870,7 +1017,7 @@ def _print_no_command() -> None:
     print("  synkraken runtime doctor    # runtime diagnostics")
     print("  synkraken send hermes 'hi'  # message a single agent\n")
     print("Tear-down:")
-    print("  synkraken uninstall         # remove bridge skills + clean up\n")
+    print("  synkraken uninstall         # remove runtime integration, preserve data\n")
     print("Full help:")
     print("  synkraken --help")
 
@@ -921,23 +1068,41 @@ def main() -> None:
             print_discovery(data, verbose=args.verbose)
         return
     if args.command == 'uninstall':
-        run_uninstall()
-        return
+        raise SystemExit(uninstall_runtime(remove_skills=args.remove_skills))
+    if args.command == 'install':
+        config_path = _config_path(args.config)
+        if not config_path.exists() and args.config is None:
+            print("No configuration found. Starting setup...")
+            run_setup()
+        raise SystemExit(install_runtime(config_path, args.url.rstrip("/"), args.wait_seconds))
+    if args.command == 'doctor':
+        raise SystemExit(doctor_runtime(_config_path(args.config), args.url.rstrip("/")))
     if args.command == 'tui':
         if args.banner_only:
             print_logo()
             print()
             return
+        print("Checking SynKraken runtime...")
+        if not recover_runtime(DEFAULT_BASE, announce=False):
+            print("Starting SynKraken failed.", file=sys.stderr)
+            print("Run: synkraken install", file=sys.stderr)
+            raise SystemExit(1)
+        print("Connected.")
         run_tui()
         return
     if args.command == 'web':
+        if not recover_runtime(args.daemon_url.rstrip("/"), announce=False):
+            print("SynKraken runtime is unavailable. Run: synkraken install", file=sys.stderr)
+            raise SystemExit(1)
         serve_web(host=args.host, port=args.port, daemon_url=args.daemon_url)
         return
     base = args.url.rstrip("/")
     if args.command in {"start", "stop", "restart", "status"}:
-        raise SystemExit(handle_lifecycle_command(args.command, base, getattr(args, "wait_seconds", 15)))
+        raise SystemExit(handle_lifecycle_command(args.command, base, getattr(args, "wait_seconds", 15), raw=args.json))
     try:
         if args.command == "health":
+            if not _wait_for_daemon_health(base, 1, quiet=True) and not recover_runtime(base):
+                raise SystemExit(1)
             if args.scope == "workforce":
                 data = get_json(f"{base}/v1/workforce/health")
                 if args.json:

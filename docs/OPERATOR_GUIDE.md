@@ -10,19 +10,27 @@ The installer clones SynKraken to `~/.synkraken/src`, creates a private venv
 at `~/.synkraken/venv`, adds command shims to `~/.local/bin`, and launches
 setup so you can choose local workers or SSH workers.
 
-## Start The Daemon
+## Install And Start SynKraken
 
 ```bash
 cd ~/.synkraken/src
-synkraken-daemon --config ./config.local.json
+synkraken install
+synkraken status
 ```
 
-With the user service installed:
+After installation, SynKraken starts itself for the signed-in operator and
+recovers after process failure. Daily lifecycle commands are:
 
 ```bash
-./scripts/install-user-service.sh
-synkraken start daemon
-synkraken status
+synkraken start
+synkraken stop
+synkraken restart
+```
+
+For installation, database, port, configuration, and provider diagnostics:
+
+```bash
+synkraken doctor
 ```
 
 ## Discover The Workforce

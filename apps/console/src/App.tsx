@@ -30,6 +30,7 @@ import {
   WorkforceResponse,
   ApiError,
   api,
+  ensureRuntime,
 } from "./lib/api";
 import { asRecord, duration, numberText, percent, prettyJson, shortDate, stringList, text } from "./lib/format";
 
@@ -1518,10 +1519,28 @@ export default function App() {
     } else {
       setInitialLoading(true);
     }
-    const health = await api.getHealth().catch((healthError: unknown) => healthError) as HealthResponse | Error;
+    let health = await api.getHealth().catch((healthError: unknown) => healthError) as HealthResponse | Error;
+    if (health instanceof Error) {
+      if (!background) {
+        setGlobalError("Checking SynKraken runtime and attempting recovery...");
+        const recovery = await ensureRuntime().catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : "Runtime recovery failed.",
+        }));
+        if (recovery.ok) {
+          health = await api.getHealth().catch((healthError: unknown) => healthError) as HealthResponse | Error;
+        } else {
+          setDaemonStatus("offline");
+          setGlobalError(recovery.message || "SynKraken recovery failed.");
+          setInitialLoading(false);
+          setRefreshing(false);
+          return;
+        }
+      }
+    }
     if (health instanceof Error) {
       setDaemonStatus("offline");
-      setGlobalError(health.message || "Daemon unavailable");
+      setGlobalError(health.message || "SynKraken is unavailable");
       if (!background) setInitialLoading(false);
       setRefreshing(false);
       return;
@@ -6712,9 +6731,11 @@ function Timeline({ items }: { items: Record<string, unknown>[] }) {
 
 function OfflineState({ message, onRefresh }: { message: string; onRefresh: () => void }) {
   return (
-    <div className="border-b border-danger/60 bg-danger/10 px-5 py-3 font-mono text-sm text-danger">
-      Daemon unavailable at {DAEMON_URL}: {message}
-      <button className="btn ml-4" onClick={onRefresh}>Retry</button>
+    <div className="mx-5 mt-5 rounded-xl border border-amberop/40 bg-amberop/10 p-6">
+      <h2 className="text-lg font-semibold text-slate-50">SynKraken is not running</h2>
+      <p className="mt-2 text-sm text-slate-300">{message}</p>
+      <p className="mt-3 text-sm text-muted">Run <code>synkraken install</code> if recovery continues to fail.</p>
+      <button className="btn mt-4" onClick={onRefresh}>Try recovery again</button>
     </div>
   );
 }

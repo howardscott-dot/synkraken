@@ -1,4 +1,5 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { invoke } from "@tauri-apps/api/core";
 
 const DEFAULT_DAEMON_URL = "http://127.0.0.1:9460";
 
@@ -6,6 +7,8 @@ export const DAEMON_URL =
   import.meta.env.VITE_SYNKRAKEN_DAEMON_URL?.replace(/\/$/, "") || DEFAULT_DAEMON_URL;
 
 type JsonObject = Record<string, unknown>;
+
+export type RuntimeRecovery = { ok: boolean; message: string };
 
 export type HealthResponse = {
   ok?: boolean;
@@ -548,6 +551,13 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 8000
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+export async function ensureRuntime(): Promise<RuntimeRecovery> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return { ok: false, message: "Start SynKraken with `synkraken install`, then retry." };
+  }
+  return invoke<RuntimeRecovery>("ensure_synkraken_runtime");
 }
 
 function post<T>(path: string, body: JsonObject): Promise<T> {
