@@ -340,6 +340,30 @@ Near-term direction:
 - governed execution extensions beyond the current simulated proposal execution
   model, still under explicit operator authority
 
+## Running Multiple Instances
+
+To run more than one SynKraken instance simultaneously, give each a unique
+`instance_name` in the config:
+
+```json
+{
+  "instance": {
+    "instance_name": "dev",
+    "organisation_name": "My Org",
+    "default_workspace": ""
+  }
+}
+```
+
+Each instance gets its own SQLite database (`synkraken-dev.db`) and will not
+conflict with other running instances. Attempting to start two instances with
+the same `instance_name` will fail fast with a lock error.
+
+```bash
+synkraken run --config config-dev.json
+synkraken run --config config-prod.json
+```
+
 ## Documentation
 
 - [`docs/PRODUCT_VISION.md`](docs/PRODUCT_VISION.md)
