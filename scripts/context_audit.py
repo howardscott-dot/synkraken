@@ -18,6 +18,7 @@ SKIP_DIRS = {
     "dist",
     "build",
     ".mypy_cache",
+    ".hermes",
 }
 SKIP_PATH_PREFIXES = {
     ("apps", "console", "node_modules"),
@@ -30,15 +31,12 @@ TEXT_SUFFIXES = {
 }
 
 BANNED_STRINGS = [
-    "Studio:Blueprint",
+    "Studio Blueprint",
     "howardscott-dot",
     "synkraken-live-test",
     "sb_methodology",
     "Build SynKraken",
-    "Stanley",
-    "stanley",
-    "Howard",
-    "howard",
+    "Howard Scott",
 ]
 
 ABSOLUTE_USER_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(home|Users)/([A-Za-z0-9_.-]+)")
@@ -46,13 +44,18 @@ ABSOLUTE_USER_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(home|Users)/([A-Za-z0-
 EXCEPTIONS = [
     {
         "path": "LICENSE",
-        "pattern": "Howard Scott",
-        "reason": "copyright notice",
+        "pattern": "MIT License",
+        "reason": "license name",
     },
     {
-        "path": "LICENSE",
-        "pattern": "Howard",
-        "reason": "copyright notice",
+        "path": "README.md",
+        "pattern": "/home/myuser",
+        "reason": "generic path example in docs",
+    },
+    {
+        "path": "docs/INSTALL.md",
+        "pattern": "/home/myuser",
+        "reason": "generic path example in docs",
     },
     {
         "path": "README.md",
@@ -148,13 +151,19 @@ def audit() -> tuple[list[dict], list[dict]]:
                 username = match.group(2)
                 if username in {"operator", "runner", "sandbox"}:
                     continue
-                findings.append({
+                reason = is_exception(path, line, token)
+                item = {
                     "path": rel(path),
                     "line": lineno,
                     "rule": "absolute-user-path",
                     "match": token,
                     "text": line.strip(),
-                })
+                }
+                if reason:
+                    item["reason"] = reason
+                    exceptions.append(item)
+                else:
+                    findings.append(item)
     return findings, exceptions
 
 

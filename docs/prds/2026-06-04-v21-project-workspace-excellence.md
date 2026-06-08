@@ -23,8 +23,8 @@ Grafana, or an admin dashboard.
 
 When the operator opens SynKraken, the first impression should be:
 
-```text
-This is where Studio Blueprint lives.
+```
+This is where your projects live.
 ```
 
 not:

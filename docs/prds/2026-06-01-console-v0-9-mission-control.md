@@ -13,9 +13,8 @@ not turn Console into a project management tool.
 
 ## Product Direction
 
-SynKraken is not a Studio Blueprint frontend, Jira, Trello, Asana, kanban
-board, or task manager. Studio Blueprint is only one possible workload on top
-of SynKraken.
+SynKraken is not a Jira, Trello, Asana, kanban
+board, or task manager. It is a general-purpose AI workforce OS.
 
 SynKraken governs workers, activity, decisions, approvals, incidents, traces,
 memory, and outcomes for consulting firms, software companies, ecommerce
@@ -79,7 +78,7 @@ Docs:
 - No gantt charts.
 - No kanban boards.
 - No project, ticket, epic, sprint, due date, or estimate model.
-- No Studio Blueprint-specific entities.
+- No vendor-specific entities.
 - No AI-generated mission progress summaries.
 
 ## Acceptance Criteria
