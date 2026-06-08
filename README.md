@@ -31,22 +31,24 @@ runtime reliability signals, failure recovery, and replayable evidence of what
 happened. Terminal multiplexers show shells. Workflow tools run steps.
 SynKraken manages the workforce state around AI work.
 
-## Screenshots
+## Feature Overview
 
-Screenshots are tracked in [`docs/screenshots/README.md`](docs/screenshots/README.md).
-Primary screenshot slots are defined below. The PNG files are not committed yet,
-so these are labelled placeholders rather than broken image links. Capture
-instructions live in [`scripts/capture_console_screenshots.md`](scripts/capture_console_screenshots.md).
+SynKraken has four primary operator surfaces:
 
-| File | Surface | Status |
-|---|---|---|
-| `docs/screenshots/canvas.png` | Spatial Operations Canvas | missing |
-| `docs/screenshots/activity.png` | Activity | missing |
-| `docs/screenshots/workforce.png` | Workforce Command Centre | missing |
-| `docs/screenshots/rooms.png` | Rooms | missing |
-| `docs/screenshots/proposal-governance.png` | Proposal Governance | missing |
-| `docs/screenshots/flight-recorder.png` | Flight Recorder / Trace Explorer | missing |
-| `docs/screenshots/incident-centre.png` | Incident Centre | missing |
+```
+CLI                → synkraken send, synkraken rooms, synkraken memory, etc.
+Terminal TUI       → Interactive dashboard with panels for workforce, rooms, events
+Web Command Deck   → Browser-based at http://localhost:9460 (when daemon is running)
+Tauri Console      → Native desktop app (apps/console/)
+```
+
+Key capabilities in brief:
+- **Workforce** — discover and monitor registered AI runtimes
+- **Rooms** — persistent, searchable collaboration rooms with transcripts
+- **Missions** — governance containers for structured AI work
+- **Memory** — operator-approved shared memory with bounded injection
+- **Flight Recorder** — replayable trace of any message run
+- **Dead Letter Recovery** — retry and replay failed deliveries
 
 ## Core Capabilities
 
