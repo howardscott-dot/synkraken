@@ -42,6 +42,10 @@ def _validate_storage(raw: dict) -> None:
     sqlite_path = storage.setdefault("sqlite_path", "./data/synkraken.db")
     if not isinstance(sqlite_path, str) or not sqlite_path:
         raise ValueError("storage.sqlite_path must be a non-empty string")
+    instance_name = raw.get("instance", {}).get("instance_name", "")
+    if instance_name:
+        sqlite_path = sqlite_path.replace(".db", f"-{instance_name}.db")
+        storage["sqlite_path"] = sqlite_path
 
 
 def _validate_instance(raw: dict) -> None:
