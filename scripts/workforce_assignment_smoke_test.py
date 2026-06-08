@@ -72,7 +72,7 @@ def main() -> None:
         ])
         now = datetime.now(timezone.utc).isoformat()
         storage.create_room("ops", "Operations", now, members=["sherlock", "claude"])
-        storage.create_mission(mission_id="mission-pricing", title="Studio Blueprint Pricing Calculator", status="active")
+        storage.create_mission(mission_id="mission-infra", title="Q2 Infrastructure Review", status="active")
         storage.create_outcome(outcome_id="outcome-mvp", mission_id="mission-pricing", title="Release calculator MVP", status="in_progress")
         assignment = storage.create_assignment(
             assignment_id="assign-tier-logic",

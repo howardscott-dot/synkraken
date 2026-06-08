@@ -45,8 +45,8 @@ def main() -> None:
         storage.create_room("ops", "Operations", "2026-06-02T00:00:00+00:00", ["goose"])
 
         global_note = fabric.create_operator_memory_note({
-            "title": "Studio Blueprint positioning",
-            "body": "Studio Blueprint helps consultancies turn methodology into a repeatable operating system.",
+            "title": "Q2 engineering priorities",
+            "body": "Focus on API reliability and reducing deploy cycle time.",
             "scope_type": "global",
             "importance": "high",
         })["memory"]
