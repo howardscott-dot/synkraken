@@ -156,7 +156,7 @@ Basic operator commands:
 ```text
 synkraken send goose "summarize current status in one line"
 synkraken send broadcast "status check"
-synkraken memory note --title "Studio Blueprint positioning" --body "Studio Blueprint helps consultancies turn methodology into a repeatable operating system." --scope-type global --importance high
+synkraken memory note --title "Q2 engineering priorities" --body "Focus on API reliability and reducing deploy cycle time." --scope-type global --importance high
 synkraken memory pending
 synkraken memory approve <memory-id>
 synkraken rooms
