@@ -739,4 +739,24 @@ export const api = {
   getLatestIncident: () => request<IncidentResponse>("/v1/incident/latest"),
   getRecentHandoffs: (limit = 20) => request<{ handoffs: HandoffRecord[] }>(`/v1/handoffs/recent?limit=${limit}`),
   getDeadLetters: (limit = 100) => request<DeadLettersResponse>(`/v1/dead-letters?limit=${limit}`),
+  getProjects: (status?: string) =>
+    request<{ projects: ProjectRecord[]; count: number }>(
+      `/v1/projects${status ? `?status=${status}` : ""}`,
+    ),
+  getProject: (id: string) => request<ProjectRecord>(`/v1/projects/${encodeURIComponent(id)}`),
+  createProject: (body: { name: string; description?: string; status?: string; project_id?: string }) =>
+    post<ProjectRecord>("/v1/projects", body),
+  updateProject: (id: string, body: { name?: string; description?: string; status?: string }) =>
+    patch<ProjectRecord>(`/v1/projects/${encodeURIComponent(id)}`, body),
+  deleteProject: (id: string) => del<{ deleted?: string }>(`/v1/projects/${encodeURIComponent(id)}`),
+};
+
+export type ProjectRecord = {
+  project_id: string;
+  name: string;
+  description: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  metadata_?: string;
 };

@@ -32,6 +32,7 @@ import {
   api,
   ensureRuntime,
 } from "./lib/api";
+import { useProjects } from "./lib/useProjects";
 import { asRecord, duration, numberText, percent, prettyJson, shortDate, stringList, text } from "./lib/format";
 
 type View = "home" | "projects" | "conversations" | "knowledge" | "workforce" | "advanced" | "work" | "governance" | "search" | "rooms" | "memory" | "activity" | "incidents" | "canvas" | "settings" | "briefing" | "missions" | "outcomes" | "assignments" | "flight" | "proposals" | "proposal-detail";
@@ -188,7 +189,6 @@ const navItems: { id: View; label: string }[] = [
 
 const workspacePresets: WorkspacePreset[] = ["Coding", "Operations", "Research", "Incident Response"];
 const canvasStorageKey = "synkraken.console.v03.operationsCanvasLayout";
-const projectStorageKey = "synkraken.console.v20.projects";
 
 const healthRank: Record<string, number> = {
   failing: 0,
@@ -220,18 +220,6 @@ function outcomeTitle(outcome?: Outcome | null): string {
 function projectSlug(value: string): string {
   const slug = value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
   return slug || `project-${Date.now()}`;
-}
-
-function readStoredProjects(): ProjectRecord[] {
-  try {
-    return JSON.parse(localStorage.getItem(projectStorageKey) || "[]") as ProjectRecord[];
-  } catch {
-    return [];
-  }
-}
-
-function writeStoredProjects(projects: ProjectRecord[]): void {
-  localStorage.setItem(projectStorageKey, JSON.stringify(projects));
 }
 
 function projectId(project: ProjectRecord): string {
@@ -1410,7 +1398,7 @@ export default function App() {
   const [nodeErrors, setNodeErrors] = useState<NodeErrors>({});
   const [selectedRuntime, setSelectedRuntime] = useState<string | null>(null);
   const [selectedRoom, setSelectedRoom] = useState("ops");
-  const [storedProjects, setStoredProjects] = useState<ProjectRecord[]>(() => readStoredProjects());
+  const { apiProjects, storedProjects, createProject: apiCreateProject, updateProject: apiUpdateProject, deleteProject: apiDeleteProject } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectTab, setProjectTab] = useState<ProjectTab>("conversations");
   const [projectTitleInput, setProjectTitleInput] = useState("");
@@ -1463,7 +1451,10 @@ export default function App() {
     return workforceWorkers.length ? workforceWorkers : data.agents;
   }, [data.agents, data.workforce]);
 
-  const projects = useMemo(() => deriveProjects(data, storedProjects), [data, storedProjects]);
+  const projects = useMemo(() => {
+    const baseProjects = apiProjects.length > 0 ? apiProjects : storedProjects;
+    return deriveProjects(data, baseProjects);
+  }, [data, apiProjects, storedProjects]);
 
   useEffect(() => {
     if (!selectedProjectId && projects.length) setSelectedProjectId(projectId(projects[0]));
@@ -1480,25 +1471,13 @@ export default function App() {
       setViewError("Project title is required");
       return;
     }
-    const now = new Date().toISOString();
+    const purpose = projectPurposeInput.trim() || "Organise workforce activity around a clear company outcome.";
     const roomId = projectSlug(title);
-    const project: ProjectRecord = {
-      project_id: `local-${projectSlug(title)}`,
-      title,
-      purpose: projectPurposeInput.trim() || "Organise workforce activity around a clear company outcome.",
-      status: "active",
-      room_id: roomId,
-      outcome_ids: [],
-      assignment_ids: [],
-      knowledge_ids: [],
-      worker_ids: [],
-      created_at: now,
-      updated_at: now,
-      local: true,
-    };
-    const nextProjects = [project, ...storedProjects.filter((item) => projectId(item) !== project.project_id)];
-    setStoredProjects(nextProjects);
-    writeStoredProjects(nextProjects);
+    const project = await apiCreateProject(title, purpose);
+    if (!project) {
+      setViewError("Failed to create project");
+      return;
+    }
     setSelectedProjectId(project.project_id);
     setSelectedRoom(roomId);
     setProjectTitleInput("");
@@ -1511,7 +1490,7 @@ export default function App() {
       setRoomNotice(`Project saved. Conversation #${roomId} may already exist or can be created from Conversations.`);
     }
     setViewError(null);
-  }, [projectPurposeInput, projectTitleInput, storedProjects]);
+  }, [projectPurposeInput, projectTitleInput, apiCreateProject]);
 
   const refresh = useCallback(async (background = false) => {
     if (background) {
