@@ -46,14 +46,14 @@ Use the wrapper first. Use raw HTTP only if the wrapper is unavailable.
 
 ## Available Targets
 
-Typical targets are:
-- `goose`
-- `hermes`
-- `openclaw-main`
+Typical targets on a mixed-agent machine are:
+- `goose` — Goose CLI agent
+- `hermes` — Hermes Agent runtime
+- `openclaw` — OpenClaw agent (default instance name; yours may differ)
 - `broadcast` — fan out to every adapter except the sender
 - `room:<name>` — fan out to the named room's members (e.g. `room:general`)
 
-Do not guess targets. If unsure, query the bridge first.
+Adapter names are defined in your `config.local.json`. Run `synkraken-send broadcast --agents` to see what is actually available on your system.
 
 ## How to Use
 

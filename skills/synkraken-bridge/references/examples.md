@@ -12,10 +12,10 @@ synkraken-send goose "Reply with one sentence describing your active role." --so
 synkraken-send hermes "Reply with HERMES_OK only." --source goose
 ```
 
-## Example 3: Ask OpenClaw main to respond
+## Example 3: Ask OpenClaw to respond
 
 ```bash
-synkraken-send openclaw-main "Reply with OPENCLAW_OK only." --source operator
+synkraken-send openclaw "Reply with OPENCLAW_OK only." --source operator
 ```
 
 ## Example 4: Broadcast to all runtimes

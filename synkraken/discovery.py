@@ -101,7 +101,7 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
         skill_path_template="{home}/.hermes/skills/synkraken-bridge",
     ),
     RuntimeDefinition(
-        runtime_id="openclaw-main",
+        runtime_id="openclaw",
         label="OpenClaw",
         runtime_type="openclaw",
         command_names=("openclaw",),
@@ -242,14 +242,6 @@ def _find_node_bin(search_path: str | None, extra_dirs: list[Path]) -> tuple[str
         if node_candidate.is_file() and os.access(node_candidate, os.X_OK):
             return str(node_candidate), str(d)
     return None, None
-    return [
-        home / ".local" / "bin",
-        home / "bin",
-        Path("/usr/local/bin"),
-        Path("/opt/homebrew/bin"),
-        Path("/usr/bin"),
-        Path("/bin"),
-    ]
 
 
 def _candidate_path(command_name: str, search_path: str | None, extra_dirs: Iterable[Path]) -> str | None:

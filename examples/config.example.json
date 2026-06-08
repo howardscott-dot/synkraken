@@ -46,7 +46,7 @@
       "timeout_seconds": 120,
       "system_prefix": "You are replying through synkraken. Keep replies concise and structured."
     },
-    "openclaw-main": {
+    "openclaw": {
       "type": "openclaw",
       "enabled": true,
       "command": ["openclaw"],

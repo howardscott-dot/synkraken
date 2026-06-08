@@ -45,7 +45,7 @@
       "command": ["/absolute/path/to/hermes"],
       "timeout_seconds": 120
     },
-    "openclaw-main": {
+    "openclaw": {
       "type": "openclaw",
       "enabled": true,
       "command": ["/absolute/path/to/openclaw"],
