@@ -580,3 +580,32 @@ When adding a new runtime:
 - introducing a heavyweight frontend or backend framework
 - making an external product integration a prerequisite for local use
 - claiming cloud SaaS, enterprise IAM, or autonomous production execution
+
+## Deployment Topology
+
+SynKraken is designed to run on a single machine (operator workstation) with
+all surfaces connecting to the local daemon. The daemon binds to `127.0.0.1`
+by default and does not expose TLS.
+
+```
+Operator Workstation
+  ┌─────────────────────────────────────────────┐
+  │ 127.0.0.1:9460 (SynKraken daemon)           │
+  │   ├─ CLI (synkraken send, rooms, memory)    │
+  │   ├─ TUI (synkraken tui)                    │
+  │   ├─ Web (http://localhost:9460)           │
+  │   └─ Console (Tauri desktop app)            │
+  │                                              │
+  │ All adapters (Goose, Claude, Hermes...)    │
+  │ running as local subprocesses               │
+  └─────────────────────────────────────────────┘
+```
+
+**Remote access**: If you need to access the daemon from another machine,
+bind it to `0.0.0.0` in `config.json` (`"server": {"host": "0.0.0.0"}`) and
+use a firewall or VPN. The daemon has no authentication — treat it as a
+local-only service.
+
+**Multi-machine setup**: Run the daemon on one machine and set
+`SYNKRAKEN_URL=http://<daemon-host>:9460` in the Console's environment before
+launching. The CLI and TUI accept `--daemon-url` or `SYNKRAKEN_URL` env var.
