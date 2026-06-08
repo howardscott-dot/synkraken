@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty
 from urllib.parse import parse_qs, unquote, urlparse
 import json
+from uuid import uuid4
 
 from .fabric import AgentFabric
 from .models import new_id
@@ -55,6 +56,11 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
+
+    def _query_param(self, key: str, default: str = "") -> str:
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        return qs.get(key, [default])[0]
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -748,6 +754,16 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, handoff)
             return
 
+        # ── projects ────────────────────────────────────────────────────────
+        m = re.fullmatch(r"/v1/projects", path)
+        if m:
+            self.do_GET_PROJECTS()
+            return
+        m = re.fullmatch(r"/v1/projects/([^/]+)", path)
+        if m:
+            self.do_GET_PROJECT_ITEM(m.group(1))
+            return
+
         # ── flight recorder ──────────────────────────────────────────────
         m = re.fullmatch(r"/v1/replay/([^/]+)", path)
         if m:
@@ -1361,6 +1377,12 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, result)
             return
 
+        # ── projects ────────────────────────────────────────────────────────
+        m = re.fullmatch(r"/v1/projects", path)
+        if m:
+            self.do_POST_PROJECTS()
+            return
+
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -1424,6 +1446,13 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send(HTTPStatus.OK, assignment)
             return
+
+        # ── projects ────────────────────────────────────────────────────────
+        m = re.fullmatch(r"/v1/projects/([^/]+)", path)
+        if m:
+            self.do_PATCH_PROJECT_ITEM(m.group(1))
+            return
+
         m = re.fullmatch(r"/v1/tasks/([^/]+)", path)
         if not m:
             self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -1547,10 +1576,63 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, {"deleted": room})
             return
 
+        # ── projects ────────────────────────────────────────────────────────
+        m = re.fullmatch(r"/v1/projects/([^/]+)", path)
+        if m:
+            self.do_DELETE_PROJECT_ITEM(m.group(1))
+            return
+
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
+
+    # ── projects ────────────────────────────────────────────────────────────
+    def do_GET_PROJECTS(self) -> None:
+        status = self._query_param("status")
+        limit = int(self._query_param("limit", "100"))
+        projects = self.fabric.storage.list_projects(status=status, limit=limit)
+        self._send(HTTPStatus.OK, {"projects": projects, "count": len(projects)})
+
+    def do_GET_PROJECT_ITEM(self, project_id: str) -> None:
+        project = self.fabric.storage.get_project(project_id)
+        if not project:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "Project not found"})
+            return
+        self._send(HTTPStatus.OK, project)
+
+    def do_POST_PROJECTS(self) -> None:
+        try:
+            payload = self._read_json()
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                raise ValueError("name is required")
+            project_id = str(payload.get("project_id") or uuid4().hex[:16])
+            description = str(payload.get("description", ""))
+            status = str(payload.get("status", "active"))
+            metadata = payload.get("metadata", {})
+            project = self.fabric.storage.create_project(project_id, name, description, status, metadata)
+            self._send(HTTPStatus.CREATED, project)
+        except Exception as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def do_PATCH_PROJECT_ITEM(self, project_id: str) -> None:
+        try:
+            payload = self._read_json()
+            project = self.fabric.storage.update_project(project_id, **payload)
+            if not project:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "Project not found"})
+                return
+            self._send(HTTPStatus.OK, project)
+        except Exception as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def do_DELETE_PROJECT_ITEM(self, project_id: str) -> None:
+        deleted = self.fabric.storage.delete_project(project_id)
+        if not deleted:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "Project not found"})
+            return
+        self._send(HTTPStatus.NO_CONTENT, {})
 
 
 def serve(fabric: AgentFabric, host: str, port: int) -> None:
