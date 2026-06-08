@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 #[derive(Serialize)]
 struct RuntimeRecovery {
@@ -54,6 +55,20 @@ fn synkraken_command() -> PathBuf {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
+        .setup(|app| {
+            let daemon_url = std::env::var("SYNKRAKEN_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:9460".to_string());
+
+            if let Some(window) = app.get_webview_window("main") {
+                window
+                    .eval(&format!(
+                        "window.__SYNKRAKEN_DAEMON_URL__ = '{}';",
+                        daemon_url
+                    ))
+                    .ok();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![ensure_synkraken_runtime])
         .run(tauri::generate_context!())
         .expect("failed to run SynKraken Console");

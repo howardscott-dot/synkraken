@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 const DEFAULT_DAEMON_URL = "http://127.0.0.1:9460";
 
 export const DAEMON_URL =
-  import.meta.env.VITE_SYNKRAKEN_DAEMON_URL?.replace(/\/$/, "") || DEFAULT_DAEMON_URL;
+  (window as any).__SYNKRAKEN_DAEMON_URL?.replace(/\/$/, "") || DEFAULT_DAEMON_URL;
 
 type JsonObject = Record<string, unknown>;
 
