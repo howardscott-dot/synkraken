@@ -662,6 +662,15 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 "messages": messages,
             })
             return
+        m = re.fullmatch(r"/v1/rooms/([^/]+)/members", path)
+        if m:
+            room = unquote(m.group(1))
+            data = self.fabric.storage.get_room(room)
+            if not data:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
+            self._send(HTTPStatus.OK, {"room": room, "members": data.get("members", [])})
+            return
         m = re.fullmatch(r"/v1/rooms/([^/]+)/assignments", path)
         if m:
             room = unquote(m.group(1))
@@ -807,6 +816,12 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/messages":
             try:
                 payload = self._read_json()
+                target = str(payload.get("target") or "")
+                if target.startswith("room:"):
+                    room = target[len("room:"):]
+                    if not self.fabric.storage.room_exists(room):
+                        self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                        return
                 result = self.fabric.dispatch(payload)
             except KeyError as exc:
                 self._send(HTTPStatus.BAD_REQUEST, {"error": f"missing_field: {exc.args[0]}"})
@@ -1204,13 +1219,14 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/rooms/([^/]+)/members", path)
         if m:
             room = unquote(m.group(1))
+            if not self.fabric.storage.room_exists(room):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
             try:
                 payload = self._read_json()
                 adapter_id = str(payload.get("adapter_id", "")).strip()
                 if not adapter_id:
                     raise ValueError("adapter_id required")
-                if not self.fabric.storage.room_exists(room):
-                    raise ValueError(f"room not found: {room}")
                 actor = str(payload.get("actor", "operator")).strip() or "operator"
                 self.fabric.add_room_member(room, adapter_id, actor=actor)
             except Exception as exc:  # noqa: BLE001
@@ -1222,6 +1238,9 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/rooms/([^/]+)/messages", path)
         if m:
             room = unquote(m.group(1))
+            if not self.fabric.storage.room_exists(room):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
             try:
                 payload = self._read_json()
                 source = str(payload.get("source", "operator")).strip() or "operator"
@@ -1236,6 +1255,9 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/rooms/([^/]+)/summary", path)
         if m:
             room = unquote(m.group(1))
+            if not self.fabric.storage.room_exists(room):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
             try:
                 payload = self._read_json()
                 actor = str(payload.get("actor", "operator")).strip() or "operator"
@@ -1564,6 +1586,9 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if m:
             room = unquote(m.group(1))
             adapter_id = unquote(m.group(2))
+            if not self.fabric.storage.room_exists(room):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
             self.fabric.remove_room_member(room, adapter_id)
             data = self.fabric.storage.get_room(room) or {"room": room, "removed": adapter_id}
             self._send(HTTPStatus.OK, data)
@@ -1572,6 +1597,9 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/rooms/([^/]+)", path)
         if m:
             room = unquote(m.group(1))
+            if not self.fabric.storage.room_exists(room):
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"room not found: {room}"})
+                return
             self.fabric.storage.delete_room(room)
             self._send(HTTPStatus.OK, {"deleted": room})
             return

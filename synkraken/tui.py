@@ -114,9 +114,28 @@ def _restore_sigint_handler(previous):
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────
+class TuiHttpError(RuntimeError):
+    def __init__(self, status: int, detail: str) -> None:
+        self.status = status
+        self.detail = detail
+        super().__init__(f'HTTP {status}: {detail}')
+
+
+def _raise_http_error(exc: urllib.error.HTTPError) -> None:
+    body = exc.read().decode('utf-8', errors='replace')
+    try:
+        detail = str(json.loads(body).get('error') or body).strip()
+    except (json.JSONDecodeError, AttributeError):
+        detail = body.strip() or str(exc)
+    raise TuiHttpError(exc.code, detail) from None
+
+
 def _get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        _raise_http_error(exc)
 
 
 def _post_json(url: str, payload: dict) -> dict:
@@ -130,14 +149,7 @@ def _post_json(url: str, payload: dict) -> dict:
         with urllib.request.urlopen(req, timeout=180) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
-        # Surface the daemon's error body — without this every 4xx/5xx looks
-        # like a bare "HTTP Error 400" and you can't tell what went wrong.
-        body = exc.read().decode('utf-8', errors='replace')
-        try:
-            detail = json.loads(body).get('error', body)
-        except Exception:
-            detail = body or str(exc)
-        raise RuntimeError(f'HTTP {exc.code}: {detail}') from None
+        _raise_http_error(exc)
 
 
 def _put_json(url: str, payload: dict) -> dict:
@@ -151,18 +163,16 @@ def _put_json(url: str, payload: dict) -> dict:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode('utf-8', errors='replace')
-        try:
-            detail = json.loads(body).get('error', body)
-        except Exception:
-            detail = body or str(exc)
-        raise RuntimeError(f'HTTP {exc.code}: {detail}') from None
+        _raise_http_error(exc)
 
 
 def _delete(url: str) -> dict:
     req = urllib.request.Request(url, method='DELETE')
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        _raise_http_error(exc)
 
 
 # ── SSE event stream ───────────────────────────────────────────────────────
@@ -2525,7 +2535,7 @@ def _room_member_ids(base: str, room_name: str) -> list[str]:
 
 
 def _no_room_members_message() -> str:
-    return "No room members. Use /room add <agent> or /room add all."
+    return "This room has no workers yet.\nAdd workers with:\n/room add <room> <worker>"
 
 
 def _mention_route(target: str, body: str, current_room: str | None) -> tuple[str, str]:
@@ -3222,7 +3232,19 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
         if not args:
             return ('rooms', None, 'usage: /room enter <name>')
         name = args[0].lstrip('#').lower()
-        result = _handle_room_transcript(base, name)
+        try:
+            result = _handle_room_transcript(base, name)
+        except TuiHttpError as exc:
+            if exc.status == 404:
+                message = f'Room not found: {name}\n\nSuggested actions:\n/room create {name}\n/rooms'
+            else:
+                message = f'Unable to open room {name}: {exc.detail}'
+            return ('room error', {
+                'conversation_id': f'room:{name}',
+                'messages': [{'source': 'synkraken', 'target': f'room:{name}', 'timestamp': '', 'body': message}],
+                'deliveries': [],
+                'dead_letters': [],
+            }, '')
         state['current_room'] = name
         save_preferences(state)
         return (f'#{name}', result, f'in #{name}  ·  type to chat  ·  /room leave to exit')
@@ -3274,7 +3296,10 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
             return ('room search', None, 'usage: /room search <name> <query>')
         name = args[0].lstrip('#').lower()
         query = urllib.parse.quote(' '.join(args[1:]))
-        result = _get_json(f'{base}/v1/rooms/{name}/messages?q={query}&limit=50')
+        try:
+            result = _get_json(f'{base}/v1/rooms/{name}/messages?q={query}&limit=50')
+        except TuiHttpError as exc:
+            return ('room search', None, f'Room not found: {name}' if exc.status == 404 else f'Unable to search room: {exc.detail}')
         return (f'#{name} search', {
             'conversation_id': f'room:{name}:search',
             'messages': result.get('messages') or [],
@@ -3285,7 +3310,10 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
         name = args[0].lstrip('#').lower() if args else str(state.get('current_room') or '')
         if not name:
             return ('room summary', None, 'usage: /room summarize <name>')
-        result = _post_json(f'{base}/v1/rooms/{name}/summary', {'actor': 'synkraken-tui'})
+        try:
+            result = _post_json(f'{base}/v1/rooms/{name}/summary', {'actor': 'synkraken-tui'})
+        except TuiHttpError as exc:
+            return ('room summary', None, f'Room not found: {name}' if exc.status == 404 else f'Unable to summarize room: {exc.detail}')
         return ('room summary', {
             'conversation_id': f'room:{name}:summary',
             'messages': [{
@@ -3360,17 +3388,19 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
                     '')
     if sub in {'remove', 'kick'}:
         if len(args) < 2:
-            return ('rooms', None, f'usage: /room {sub} <name> <adapter_id>')
+            return ('rooms', None, f'usage: /room {sub} <name> <worker...>')
         name = args[0].lstrip('#').lower()
-        adapter = _resolve_target(args[1].lstrip('@'))
+        adapters = [_resolve_target(arg.lstrip('@')) for arg in args[1:]]
         try:
-            _delete(f'{base}/v1/rooms/{name}/members/{adapter}')
+            for adapter in adapters:
+                _delete(f'{base}/v1/rooms/{name}/members/{adapter}')
             verb = 'kicked' if sub == 'kick' else 'removed'
-            return ('rooms', None, f'{verb} {adapter} from #{name}')
+            return ('rooms', None, f"{verb} {', '.join(adapters)} from #{name}")
         except Exception as exc:  # noqa: BLE001
+            adapter_label = ','.join(adapters) if 'adapters' in locals() else 'unknown'
             return (f'{sub} error',
                     {'message': {}, 'deliveries': [],
-                     'dead_letters': [{'adapter_id': adapter, 'reason': str(exc)}]},
+                     'dead_letters': [{'adapter_id': adapter_label, 'reason': str(exc)}]},
                     '')
     return ('rooms', None, f'unknown room subcommand: {sub}')
 
@@ -3653,15 +3683,25 @@ def _main(stdscr):
                     hint = ''
                     continue
                 if cmd == '/events':
-                    state['view'] = 'events'; hint = ''; continue
+                    state['view'] = 'events'
+                    hint = ''
+                    continue
                 if cmd == '/conversations':
-                    state['view'] = 'conversations'; hint = ''; continue
+                    state['view'] = 'conversations'
+                    hint = ''
+                    continue
                 if cmd == '/deadletters':
-                    state['view'] = 'deadletters'; hint = ''; continue
+                    state['view'] = 'deadletters'
+                    hint = ''
+                    continue
                 if cmd == '/adapters':
-                    state['view'] = 'adapters'; hint = ''; continue
+                    state['view'] = 'adapters'
+                    hint = ''
+                    continue
                 if cmd == '/help':
-                    state['view'] = 'help'; hint = ''; continue
+                    state['view'] = 'help'
+                    hint = ''
+                    continue
                 if cmd == '/clear':
                     state['view'] = 'dashboard'
                     state['command_result'] = None

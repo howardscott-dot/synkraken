@@ -4815,6 +4815,11 @@ class Storage:
 
     def delete_room(self, name: str) -> None:
         with self._lock, self._conn:
+            now = utc_now_iso()
+            self._conn.execute(
+                "UPDATE agents SET current_room = NULL, last_seen_at = ? WHERE current_room = ?",
+                (now, name),
+            )
             self._conn.execute("DELETE FROM room_members WHERE room_name = ?", (name,))
             self._conn.execute("DELETE FROM rooms WHERE name = ?", (name,))
 

@@ -40,6 +40,22 @@ def post_json(url: str, payload: dict) -> dict:
         return json.load(resp)
 
 
+def delete_json(url: str) -> dict:
+    req = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def _http_error_message(exc: urllib.error.HTTPError) -> str:
+    body = exc.read().decode("utf-8", errors="replace")
+    try:
+        detail = str(json.loads(body).get("error") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        detail = body.strip()
+    if exc.code == 404 and detail.lower().startswith("room not found:"):
+        return "Room not found:" + detail.split(":", 1)[1]
+    return f"HTTP error {exc.code}: {detail or exc.reason}"
+
 def marker(ok: bool) -> str:
     return "●" if ok else "○"
 
@@ -949,10 +965,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_trace.add_argument("id", help="Conversation, task, goal, decision, or handoff id")
     add_base_url_arg(p_trace)
 
-    p_rooms = sub.add_parser("rooms", help="List rooms, create presets, or search room history")
-    p_rooms.add_argument("action", nargs="?", choices=["preset", "search", "summarize"], help="Optional action")
+    p_rooms = sub.add_parser("rooms", help="Create, manage, list, or inspect rooms")
+    p_rooms.add_argument(
+        "action",
+        nargs="?",
+        choices=["list", "create", "delete", "members", "add", "remove", "transcript", "send", "preset", "search", "summarize"],
+        help="Room action",
+    )
     p_rooms.add_argument("name", nargs="?", help="Room name")
-    p_rooms.add_argument("query", nargs="?", help="Search query")
+    p_rooms.add_argument("values", nargs="*", help="Workers, message, or search query")
     p_rooms.add_argument("--preset", choices=["review", "planning", "ops"], help="Room preset")
     p_rooms.add_argument("--limit", type=int, default=50)
     add_base_url_arg(p_rooms)
@@ -1289,6 +1310,68 @@ def main() -> None:
                 print_trace(data)
             return
         if args.command == "rooms":
+            action = args.action or "list"
+            name = str(args.name or "").strip().lower()
+            quoted_name = urllib.parse.quote(name)
+            if action == "create":
+                if not name:
+                    raise ValueError("usage: synkraken rooms create <name>")
+                data = post_json(f"{base}/v1/rooms", {"name": name, "description": "", "members": []})
+                print(json.dumps(data, indent=2, ensure_ascii=False) if args.json else f"Room created: {name}")
+                return
+            if action == "delete":
+                if not name:
+                    raise ValueError("usage: synkraken rooms delete <name>")
+                data = delete_json(f"{base}/v1/rooms/{quoted_name}")
+                print(json.dumps(data, indent=2, ensure_ascii=False) if args.json else f"Room deleted: {name}")
+                return
+            if action == "members":
+                if not name:
+                    raise ValueError("usage: synkraken rooms members <name>")
+                data = get_json(f"{base}/v1/rooms/{quoted_name}/members")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    members = [str(member.get("adapter_id")) for member in data.get("members", [])]
+                    print(f"{name}: {', '.join(members) if members else '(no workers)'}")
+                return
+            if action in {"add", "remove"}:
+                if not name or not args.values:
+                    raise ValueError(f"usage: synkraken rooms {action} <name> <worker...>")
+                for worker in args.values:
+                    worker_id = str(worker).lstrip("@").strip()
+                    worker_path = urllib.parse.quote(worker_id)
+                    if action == "add":
+                        post_json(f"{base}/v1/rooms/{quoted_name}/members", {"adapter_id": worker_id, "actor": "operator"})
+                    else:
+                        delete_json(f"{base}/v1/rooms/{quoted_name}/members/{worker_path}")
+                print(f"{'Added to' if action == 'add' else 'Removed from'} {name}: {', '.join(args.values)}")
+                return
+            if action == "transcript":
+                if not name:
+                    raise ValueError("usage: synkraken rooms transcript <name>")
+                data = get_json(f"{base}/v1/rooms/{quoted_name}/messages?limit={args.limit}")
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    messages = data.get("messages", [])
+                    if not messages:
+                        print(f"No messages in room: {name}")
+                    for message in messages:
+                        print(f"{message.get('timestamp')} {message.get('source')}: {message.get('body')}")
+                return
+            if action == "send":
+                if not name or not args.values:
+                    raise ValueError('usage: synkraken rooms send <name> "<message>"')
+                body = " ".join(args.values).strip()
+                data = post_json(f"{base}/v1/messages", {"source": "operator", "target": f"room:{name}", "body": body})
+                if args.json:
+                    print(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    deliveries = data.get("deliveries", [])
+                    failures = data.get("dead_letters", [])
+                    print(f"Room dispatch: {name} targets={len(deliveries) + len(failures)} delivered={len(deliveries)} failed={len(failures)}")
+                return
             if args.action == "preset":
                 preset = args.preset or args.name
                 if not preset:
@@ -1301,9 +1384,10 @@ def main() -> None:
                     print(f"room preset applied: {data.get('preset')} -> {data.get('room', {}).get('name')}")
                 return
             if args.action == "search":
-                if not args.name or not args.query:
+                query_text = " ".join(args.values).strip()
+                if not args.name or not query_text:
                     raise ValueError("usage: synkraken rooms search <room> <query>")
-                query = urllib.parse.quote(args.query)
+                query = urllib.parse.quote(query_text)
                 data = get_json(f"{base}/v1/rooms/{args.name}/messages?q={query}&limit={args.limit}")
                 if args.json:
                     print(json.dumps(data, indent=2, ensure_ascii=False))
@@ -1433,8 +1517,7 @@ def main() -> None:
             return
         raise ValueError(f"Unknown command: {args.command}")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        print(f"HTTP error {exc.code}: {detail}", file=sys.stderr)
+        print(_http_error_message(exc), file=sys.stderr)
         raise SystemExit(1)
     except urllib.error.URLError as exc:
         print(f"Connection error: {exc}", file=sys.stderr)

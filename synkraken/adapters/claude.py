@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 
 from .base import BaseAdapter
 from .cli_utils import build_adapter_command, run_command
@@ -26,6 +28,46 @@ class ClaudeAdapter(BaseAdapter):
       system:            optional system prompt prefix
       message_prefix:    optional prefix prepended to each user message
     """
+
+    def build_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        path_entries: list[str] = []
+
+        def add_path_entry(entry: object) -> None:
+            value = str(entry)
+            if value and value not in path_entries:
+                path_entries.append(value)
+
+        configured_node_bin = self.config.get("node_bin_dir")
+        if configured_node_bin:
+            add_path_entry(configured_node_bin)
+
+        discovered_node_bin = self.config.get("node_path")
+        if discovered_node_bin:
+            node_dir = str(Path(discovered_node_bin).parent) if "/" in str(discovered_node_bin) else None
+            if node_dir:
+                add_path_entry(node_dir)
+
+        command = self.config.get("command", ["claude"])
+        if command and "/" in str(command[0]):
+            add_path_entry(Path(command[0]).parent.resolve())
+
+        home_node_dir = Path.home() / ".nvm" / "versions" / "node"
+        if home_node_dir.is_dir():
+            try:
+                for version_link in home_node_dir.iterdir():
+                    add_path_entry(version_link / "bin")
+            except OSError:
+                pass
+
+        if path_entries:
+            existing_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join(path_entries) + (os.pathsep + existing_path if existing_path else "")
+
+        return env
+
+    def _build_env(self) -> dict[str, str]:
+        return self.build_env()
 
     def runtime_name(self) -> str:
         return self.config.get("runtime_name") or "Claude"
@@ -80,7 +122,7 @@ class ClaudeAdapter(BaseAdapter):
         local_command.append(body)
         command = build_adapter_command(self.config, local_command)
 
-        returncode, stdout, stderr, duration_ms = run_command(command, timeout)
+        returncode, stdout, stderr, duration_ms = run_command(command, timeout, env=self.build_env())
         ok = returncode == 0
 
         reply_text = stdout
