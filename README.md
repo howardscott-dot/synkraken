@@ -167,17 +167,18 @@ synkraken incident latest
 synkraken retry dead-letter <id>
 ```
 
-Inside the TUI:
+## Configuring Adapter Paths
 
-```text
-@goose inspect the latest failure
-@everyone --global status check
-#ops what is blocked?
-/workforce
-/trace <id>
-/goal "stabilise this release"
-/memory budget
+If your AI runtimes (Goose, Claude, Hermes, etc.) are installed in non-standard
+locations, copy `examples/config.paths.local.example.json` to your working
+directory and pass it when starting the daemon:
+
+```bash
+synkraken run --config config.paths.local.example.json
 ```
+
+Edit the `adapters.<name>.command` array to use the full path to each binary,
+for example `["/home/myuser/.local/bin/goose"]` instead of `["goose"]`.
 
 ## Console
 
