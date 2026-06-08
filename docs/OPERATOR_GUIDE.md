@@ -309,7 +309,7 @@ explicit operator guidance that workers should inherit.
 ```bash
 synkraken memory list
 synkraken memory pending
-synkraken memory note --title "Studio Blueprint positioning" --body "Studio Blueprint helps consultancies turn methodology into a repeatable operating system." --scope-type global --importance high
+synkraken memory note --title "Q2 engineering priorities" --body "Focus on API reliability and reducing deploy cycle time." --scope-type global --importance high
 synkraken memory approve <memory-id>
 synkraken memory reject <memory-id>
 synkraken memory archive <memory-id>
