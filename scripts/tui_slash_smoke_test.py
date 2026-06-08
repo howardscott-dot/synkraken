@@ -28,12 +28,12 @@ def main() -> None:
     assert not _is_unknown_slash_command("/status")
     assert not _is_unknown_slash_command("@goose hello")
     assert not _is_unknown_slash_command("#ops hello")
-    aliases = {"claude": "claude", "goose": "goose", "hermes": "hermes", "openclaw": "openclaw-main"}
+    aliases = {"claude": "claude", "goose": "goose", "hermes": "hermes", "openclaw": "openclaw"}
     assert _parse_leading_mentions('@claude send a message to "@goose" and ask him to reply', aliases) == (
         ["claude"], 'send a message to "@goose" and ask him to reply'
     )
     assert _parse_leading_mentions('@hermes @openclaw please confer', aliases) == (
-        ["hermes", "openclaw-main"], 'please confer'
+        ["hermes", "openclaw"], 'please confer'
     )
     pasted = "@everyone discuss this\n1. choose roles\n2. do not run code"
     assert tui._prompt_display(pasted) == "@everyone discuss this ↵ 1. choose roles ↵ 2. do not run code"
@@ -55,15 +55,15 @@ def main() -> None:
         }
         tui.threading.Thread = InlineThread
         pending_state: dict = {}
-        tui._start_async_multi_send(pending_state, "http://127.0.0.1:9460", ["hermes", "openclaw-main"], "please confer")
+        tui._start_async_multi_send(pending_state, "http://127.0.0.1:9460", ["hermes", "openclaw"], "please confer")
     finally:
         tui._handle_send = original_handle_send
         tui.threading.Thread = original_thread
-    assert sent == [("hermes", "please confer"), ("openclaw-main", "please confer")]
+    assert sent == [("hermes", "please confer"), ("openclaw", "please confer")]
     assert pending_state["pending"]["done"] is True
     assert pending_state["pending"]["result"]["deliveries"] == [
         {"adapter_id": "hermes", "ok": True},
-        {"adapter_id": "openclaw-main", "ok": True},
+        {"adapter_id": "openclaw", "ok": True},
     ]
 
     # While a room chat is open, completion of a direct send must not replace

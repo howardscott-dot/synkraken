@@ -44,7 +44,7 @@ def main() -> None:
         "claude",
         "goose",
         "hermes",
-        "openclaw-main",
+        "openclaw",
         "crush",
         "google-antigravity",
     ]
@@ -167,7 +167,7 @@ def main() -> None:
         {"adapter_id": "claude", "runtime_name": "claude", "ok": True, "body": "ack", "duration_ms": 4774},
         {"adapter_id": "goose", "runtime_name": "goose", "ok": True, "body": ""},
         {"adapter_id": "hermes", "runtime_name": "hermes", "ok": False, "error": "failed"},
-        {"adapter_id": "openclaw-main", "runtime_name": "openclaw-main", "ok": False, "error": "timeout"},
+        {"adapter_id": "openclaw", "runtime_name": "openclaw", "ok": False, "error": "timeout"},
         {"adapter_id": "crush", "runtime_name": "crush", "ok": True, "body": "ack", "quality": "suspicious_output"},
         {"adapter_id": "google-antigravity", "runtime_name": "google-antigravity", "ok": True, "body": "ack"},
     ]
