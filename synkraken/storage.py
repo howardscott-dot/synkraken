@@ -42,6 +42,8 @@ SHARED_MEMORY_TYPES = {
 SHARED_MEMORY_IMPORTANCE = {"low", "medium", "high", "critical"}
 SHARED_MEMORY_SCOPES = {"global", "room", "mission", "outcome", "assignment", "runtime"}
 
+SCHEMA_VERSION = 2
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY,
@@ -951,6 +953,46 @@ class Storage:
         self._migrate_mission_schema()
         self._migrate_outcome_schema()
         self._migrate_assignment_schema()
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        self.run_migrations()
+
+    def _create_projects_table(self) -> None:
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS projects (
+                project_id   TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'active',
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                metadata_    TEXT NOT NULL DEFAULT '{}'
+            )"""
+        )
+
+    _migrations: dict[int, callable] = {
+        2: lambda s: (
+            s._create_projects_table(),
+            s._conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)"),
+            s._conn.commit(),
+        ),
+    }
+
+    def run_migrations(self) -> None:
+        current = self._conn.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()[0] or 0
+
+        for target_version in range(current + 1, SCHEMA_VERSION + 1):
+            migration = self._migrations.get(target_version)
+            if migration:
+                migration(self)
+                self._conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                    (target_version, utc_now_iso()),
+                )
+                self._conn.commit()
 
     def _migrate_decision_schema(self) -> None:
         columns = {
@@ -6639,3 +6681,63 @@ class Storage:
                 (handoff["id"],),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── projects ────────────────────────────────────────────────────────────
+
+    def create_project(self, project_id: str, name: str, description: str = "", status: str = "active", metadata: dict | None = None) -> dict:
+        now = utc_now_iso()
+        meta = json.dumps(metadata or {})
+        self._conn.execute(
+            "INSERT INTO projects (project_id, name, description, status, created_at, updated_at, metadata_) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (project_id, name, description, status, now, now, meta),
+        )
+        self._conn.commit()
+        return self.get_project(project_id)
+
+    def get_project(self, project_id: str) -> dict | None:
+        row = self._conn.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+        return self._project_from_row(row) if row else None
+
+    def update_project(self, project_id: str, **kwargs) -> dict | None:
+        project = self.get_project(project_id)
+        if not project:
+            return None
+        allowed = {"name", "description", "status", "metadata_"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return project
+        updates["updated_at"] = utc_now_iso()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [project_id]
+        self._conn.execute(f"UPDATE projects SET {set_clause} WHERE project_id = ?", values)
+        self._conn.commit()
+        return self.get_project(project_id)
+
+    def list_projects(self, status: str | None = None, limit: int = 100) -> list[dict]:
+        if status:
+            rows = self._conn.execute(
+                "SELECT * FROM projects WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM projects ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._project_from_row(r) for r in rows]
+
+    def delete_project(self, project_id: str) -> bool:
+        n = self._conn.execute("DELETE FROM projects WHERE project_id = ?", (project_id,)).rowcount
+        self._conn.commit()
+        return n > 0
+
+    def _project_from_row(self, row: sqlite3.Row) -> dict:
+        return {
+            "project_id": row["project_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "metadata": json.loads(row["metadata_"] or "{}"),
+        }
