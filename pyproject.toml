@@ -1,65 +1,42 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "synkraken"
 version = "0.1.0"
-description = "A local bridge daemon and TUI that lets heterogeneous AI runtimes (Claude Code, Goose, Hermes, OpenClaw…) talk to each other in directed messages, broadcasts, and persistent multi-agent chat rooms."
+description = "Open-source AI Workforce Operating System"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
+license = {text = "MIT"}
 authors = [
-  { name = "SynKraken contributors" }
+    {name = "SynKraken Contributors"}
 ]
-keywords = [
-  "ai",
-  "agents",
-  "multi-agent",
-  "tui",
-  "claude",
-  "goose",
-  "hermes",
-  "openclaw",
-  "bridge",
-  "orchestration",
-  "inter-agent-communication",
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.25.0",
+    "sse-starlette>=1.8.0",
+    "uvicorn>=0.24.0",
+    "watchdog>=3.0.0",
 ]
-classifiers = [
-  "Development Status :: 4 - Beta",
-  "Environment :: Console :: Curses",
-  "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
-  "Operating System :: POSIX :: Linux",
-  "Operating System :: MacOS",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Communications :: Chat",
-  "Topic :: Software Development :: Libraries :: Python Modules",
-  "Topic :: System :: Distributed Computing",
-]
-dependencies = []
 
-[project.urls]
-Homepage      = "https://github.com/example/synkraken"
-Repository    = "https://github.com/example/synkraken"
-Issues        = "https://github.com/example/synkraken/issues"
-Changelog     = "https://github.com/example/synkraken/blob/main/CHANGELOG.md"
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
 
 [project.scripts]
-synkraken         = "synkraken.cli_main:main"
-synkraken-daemon  = "synkraken.__main__:main"
-synkraken-send    = "synkraken.cli_send:main"
-
-[tool.setuptools]
-include-package-data = true
+synkraken = "synkraken.__main__:main"
 
 [tool.setuptools.packages.find]
-where   = ["."]
+where = ["."]
 include = ["synkraken*"]
 
-[tool.setuptools.package-data]
-synkraken = ["py.typed"]
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
