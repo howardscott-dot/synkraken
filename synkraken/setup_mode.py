@@ -396,6 +396,47 @@ def _update_config_from_selection(runtimes: list[dict], selected: list[dict], *,
         return {"behaviour": "failed", "adapters_added": [], "adapters_replaced": [], "registry_added": []}
 
 
+def run_quick_setup(*, rediscover: bool = True) -> Path:
+    print_logo()
+    print()
+    print(f'{NAME} local setup')
+    print()
+    print('Looking for local AI workers...')
+    runtimes = discover_local_runtimes()
+    supported = [runtime for runtime in runtimes if runtime.get('adapter_supported')]
+    if not runtimes:
+        print('No local AI runtimes found.')
+        print('Install Ollama, Goose, Claude Code, Hermes, OpenClaw, Crush, or Antigravity and run this again.')
+        raise SystemExit(1)
+    if not supported:
+        labels = ', '.join(str(runtime.get('label') or runtime.get('runtime_id')) for runtime in runtimes)
+        print(f'Found runtimes, but none have SynKraken adapters yet: {labels}')
+        raise SystemExit(1)
+
+    for runtime in supported:
+        label = str(runtime.get('label') or runtime.get('runtime_id'))
+        model = f"  model={runtime['model']}" if runtime.get('model') else ''
+        print(f'  ✓ {label}{model}')
+
+    cfg = _read_config(DEFAULT_CONFIG_PATH)
+    behaviour = 'merge' if rediscover else 'replace'
+    merged, summary = merge_discovered_config(cfg, supported, behaviour=behaviour)
+    _write_config(DEFAULT_CONFIG_PATH, merged)
+    enabled = summary.get('adapters_added') or []
+    replaced = summary.get('adapters_replaced') or []
+    print()
+    print(f'Wrote {DEFAULT_CONFIG_PATH}')
+    if enabled:
+        print(f'Enabled workers: {", ".join(enabled)}')
+    if replaced:
+        print(f'Updated workers: {", ".join(replaced)}')
+    if any(runtime.get('runtime_id') == 'ollama' and not runtime.get('model') for runtime in supported):
+        print()
+        print('Ollama is configured with default model llama3.2.')
+        print('If you do not have that model yet, run: ollama pull llama3.2')
+    return DEFAULT_CONFIG_PATH
+
+
 # ── install / setup walkthrough ───────────────────────────────────────────
 def run_setup(
     *,

@@ -3,40 +3,29 @@
 ## Requirements
 
 - Python 3.11+
-- One or more of: Goose, Claude Code, Hermes, OpenClaw (optional — SynKraken works with whatever adapters are configured and available)
+- One or more of: Ollama, Goose, Claude Code, Hermes, OpenClaw, Crush, or Antigravity
 
-## Install the daemon
-
-```bash
-pip install -e .
-```
-
-## Configure adapters
-
-Copy the example config:
+## Install, Configure, And Start
 
 ```bash
-cp examples/config.example.json config.json
+./scripts/setup.sh
 ```
 
-Edit `config.json` and enable only the adapters you have installed.
-Set `command` to the full path if the binary is not in your PATH.
-See `examples/config.paths.local.example.json` for a reference.
-
-## Start the daemon
+Then open the terminal UI:
 
 ```bash
-synkraken run --config config.json
+synkraken tui
 ```
 
-The daemon listens on `127.0.0.1:9460` by default. All surfaces (CLI, TUI, Web)
-connect to this URL.
+If SynKraken is already installed, use `synkraken setup` to refresh local
+worker configuration and restart the runtime. For SSH workers or advanced
+rediscovery, use `synkraken config`.
 
 ## Surfaces
 
 After starting the daemon:
 - **Web Command Deck**: open `http://localhost:9460` in your browser
-- **Terminal TUI**: `synkraken tui --config config.json`
+- **Terminal TUI**: `synkraken tui`
 - **CLI**: `synkraken --help`
 
 ## Retired Console Prototype

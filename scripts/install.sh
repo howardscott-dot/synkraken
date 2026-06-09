@@ -13,7 +13,7 @@ CONFIG_ARG_COUNT=0
 usage() {
   cat <<EOF
 Install SynKraken into a private venv, add commands to ~/.local/bin,
-then launch the interactive setup flow.
+then configure and start the local runtime.
 
 Usage:
   install.sh [options]
@@ -23,7 +23,7 @@ Options:
   --branch NAME               Git branch or tag to install
   --home DIR                  Install home, default: ~/.synkraken
   --bin-dir DIR               Command shim directory, default: ~/.local/bin
-  --skip-config               Install only; do not run synkraken config
+  --skip-config               Install only; do not run setup
   --remote HOST               Automation only: prefill SSH worker host
   --remote-user USER          Automation only: prefill SSH username
   --remote-port PORT          Automation only: prefill SSH port
@@ -143,31 +143,28 @@ esac
 
 if [[ "$RUN_CONFIG" -eq 1 ]]; then
   echo
-  echo "Starting SynKraken setup."
   if [[ "$CONFIG_ARG_COUNT" -eq 0 ]]; then
-    echo "Setup will ask whether your workers are local or on another machine over SSH."
+    echo "Starting SynKraken local setup."
+    (cd "$SRC_DIR" && "$BIN_DIR/synkraken" setup)
   else
+    echo "Starting SynKraken remote setup."
     echo "Using setup values provided on the install command line."
-  fi
-  if [[ -r /dev/tty ]]; then
-    if [[ "$CONFIG_ARG_COUNT" -eq 0 ]]; then
-      (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config </dev/tty)
-    else
+    if [[ -r /dev/tty ]]; then
       (cd "$SRC_DIR" && "$BIN_DIR/synkraken" config "${CONFIG_ARGS[@]}" </dev/tty)
+    else
+      echo "No interactive terminal found, so setup was skipped."
+      echo "Run this later:"
+      echo "  cd \"$SRC_DIR\" && synkraken config ${CONFIG_ARGS[*]}"
     fi
-  else
-    echo "No interactive terminal found, so setup was skipped."
-    echo "Run this later:"
-    echo "  cd \"$SRC_DIR\" && synkraken config ${CONFIG_ARGS[*]}"
   fi
 else
   echo
   echo "Next:"
   echo "  cd \"$SRC_DIR\""
-  echo "  synkraken config"
+  echo "  synkraken setup"
 fi
 
-if [[ -f "$SRC_DIR/config.local.json" ]]; then
+if [[ "$RUN_CONFIG" -eq 1 && "$CONFIG_ARG_COUNT" -ne 0 && -f "$SRC_DIR/config.local.json" ]]; then
   echo
   echo "Installing and starting the SynKraken runtime."
   (cd "$SRC_DIR" && "$BIN_DIR/synkraken" install --config "$SRC_DIR/config.local.json")

@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - termios is POSIX-only.
     termios = None
 
 
-SUPPORTED_ADAPTER_TYPES = {"claude", "crush", "goose", "hermes", "openclaw", "google_antigravity"}
+SUPPORTED_ADAPTER_TYPES = {"claude", "crush", "goose", "hermes", "openclaw", "google_antigravity", "ollama"}
 DEFAULT_SUPPORTED_MODES = ["direct", "broadcast", "room", "discussion", "team", "goal"]
 
 
@@ -159,10 +159,11 @@ RUNTIME_REGISTRY: tuple[RuntimeDefinition, ...] = (
         label="Ollama",
         runtime_type="ollama",
         command_names=("ollama",),
-        capabilities=("local_model", "chat"),
+        capabilities=("local_model", "chat", "research"),
         cost_tier="local",
-        adapter_type="unsupported",
-        supported_modes=("direct",),
+        adapter_type="ollama",
+        supported_modes=tuple(DEFAULT_SUPPORTED_MODES),
+        default_timeout_seconds=180,
     ),
     RuntimeDefinition(
         runtime_id="lm-studio",
@@ -307,6 +308,21 @@ def _probe_version(outputs: Iterable[str]) -> str:
             if any(item in lowered for item in noisy):
                 continue
             return cleaned[:160]
+    return ""
+
+
+def _ollama_default_model(command_path: str) -> str:
+    try:
+        result = _run_probe_command(command_path, ("list",), 2.0)
+    except Exception:  # noqa: BLE001
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in (result.stdout or "").splitlines():
+        parts = line.strip().split()
+        if not parts or parts[0].lower() in {"name", "model"}:
+            continue
+        return parts[0]
     return ""
 
 
@@ -610,6 +626,10 @@ def discover_local_runtimes(
             runtime["node_bin_dir"] = node_bin_dir
         if node_path:
             runtime["node_path"] = node_path
+        if definition.runtime_id == "ollama" and command_path:
+            model = _ollama_default_model(command_path)
+            if model:
+                runtime["model"] = model
         if definition.skill_path_template:
             runtime["skill_path"] = _format_home_template(definition.skill_path_template, home)
             runtime["skill_format"] = definition.skill_format
@@ -836,6 +856,9 @@ def runtime_to_adapter_config(runtime: dict) -> dict:
             config["node_path"] = runtime["node_path"]
     elif adapter_type == "hermes":
         config["system_prefix"] = "You are replying through synkraken. Keep replies concise and structured."
+    elif adapter_type == "ollama":
+        config["model"] = str(runtime.get("model") or "llama3.2")
+        config["message_prefix"] = "You are replying through SynKraken. Keep replies concise and useful."
     return config
 
 

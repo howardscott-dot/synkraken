@@ -6,6 +6,7 @@ from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 from .antigravity import AntigravityAdapter
 from .odysseus import OdysseusAdapter
+from .ollama import OllamaAdapter
 
 ADAPTER_TYPES = {
     "claude": ClaudeAdapter,
@@ -15,6 +16,7 @@ ADAPTER_TYPES = {
     "openclaw": OpenClawAdapter,
     "google_antigravity": AntigravityAdapter,
     "odysseus": OdysseusAdapter,
+    "ollama": OllamaAdapter,
 }
 
 

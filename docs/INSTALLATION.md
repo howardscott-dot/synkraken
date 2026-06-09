@@ -9,14 +9,22 @@
 ## From A Checkout
 
 ```bash
-pip install -e .
-synkraken config
-synkraken install
+./scripts/setup.sh
+synkraken tui
 ```
 
-`synkraken install` installs the platform runtime integration, starts
-SynKraken, and verifies health. It returns a failure if the runtime does not
-become healthy.
+`./scripts/setup.sh` installs the package from the checkout, auto-discovers
+local supported workers, writes `config.local.json`, installs the platform
+runtime integration, starts SynKraken, and verifies health.
+
+If the command is already installed, use:
+
+```bash
+synkraken setup
+synkraken tui
+```
+
+For SSH workers or advanced rediscovery, use `synkraken config`.
 
 ## Linux
 

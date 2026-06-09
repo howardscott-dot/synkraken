@@ -106,34 +106,24 @@ curl -fsSL https://raw.githubusercontent.com/howardscott-dot/synkraken/main/scri
 ```
 
 The installer creates `~/.synkraken`, installs commands into `~/.local/bin`,
-and launches `synkraken config`, where you choose local workers or SSH workers.
+auto-configures local supported workers, starts SynKraken, and prints the next
+command to run.
 
 From a development checkout:
 
 ```bash
-pip install -e .
-
-# Discover runtimes without changing config.
-synkraken discover
-synkraken discover --json --verbose
-
-# Interactive setup: discover runtimes, install bridge skills, create config.
-synkraken config
-
-# Install, start, and validate the runtime on Linux or macOS.
-synkraken install
-
-# Check state.
-synkraken status
-synkraken health
-synkraken doctor
-synkraken agents
-synkraken workforce
-
-# Open operator surfaces.
+./scripts/setup.sh
 synkraken tui
-synkraken web
 ```
+
+If SynKraken is already installed and you want to refresh local worker setup:
+
+```bash
+synkraken setup
+synkraken tui
+```
+
+For SSH workers or advanced rediscovery, use `synkraken config`.
 
 See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for Linux, macOS, uninstall,
 diagnostics, and the Windows roadmap.

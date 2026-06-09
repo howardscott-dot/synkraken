@@ -16,7 +16,7 @@ import urllib.request
 
 from .branding import NAME, TAGLINE, print_logo
 from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes, discover_remote_runtimes
-from .setup_mode import run_install_skills, run_setup, run_uninstall
+from .setup_mode import run_install_skills, run_quick_setup, run_setup, run_uninstall
 from .runtime_service import RuntimeServiceError, format_uptime, runtime_service_for_platform
 from .tui import run_tui
 from .web import serve as serve_web
@@ -636,22 +636,24 @@ def recover_runtime(base: str, wait_seconds: int = 15, *, announce: bool = True)
     return healthy
 
 
-def install_runtime(config_path: Path, base: str, wait_seconds: int) -> int:
+def install_runtime(config_path: Path, base: str, wait_seconds: int, *, quiet: bool = False) -> int:
     if not config_path.exists():
         print(f"Configuration not found: {config_path}", file=sys.stderr)
         print("Run `synkraken config` first, then `synkraken install`.", file=sys.stderr)
         return 1
     try:
         service = runtime_service_for_platform()
-        print(f"Installing SynKraken for {service.platform_name}...")
+        if not quiet:
+            print(f"Installing SynKraken for {service.platform_name}...")
         service.install(config_path)
     except RuntimeServiceError as exc:
         print(f"Installation failed: {exc}", file=sys.stderr)
         return 1
-    if not _wait_for_daemon_health(base, wait_seconds):
+    if not _wait_for_daemon_health(base, wait_seconds, quiet=quiet):
         print("Installation failed because SynKraken did not pass its health check.", file=sys.stderr)
         return 1
-    print("SynKraken is installed and healthy.")
+    if not quiet:
+        print("SynKraken is installed and healthy.")
     return 0
 
 
@@ -855,6 +857,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--config", default=None, help="Configuration file path")
     p_install.add_argument("--wait-seconds", type=int, default=20, help="Seconds to wait for health validation")
     add_base_url_arg(p_install)
+
+    p_setup = sub.add_parser("setup", help="Auto-configure local workers, install, and start SynKraken")
+    p_setup.add_argument("--fresh", action="store_true", help="Replace existing local worker configuration instead of merging")
+    p_setup.add_argument("--wait-seconds", type=int, default=20, help="Seconds to wait for health validation")
+    add_base_url_arg(p_setup)
 
     for action in ("start", "stop", "restart", "status"):
         add_lifecycle_parser(sub, action)
@@ -1161,6 +1168,15 @@ def main() -> None:
         return
     if args.command == 'uninstall':
         raise SystemExit(uninstall_runtime(remove_skills=args.remove_skills))
+    if args.command == 'setup':
+        config_path = run_quick_setup(rediscover=not args.fresh)
+        result = install_runtime(config_path, args.url.rstrip("/"), args.wait_seconds, quiet=True)
+        if result == 0:
+            print()
+            print("Ready.")
+            print("Run: synkraken tui")
+            print("Or:  synkraken web")
+        raise SystemExit(result)
     if args.command == 'install':
         config_path = _config_path(args.config)
         if not config_path.exists() and args.config is None:

@@ -55,18 +55,35 @@ def _fake_binary(directory: Path, name: str, version: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def _fake_ollama_binary(directory: Path, *, model: str = "llama3.2:latest") -> None:
+    path = directory / "ollama"
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"list\" ]; then\n"
+        "  printf 'NAME ID SIZE MODIFIED\\n'\n"
+        f"  printf '{model} abc123 2 GB today\\n'\n"
+        "else\n"
+        "  printf 'ollama version 0.5.0\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
 def test_fake_path_and_versions(tmp: Path) -> list[dict]:
     bin_dir = tmp / "bin"
     bin_dir.mkdir()
     _fake_binary(bin_dir, "goose", "goose 1.2.3")
     _fake_binary(bin_dir, "claude", "claude 0.9.0")
-    _fake_binary(bin_dir, "ollama", "ollama version 0.5.0")
+    _fake_ollama_binary(bin_dir)
 
     runtimes = discover_local_runtimes(search_path=str(bin_dir), home=tmp, include_common_dirs=False)
     by_id = {runtime["runtime_id"]: runtime for runtime in runtimes}
     assert set(by_id) == {"claude", "goose", "ollama"}, by_id
     assert by_id["goose"]["adapter_supported"] is True
-    assert by_id["ollama"]["adapter_supported"] is False
+    assert by_id["ollama"]["adapter_supported"] is True
+    assert by_id["ollama"]["adapter_type"] == "ollama"
+    assert by_id["ollama"]["model"] == "llama3.2:latest"
     assert by_id["claude"]["version"] == "claude 0.9.0"
     assert by_id["goose"]["command"][0] == str(bin_dir / "goose")
     return runtimes
@@ -85,7 +102,7 @@ def test_selection_parser(runtimes: list[dict]) -> None:
     mixed = parse_runtime_selection(runtimes, "1 2,3")
     assert [runtime["runtime_id"] for runtime in mixed] == ["claude", "goose", "ollama"]
     supported = parse_runtime_selection(runtimes, "all", supported_only=True)
-    assert {runtime["runtime_id"] for runtime in supported} == {"claude", "goose"}
+    assert {runtime["runtime_id"] for runtime in supported} == {"claude", "goose", "ollama"}
     for raw in ("0", "4", "1,4", "goose"):
         try:
             parse_runtime_selection(runtimes, raw)
@@ -110,15 +127,17 @@ def test_config_merge(runtimes: list[dict]) -> None:
     assert merged["adapters"]["goose"]["command"] == ["/custom/goose"]
     assert merged["adapters"]["goose"]["timeout_seconds"] == 300
     assert "claude" in merged["adapters"]
-    assert "ollama" not in merged["adapters"]
-    assert merged["runtime_registry"]["ollama"]["adapter_type"] == "unsupported"
-    assert merged["runtime_registry"]["ollama"]["enabled"] is False
+    assert "ollama" in merged["adapters"]
+    assert merged["adapters"]["ollama"]["type"] == "ollama"
+    assert merged["adapters"]["ollama"]["model"] == "llama3.2:latest"
+    assert merged["runtime_registry"]["ollama"]["adapter_type"] == "ollama"
+    assert merged["runtime_registry"]["ollama"]["enabled"] is True
     assert summary["behaviour"] == "merge"
 
     replaced, replace_summary = merge_discovered_config(existing, runtimes, behaviour="replace")
     assert replaced["adapters"]["goose"]["command"][0].endswith("/goose")
     assert replace_summary["adapters_replaced"] == ["goose"]
-    assert set(replaced["adapters"]) == {"claude", "goose"}
+    assert set(replaced["adapters"]) == {"claude", "goose", "ollama"}
 
     skipped, skip_summary = merge_discovered_config(existing, runtimes, behaviour="skip")
     assert skipped is existing
@@ -447,6 +466,39 @@ def test_declined_bridge_skill_install_skips_cleanly(tmp: Path) -> None:
     assert config_path.exists()
 
 
+def test_quick_setup_generates_local_config(tmp: Path) -> None:
+    runtime = {
+        "runtime_id": "ollama",
+        "label": "Ollama",
+        "runtime_type": "ollama",
+        "command": [str(tmp / "bin" / "ollama")],
+        "command_path": str(tmp / "bin" / "ollama"),
+        "capabilities": ["local_model", "chat", "research"],
+        "cost_tier": "local",
+        "usage_risk": "medium",
+        "adapter_type": "ollama",
+        "adapter_supported": True,
+        "supported_modes": ["direct", "broadcast", "room"],
+        "timeout_seconds": 180,
+        "model": "llama3.2:latest",
+    }
+    config_path = tmp / "config.local.json"
+    out = io.StringIO()
+    with (
+        patch("synkraken.setup_mode.discover_local_runtimes", return_value=[runtime]),
+        patch("synkraken.setup_mode.DEFAULT_CONFIG_PATH", config_path),
+        contextlib.redirect_stdout(out),
+    ):
+        written = setup_mode.run_quick_setup()
+    rendered = out.getvalue()
+    assert written == config_path
+    assert "Ollama  model=llama3.2:latest" in rendered
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["adapters"]["ollama"]["type"] == "ollama"
+    assert config["adapters"]["ollama"]["model"] == "llama3.2:latest"
+    assert config["runtime_registry"]["ollama"]["enabled"] is True
+
+
 def test_setup_prompts_for_remote_discovery(tmp: Path) -> None:
     runtime = {
         "runtime_id": "goose",
@@ -628,6 +680,8 @@ def main() -> None:
         test_selected_bridge_skill_install_and_skips(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_declined_bridge_skill_install_skips_cleanly(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_quick_setup_generates_local_config(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_setup_prompts_for_remote_discovery(Path(raw))
     with tempfile.TemporaryDirectory() as raw:

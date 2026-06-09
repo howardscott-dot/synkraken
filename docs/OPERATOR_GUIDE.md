@@ -7,15 +7,21 @@ curl -fsSL https://raw.githubusercontent.com/howardscott-dot/synkraken/main/scri
 ```
 
 The installer clones SynKraken to `~/.synkraken/src`, creates a private venv
-at `~/.synkraken/venv`, adds command shims to `~/.local/bin`, and launches
-setup so you can choose local workers or SSH workers.
+at `~/.synkraken/venv`, adds command shims to `~/.local/bin`, auto-configures
+local supported workers, and starts SynKraken.
 
 ## Install And Start SynKraken
 
 ```bash
-cd ~/.synkraken/src
-synkraken install
+synkraken setup
 synkraken status
+```
+
+From a development checkout:
+
+```bash
+./scripts/setup.sh
+synkraken tui
 ```
 
 After installation, SynKraken starts itself for the signed-in operator and
