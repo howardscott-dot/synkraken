@@ -37,6 +37,8 @@ def main() -> None:
     def fake_post_json(url: str, payload: dict) -> dict:
         calls.append((url, payload))
         target = str(payload.get("target") or "room:stress1")
+        if target == "room:missing":
+            raise tui.TuiHttpError(404, "room not found: missing")
         delivery_target = "goose" if target.startswith("room:") else target
         return {
             "message": {
@@ -72,6 +74,8 @@ def main() -> None:
             return {"name": "stress1", "members": [{"adapter_id": "crush"}, {"adapter_id": "goose"}]}
         if url.endswith("/v1/rooms/empty"):
             return {"name": "empty", "members": []}
+        if url.endswith("/v1/rooms/missing"):
+            raise tui.TuiHttpError(404, "room not found: missing")
         raise AssertionError(url)
 
     try:
@@ -107,7 +111,24 @@ def main() -> None:
 
         empty_members = tui._room_member_ids("http://daemon", "empty")
         assert empty_members == []
-        assert tui._no_room_members_message() == "No room members. Use /room add <agent> or /room add all."
+        assert tui._no_room_members_message() == "This room has no workers yet.\nAdd workers with:\n/room add <room> <worker>"
+
+        try:
+            tui._room_member_ids("http://daemon", "missing")
+        except tui.TuiHttpError as exc:
+            assert exc.status == 404
+            assert tui._room_not_found_message("missing") == (
+                "Room not found: missing\n\nSuggested actions:\n/room create missing\n/rooms"
+            )
+        else:
+            raise AssertionError("missing room should raise TuiHttpError")
+
+        calls.clear()
+        state = {"view": "chat", "current_room": "missing", "command_result": ("#missing", {"messages": []})}
+        tui._start_async_send(state, "http://daemon", "room:missing", "hello", "#missing")
+        assert state["pending"]["done"] is True
+        assert state["pending"]["http_status"] == 404
+        assert state["pending"]["error"] == "room not found: missing"
 
         calls.clear()
         targets, body = tui._parse_leading_mentions("@crush ping", aliases)

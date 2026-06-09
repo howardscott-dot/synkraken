@@ -912,6 +912,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tui = sub.add_parser("tui", help="Launch the interactive TUI")
     p_tui.add_argument('--banner-only', action='store_true', help='Print banner and exit')
+    add_base_url_arg(p_tui)
 
     p_web = sub.add_parser("web", help="Launch the local web command deck")
     p_web.add_argument("--host", default="127.0.0.1", help="Host for the local web UI")
@@ -1103,13 +1104,14 @@ def main() -> None:
             print_logo()
             print()
             return
+        base = args.url.rstrip("/")
         print("Checking SynKraken runtime...")
-        if not recover_runtime(DEFAULT_BASE, announce=False):
+        if not recover_runtime(base, announce=False):
             print("Starting SynKraken failed.", file=sys.stderr)
             print("Run: synkraken install", file=sys.stderr)
             raise SystemExit(1)
         print("Connected.")
-        run_tui()
+        run_tui(base)
         return
     if args.command == 'web':
         if not recover_runtime(args.daemon_url.rstrip("/"), announce=False):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import curses
 import json
+import os
 import re
 import shlex
 import signal
@@ -39,7 +40,7 @@ _WORDMARK_PAIR_OFFSET = 30
 _KRAKEN_PAIR_OFFSET   = 40
 
 
-DEFAULT_BASE = 'http://127.0.0.1:9460'
+DEFAULT_BASE = os.environ.get('SYNKRAKEN_URL', 'http://127.0.0.1:9460').rstrip('/')
 
 # ── colour pair indices (semantic names) ───────────────────────────────────
 C_RED        = 1
@@ -2538,6 +2539,24 @@ def _no_room_members_message() -> str:
     return "This room has no workers yet.\nAdd workers with:\n/room add <room> <worker>"
 
 
+def _room_not_found_message(room_name: str) -> str:
+    return f"Room not found: {room_name}\n\nSuggested actions:\n/room create {room_name}\n/rooms"
+
+
+def _room_error_result(room_name: str, body: str) -> dict:
+    return {
+        'conversation_id': f'room:{room_name}',
+        'messages': [{
+            'source': 'synkraken',
+            'target': f'room:{room_name}',
+            'timestamp': '',
+            'body': body,
+        }],
+        'deliveries': [],
+        'dead_letters': [],
+    }
+
+
 def _mention_route(target: str, body: str, current_room: str | None) -> tuple[str, str]:
     """Resolve mention routing while preserving an explicit global escape hatch."""
     stripped = body.strip()
@@ -2589,7 +2608,8 @@ def _start_async_send(state: dict, base: str, target: str, body: str,
         'label': label, 'target': target, 'body': body,
         'metadata': metadata or {},
         'started_at': time.time(), 'done': False,
-        'result': None, 'error': None, 'return_view': return_view,
+        'result': None, 'error': None, 'http_status': None,
+        'http_detail': None, 'return_view': return_view,
     }
     state['pending'] = pending
     temp_message = {
@@ -2621,6 +2641,10 @@ def _start_async_send(state: dict, base: str, target: str, body: str,
                 {'source': 'synkraken-tui', 'target': target, 'body': body,
                  'metadata': metadata or {}},
             )
+        except TuiHttpError as exc:
+            pending['http_status'] = exc.status
+            pending['http_detail'] = exc.detail
+            pending['error'] = exc.detail
         except Exception as exc:  # noqa: BLE001
             pending['error'] = str(exc)
         finally:
@@ -3236,15 +3260,10 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
             result = _handle_room_transcript(base, name)
         except TuiHttpError as exc:
             if exc.status == 404:
-                message = f'Room not found: {name}\n\nSuggested actions:\n/room create {name}\n/rooms'
+                message = _room_not_found_message(name)
             else:
                 message = f'Unable to open room {name}: {exc.detail}'
-            return ('room error', {
-                'conversation_id': f'room:{name}',
-                'messages': [{'source': 'synkraken', 'target': f'room:{name}', 'timestamp': '', 'body': message}],
-                'deliveries': [],
-                'dead_letters': [],
-            }, '')
+            return ('room error', _room_error_result(name, message), '')
         state['current_room'] = name
         save_preferences(state)
         return (f'#{name}', result, f'in #{name}  ·  type to chat  ·  /room leave to exit')
@@ -3406,7 +3425,7 @@ def _exec_room_command(base: str, rest: str, state: dict, data: dict) -> tuple[s
 
 
 # ── main loop ──────────────────────────────────────────────────────────────
-def _main(stdscr):
+def _main(stdscr, base_url: str | None = None):
     prefs = load_preferences()
     state = {
         'view': prefs.get('default_view', 'dashboard'),
@@ -3431,7 +3450,7 @@ def _main(stdscr):
     # 120 ms tick gives ~8 fps — enough for a smooth spinner without burning CPU.
     stdscr.timeout(120)
     _enable_bracketed_paste()
-    base = DEFAULT_BASE
+    base = (base_url or DEFAULT_BASE).rstrip('/')
     command = ''
     hint = ''
     previous_sigint = _install_sigint_handler()
@@ -3506,6 +3525,17 @@ def _main(stdscr):
                                  'deliveries': [], 'dead_letters': []})
                             state['view'] = 'command-result'
                     else:
+                        if (p.get('http_status') == 404
+                                and str(p.get('target', '')).startswith('room:')):
+                            room_name = str(p['target']).split(':', 1)[1]
+                            state['command_result'] = (
+                                'room error',
+                                _room_error_result(room_name, _room_not_found_message(room_name)),
+                            )
+                            state['chat_target'] = f'room:{room_name}'
+                            state['view'] = 'chat'
+                            hint = ''
+                            continue
                         state['command_result'] = (f"{p['label']}  ✗",
                             {'message': {}, 'deliveries': [],
                              'dead_letters': [{'adapter_id': p['target'], 'reason': p['error']}]})
@@ -4114,6 +4144,21 @@ def _main(stdscr):
                                             member for member in _room_member_ids(base, t.split(':', 1)[1])
                                             if member in enabled_members
                                         ]
+                                    except TuiHttpError as exc:
+                                        room_name = t.split(':', 1)[1]
+                                        if exc.status == 404:
+                                            state['local_output'] = (
+                                                'room dispatch',
+                                                _room_not_found_message(room_name).splitlines(),
+                                            )
+                                        else:
+                                            state['local_output'] = (
+                                                'room dispatch',
+                                                [f'Unable to inspect room {room_name}: {exc.detail}'],
+                                            )
+                                        state['view'] = 'local-output'
+                                        hint = ''
+                                        continue
                                     except Exception as exc:
                                         state['local_output'] = ('room dispatch', [f'error: {exc}'])
                                         state['view'] = 'local-output'
@@ -4216,6 +4261,6 @@ def _main(stdscr):
         stream.stop()
 
 
-def run_tui() -> None:
+def run_tui(base_url: str | None = None) -> None:
     print('\033[2J\033[3J\033[H', end='', flush=True)
-    curses.wrapper(_main)
+    curses.wrapper(_main, base_url)
