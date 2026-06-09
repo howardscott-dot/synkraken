@@ -2204,6 +2204,88 @@ def _local_command_lines(cmd: str, base: str, data: dict, state: dict) -> tuple[
             f"memory count    {flight.get('memory_count')}",
             f"pending reviews {flight.get('pending_reviews')}",
         ])
+    if cmd == '/briefing':
+        briefing = _get_json(f'{base}/v1/briefing')
+        workforce = briefing.get('workforce') or {}
+        lines = [
+            f"workers          {workforce.get('agents_online', 0)}/{workforce.get('agents_total', 0)} online",
+            f"rooms            {len(briefing.get('rooms') or [])}",
+            f"pending props    {len(briefing.get('pending_proposals') or [])}",
+            f"pending approvals {len(briefing.get('pending_approvals') or [])}",
+            f"blocked work     {len(briefing.get('blocked_assignments') or [])}",
+            '',
+            'recommended actions',
+        ]
+        lines.extend([f"  - {line}" for line in (briefing.get('recommended_actions') or [])])
+        return ('briefing', lines)
+    if cmd == '/cookbook':
+        cookbook = _get_json(f'{base}/v1/cookbook')
+        lines = []
+        for recipe in cookbook.get('recipes') or []:
+            lines.append(str(recipe.get('name') or 'recipe'))
+            lines.append(f"  when     {recipe.get('when')}")
+            lines.append(f"  command  {recipe.get('command')}")
+            lines.append(f"  workers  {', '.join(recipe.get('recommended_workers') or []) or '-'}")
+        return ('cookbook', lines or ['(no recipes)'])
+    if cmd.startswith('/arena run '):
+        prompt = cmd[len('/arena run '):].strip()
+        if not prompt:
+            return ('arena', ['usage: /arena run <prompt>'])
+        result = _post_json(f'{base}/v1/arena-runs', {'prompt': prompt})
+        return ('arena', [
+            f"run      {result.get('arena_run_id')}",
+            f"status   {result.get('status')}",
+            f"winner   {result.get('winner_agent') or '-'}",
+            f"agents   {', '.join(result.get('agents') or [])}",
+            f"reason   {result.get('judge_reason') or '-'}",
+        ])
+    if cmd.startswith('/arena '):
+        arena_id = cmd.split(' ', 1)[1].strip()
+        if not arena_id:
+            return ('arena', ['usage: /arena <id>|run <prompt>'])
+        result = _get_json(f'{base}/v1/arena-runs/{arena_id}')
+        return ('arena', json.dumps(result, indent=2, ensure_ascii=False).splitlines())
+    if cmd == '/arena':
+        runs = _get_json(f'{base}/v1/arena-runs?limit=10').get('arena_runs', [])
+        return ('arena', [
+            f"{run.get('arena_run_id')}  status={run.get('status')}  winner={run.get('winner_agent') or '-'}"
+            for run in runs
+        ] or ['usage: /arena run <prompt>'])
+    if cmd.startswith('/research run '):
+        question = cmd[len('/research run '):].strip()
+        if not question:
+            return ('research', ['usage: /research run <question>'])
+        result = _post_json(f'{base}/v1/research-runs', {'question': question})
+        return ('research', [
+            f"run      {result.get('research_run_id')}",
+            f"status   {result.get('status')}",
+            f"room     #{result.get('room_name') or '-'}",
+            f"agents   {', '.join(result.get('agents') or [])}",
+        ])
+    if cmd.startswith('/research '):
+        research_id = cmd.split(' ', 1)[1].strip()
+        if not research_id:
+            return ('research', ['usage: /research <id>|run <question>'])
+        result = _get_json(f'{base}/v1/research-runs/{research_id}')
+        return ('research', (result.get('report') or json.dumps(result, indent=2, ensure_ascii=False)).splitlines())
+    if cmd == '/research':
+        runs = _get_json(f'{base}/v1/research-runs?limit=10').get('research_runs', [])
+        return ('research', [
+            f"{run.get('research_run_id')}  status={run.get('status')}  room=#{run.get('room_name') or '-'}"
+            for run in runs
+        ] or ['usage: /research run <question>'])
+    if cmd in {'/runbooks', '/artifacts', '/evidence', '/approvals'}:
+        endpoint = {
+            '/runbooks': '/v1/runbooks?limit=10',
+            '/artifacts': '/v1/artifacts?limit=10',
+            '/evidence': '/v1/evidence?limit=10',
+            '/approvals': '/v1/approvals?limit=10',
+        }[cmd]
+        key = cmd.lstrip('/')
+        if key == 'evidence':
+            key = 'evidence'
+        items = _get_json(f'{base}{endpoint}').get(key, [])
+        return (cmd.lstrip('/'), json.dumps(items, indent=2, ensure_ascii=False).splitlines() or ['(none)'])
     if cmd == '/workforce':
         return _workforce_command_lines(data, base)
     if cmd in {'/proposals', '/proposals pending'}:

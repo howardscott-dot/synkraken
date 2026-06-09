@@ -1021,6 +1021,70 @@ def build_parser() -> argparse.ArgumentParser:
     p_proposal.add_argument("--reason", default="", help="Reject/cancel reason")
     add_base_url_arg(p_proposal)
 
+    p_briefing = sub.add_parser("briefing", help="Show deterministic operational briefing")
+    add_base_url_arg(p_briefing)
+
+    p_cookbook = sub.add_parser("cookbook", help="Show worker recipes and suggested usage")
+    add_base_url_arg(p_cookbook)
+
+    p_arena = sub.add_parser("arena", help="Compare workers on the same prompt")
+    p_arena.add_argument("action", nargs="?", choices=["list", "run", "show", "judge"], default="list")
+    p_arena.add_argument("value", nargs="?", help="Prompt for run, run id for show/judge")
+    p_arena.add_argument("--agents", nargs="*", default=None, help="Workers to include")
+    p_arena.add_argument("--winner", default="", help="Winning worker for judge")
+    p_arena.add_argument("--reason", default="", help="Judgement reason")
+    p_arena.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_arena)
+
+    p_research = sub.add_parser("research", help="Run or inspect multi-worker research")
+    p_research.add_argument("action", nargs="?", choices=["list", "run", "show"], default="list")
+    p_research.add_argument("value", nargs="?", help="Question for run, run id for show")
+    p_research.add_argument("--agents", nargs="*", default=None)
+    p_research.add_argument("--room", default="")
+    p_research.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_research)
+
+    p_runbook = sub.add_parser("runbook", aliases=["runbooks"], help="Create, list, show, approve, reject, or apply runbooks")
+    p_runbook.set_defaults(command="runbook")
+    p_runbook.add_argument("action", nargs="?", choices=["list", "create", "show", "approve", "reject", "apply"], default="list")
+    p_runbook.add_argument("value", nargs="?", help="Title for create or runbook id")
+    p_runbook.add_argument("--purpose", default="")
+    p_runbook.add_argument("--step", action="append", default=[])
+    p_runbook.add_argument("--owner", default="")
+    p_runbook.add_argument("--risk", default="medium")
+    p_runbook.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_runbook)
+
+    p_artifact = sub.add_parser("artifact", aliases=["artifacts"], help="Create, list, or show artifacts")
+    p_artifact.set_defaults(command="artifact")
+    p_artifact.add_argument("action", nargs="?", choices=["list", "create", "show"], default="list")
+    p_artifact.add_argument("value", nargs="?", help="Title for create or artifact id")
+    p_artifact.add_argument("--type", dest="artifact_type", default="note")
+    p_artifact.add_argument("--body", default="")
+    p_artifact.add_argument("--owner", default="")
+    p_artifact.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_artifact)
+
+    p_evidence = sub.add_parser("evidence", help="Create, list, or show evidence records")
+    p_evidence.add_argument("action", nargs="?", choices=["list", "create", "show"], default="list")
+    p_evidence.add_argument("value", nargs="?", help="Title for create or evidence id")
+    p_evidence.add_argument("--uri", default="")
+    p_evidence.add_argument("--summary", default="")
+    p_evidence.add_argument("--source-type", default="manual")
+    p_evidence.add_argument("--link-type", default="")
+    p_evidence.add_argument("--link-id", default="")
+    p_evidence.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_evidence)
+
+    p_approval = sub.add_parser("approval", aliases=["approvals"], help="Request, list, show, approve, or reject approvals")
+    p_approval.set_defaults(command="approval")
+    p_approval.add_argument("action", nargs="?", choices=["list", "request", "show", "approve", "reject"], default="list")
+    p_approval.add_argument("value", nargs="?", help="Title for request or approval id")
+    p_approval.add_argument("--reason", default="")
+    p_approval.add_argument("--type", dest="approval_type", default="operator")
+    p_approval.add_argument("--limit", type=int, default=20)
+    add_base_url_arg(p_approval)
+
     p_incident = sub.add_parser("incident", help="Show latest incident")
     p_incident.add_argument("action", nargs="?", choices=["latest"], default="latest", help="Show latest failure")
     add_base_url_arg(p_incident)
@@ -1518,6 +1582,199 @@ def main() -> None:
                 print(json.dumps(data, indent=2, ensure_ascii=False))
             else:
                 print_proposal(data)
+            return
+        if args.command == "briefing":
+            data = get_json(f"{base}/v1/briefing")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                workforce = data.get("workforce", {})
+                print("Operational Briefing")
+                print(f"workers: {workforce.get('agents_online', 0)}/{workforce.get('agents_total', 0)} online")
+                print(f"rooms: {len(data.get('rooms') or [])}")
+                print(f"pending proposals: {len(data.get('pending_proposals') or [])}")
+                print(f"pending approvals: {len(data.get('pending_approvals') or [])}")
+                print(f"blocked assignments: {len(data.get('blocked_assignments') or [])}")
+                print()
+                print("Recommended actions:")
+                for line in data.get("recommended_actions") or []:
+                    print(f"  - {line}")
+            return
+        if args.command == "cookbook":
+            data = get_json(f"{base}/v1/cookbook")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                print("Workforce Cookbook")
+                for recipe in data.get("recipes") or []:
+                    workers = ", ".join(recipe.get("recommended_workers") or []) or "-"
+                    print(f"\n{recipe.get('name')}")
+                    print(f"  when: {recipe.get('when')}")
+                    print(f"  command: {recipe.get('command')}")
+                    print(f"  workers: {workers}")
+            return
+        if args.command == "arena":
+            if args.action == "run":
+                if not args.value:
+                    raise ValueError("arena run requires a prompt")
+                data = post_json(f"{base}/v1/arena-runs", {"prompt": args.value, "agents": args.agents or []})
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("arena show requires a run id")
+                data = get_json(f"{base}/v1/arena-runs/{urllib.parse.quote(args.value)}")
+            elif args.action == "judge":
+                if not args.value or not args.winner:
+                    raise ValueError("arena judge requires a run id and --winner")
+                data = post_json(
+                    f"{base}/v1/arena-runs/{urllib.parse.quote(args.value)}/judge",
+                    {"winner_agent": args.winner, "reason": args.reason, "actor": "operator"},
+                )
+            else:
+                data = get_json(f"{base}/v1/arena-runs?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                runs = data.get("arena_runs") if "arena_runs" in data else [data]
+                for run in runs:
+                    print(f"{run.get('arena_run_id')}  status={run.get('status')}  winner={run.get('winner_agent') or '-'}  agents={','.join(run.get('agents') or [])}")
+                    if run.get("prompt"):
+                        print(f"  prompt: {run.get('prompt')}")
+                    if run.get("judge_reason"):
+                        print(f"  judgement: {run.get('judge_reason')}")
+            return
+        if args.command == "research":
+            if args.action == "run":
+                if not args.value:
+                    raise ValueError("research run requires a question")
+                data = post_json(f"{base}/v1/research-runs", {"question": args.value, "agents": args.agents or [], "room": args.room})
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("research show requires a run id")
+                data = get_json(f"{base}/v1/research-runs/{urllib.parse.quote(args.value)}")
+            else:
+                data = get_json(f"{base}/v1/research-runs?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                runs = data.get("research_runs") if "research_runs" in data else [data]
+                for run in runs:
+                    print(f"{run.get('research_run_id')}  status={run.get('status')}  room=#{run.get('room_name') or '-'}  agents={','.join(run.get('agents') or [])}")
+                    print(f"  question: {run.get('question')}")
+                    if run.get("report") and args.action == "show":
+                        print(run.get("report"))
+            return
+        if args.command == "runbook":
+            if args.action == "create":
+                if not args.value:
+                    raise ValueError("runbook create requires a title")
+                data = post_json(f"{base}/v1/runbooks", {
+                    "title": args.value,
+                    "purpose": args.purpose,
+                    "steps": args.step,
+                    "owner": args.owner,
+                    "risk_level": args.risk,
+                })
+            elif args.action in {"approve", "reject", "apply"}:
+                if not args.value:
+                    raise ValueError(f"runbook {args.action} requires a runbook id")
+                data = post_json(f"{base}/v1/runbooks/{urllib.parse.quote(args.value)}/{args.action}", {"actor": "operator"})
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("runbook show requires a runbook id")
+                data = get_json(f"{base}/v1/runbooks/{urllib.parse.quote(args.value)}")
+            else:
+                data = get_json(f"{base}/v1/runbooks?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                items = data.get("runbooks") if "runbooks" in data else [data]
+                for item in items:
+                    print(f"{item.get('runbook_id')}  {item.get('status')}  {item.get('title')}")
+                    for step in item.get("steps") or []:
+                        print(f"  - {step}")
+            return
+        if args.command == "artifact":
+            if args.action == "create":
+                if not args.value:
+                    raise ValueError("artifact create requires a title")
+                data = post_json(f"{base}/v1/artifacts", {
+                    "title": args.value,
+                    "artifact_type": args.artifact_type,
+                    "body": args.body,
+                    "owner": args.owner,
+                })
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("artifact show requires an artifact id")
+                data = get_json(f"{base}/v1/artifacts/{urllib.parse.quote(args.value)}")
+            else:
+                data = get_json(f"{base}/v1/artifacts?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                items = data.get("artifacts") if "artifacts" in data else [data]
+                for item in items:
+                    print(f"{item.get('artifact_id')}  {item.get('status')}  {item.get('artifact_type')}  {item.get('title')}")
+                    if args.action == "show" and item.get("body"):
+                        print(item.get("body"))
+            return
+        if args.command == "evidence":
+            if args.action == "create":
+                if not args.value:
+                    raise ValueError("evidence create requires a title")
+                data = post_json(f"{base}/v1/evidence", {
+                    "title": args.value,
+                    "uri": args.uri,
+                    "summary": args.summary,
+                    "source_type": args.source_type,
+                    "linked_object_type": args.link_type,
+                    "linked_object_id": args.link_id,
+                })
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("evidence show requires an evidence id")
+                data = get_json(f"{base}/v1/evidence/{urllib.parse.quote(args.value)}")
+            else:
+                data = get_json(f"{base}/v1/evidence?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                items = data.get("evidence") if "evidence" in data else [data]
+                for item in items:
+                    print(f"{item.get('evidence_id')}  {item.get('source_type')}  {item.get('title')}")
+                    if item.get("uri"):
+                        print(f"  uri: {item.get('uri')}")
+                    if item.get("summary"):
+                        print(f"  summary: {item.get('summary')}")
+            return
+        if args.command == "approval":
+            if args.action == "request":
+                if not args.value:
+                    raise ValueError("approval request requires a title")
+                data = post_json(f"{base}/v1/approvals", {
+                    "title": args.value,
+                    "approval_type": args.approval_type,
+                    "reason": args.reason,
+                    "requested_by": "operator",
+                })
+            elif args.action in {"approve", "reject"}:
+                if not args.value:
+                    raise ValueError(f"approval {args.action} requires an approval id")
+                data = post_json(f"{base}/v1/approvals/{urllib.parse.quote(args.value)}/{args.action}", {"actor": "operator"})
+            elif args.action == "show":
+                if not args.value:
+                    raise ValueError("approval show requires an approval id")
+                data = get_json(f"{base}/v1/approvals/{urllib.parse.quote(args.value)}")
+            else:
+                data = get_json(f"{base}/v1/approvals?limit={args.limit}")
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
+                items = data.get("approvals") if "approvals" in data else [data]
+                for item in items:
+                    print(f"{item.get('approval_id')}  {item.get('status')}  {item.get('title')}")
+                    if item.get("reason"):
+                        print(f"  reason: {item.get('reason')}")
             return
         if args.command == "incident":
             data = get_json(f"{base}/v1/incident/latest")

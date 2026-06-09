@@ -90,6 +90,107 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/workforce/health":
             self._send(HTTPStatus.OK, self.fabric.storage.workforce_summary())
             return
+        if path == "/v1/briefing":
+            self._send(HTTPStatus.OK, self.fabric.storage.operator_briefing())
+            return
+        if path == "/v1/cookbook":
+            self._send(HTTPStatus.OK, self.fabric.storage.workforce_cookbook())
+            return
+        if path == "/v1/arena-runs":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, {"arena_runs": self.fabric.storage.list_arena_runs(limit=limit)})
+            return
+        m = re.fullmatch(r"/v1/arena-runs/([^/]+)", path)
+        if m:
+            arena_run_id = unquote(m.group(1))
+            run = self.fabric.storage.get_arena_run(arena_run_id)
+            if not run:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"arena run not found: {arena_run_id}"})
+                return
+            self._send(HTTPStatus.OK, run)
+            return
+        if path == "/v1/research-runs":
+            qs = parse_qs(parsed.query)
+            limit = int(qs.get("limit", [50])[0])
+            self._send(HTTPStatus.OK, {"research_runs": self.fabric.storage.list_research_runs(limit=limit)})
+            return
+        m = re.fullmatch(r"/v1/research-runs/([^/]+)", path)
+        if m:
+            research_run_id = unquote(m.group(1))
+            run = self.fabric.storage.get_research_run(research_run_id)
+            if not run:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"research run not found: {research_run_id}"})
+                return
+            self._send(HTTPStatus.OK, run)
+            return
+        if path == "/v1/runbooks":
+            qs = parse_qs(parsed.query)
+            self._send(HTTPStatus.OK, {
+                "runbooks": self.fabric.storage.list_runbooks(
+                    status=qs.get("status", [None])[0],
+                    limit=int(qs.get("limit", [50])[0]),
+                )
+            })
+            return
+        m = re.fullmatch(r"/v1/runbooks/([^/]+)", path)
+        if m:
+            runbook_id = unquote(m.group(1))
+            runbook = self.fabric.storage.get_runbook(runbook_id)
+            if not runbook:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"runbook not found: {runbook_id}"})
+                return
+            self._send(HTTPStatus.OK, runbook)
+            return
+        if path == "/v1/artifacts":
+            qs = parse_qs(parsed.query)
+            self._send(HTTPStatus.OK, {
+                "artifacts": self.fabric.storage.list_artifacts(
+                    status=qs.get("status", [None])[0],
+                    limit=int(qs.get("limit", [50])[0]),
+                )
+            })
+            return
+        m = re.fullmatch(r"/v1/artifacts/([^/]+)", path)
+        if m:
+            artifact_id = unquote(m.group(1))
+            artifact = self.fabric.storage.get_artifact(artifact_id)
+            if not artifact:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"artifact not found: {artifact_id}"})
+                return
+            self._send(HTTPStatus.OK, artifact)
+            return
+        if path == "/v1/evidence":
+            qs = parse_qs(parsed.query)
+            self._send(HTTPStatus.OK, {"evidence": self.fabric.storage.list_evidence(limit=int(qs.get("limit", [50])[0]))})
+            return
+        m = re.fullmatch(r"/v1/evidence/([^/]+)", path)
+        if m:
+            evidence_id = unquote(m.group(1))
+            evidence = self.fabric.storage.get_evidence(evidence_id)
+            if not evidence:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"evidence not found: {evidence_id}"})
+                return
+            self._send(HTTPStatus.OK, evidence)
+            return
+        if path == "/v1/approvals":
+            qs = parse_qs(parsed.query)
+            self._send(HTTPStatus.OK, {
+                "approvals": self.fabric.storage.list_approvals(
+                    status=qs.get("status", [None])[0],
+                    limit=int(qs.get("limit", [50])[0]),
+                )
+            })
+            return
+        m = re.fullmatch(r"/v1/approvals/([^/]+)", path)
+        if m:
+            approval_id = unquote(m.group(1))
+            approval = self.fabric.storage.get_approval(approval_id)
+            if not approval:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"approval not found: {approval_id}"})
+                return
+            self._send(HTTPStatus.OK, approval)
+            return
         m = re.fullmatch(r"/v1/workforce/([^/]+)/assignments", path)
         if m:
             worker_id = unquote(m.group(1))
@@ -830,6 +931,254 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._send(HTTPStatus.OK, result)
+            return
+
+        if path == "/v1/arena-runs":
+            try:
+                payload = self._read_json()
+                prompt = str(payload.get("prompt", "")).strip()
+                if not prompt:
+                    raise ValueError("prompt required")
+                agents = payload.get("agents") or []
+                if not isinstance(agents, list) or not all(isinstance(agent, str) for agent in agents):
+                    raise ValueError("agents must be a list of worker ids")
+                if not agents:
+                    agents = [
+                        item.get("adapter_id")
+                        for item in self.fabric.list_agents()
+                        if item.get("enabled", True) and item.get("adapter_id")
+                    ]
+                if not agents:
+                    raise ValueError("no workers available for arena run")
+                arena_run_id = str(payload.get("arena_run_id") or payload.get("id") or new_id()).strip()
+                self.fabric.storage.create_arena_run(arena_run_id, prompt, agents)
+                deliveries = []
+                for agent in agents:
+                    result = self.fabric.dispatch({
+                        "source": "arena",
+                        "target": agent,
+                        "body": prompt,
+                        "metadata": {"arena_run_id": arena_run_id, "phase": "arena"},
+                    })
+                    deliveries.extend(result.get("deliveries") or [])
+                ok_deliveries = [item for item in deliveries if item.get("ok")]
+                winner = str(payload.get("winner_agent") or (ok_deliveries[0].get("adapter_id") if ok_deliveries else "") or "")
+                reason = "first successful delivery; use /v1/arena-runs/{id}/judge to override" if winner else "no successful deliveries"
+                run = self.fabric.storage.update_arena_run(
+                    arena_run_id,
+                    status="completed" if ok_deliveries else "failed",
+                    winner_agent=winner,
+                    judge_reason=reason,
+                    result={"deliveries": deliveries},
+                    completed_at=_utc_now_iso(),
+                )
+                self.fabric.storage.record_arena_event(arena_run_id, "completed", "arena", {"winner_agent": winner})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, run or {})
+            return
+
+        m = re.fullmatch(r"/v1/arena-runs/([^/]+)/judge", path)
+        if m:
+            arena_run_id = unquote(m.group(1))
+            try:
+                payload = self._read_json()
+                winner = str(payload.get("winner_agent") or "").strip()
+                reason = str(payload.get("reason") or payload.get("judge_reason") or "").strip()
+                if not winner:
+                    raise ValueError("winner_agent required")
+                run = self.fabric.storage.update_arena_run(
+                    arena_run_id,
+                    status="judged",
+                    winner_agent=winner,
+                    judge_reason=reason,
+                    completed_at=_utc_now_iso(),
+                )
+                if not run:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"arena run not found: {arena_run_id}"})
+                    return
+                self.fabric.storage.record_arena_event(arena_run_id, "judged", str(payload.get("actor", "operator")), {"winner_agent": winner, "reason": reason})
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, run)
+            return
+
+        if path == "/v1/research-runs":
+            try:
+                payload = self._read_json()
+                question = str(payload.get("question") or payload.get("prompt") or "").strip()
+                if not question:
+                    raise ValueError("question required")
+                agents = payload.get("agents") or []
+                if not isinstance(agents, list) or not all(isinstance(agent, str) for agent in agents):
+                    raise ValueError("agents must be a list of worker ids")
+                if not agents:
+                    agents = [
+                        item.get("adapter_id")
+                        for item in self.fabric.list_agents()
+                        if item.get("enabled", True) and item.get("adapter_id")
+                    ][:4]
+                if not agents:
+                    raise ValueError("no workers available for research run")
+                research_run_id = str(payload.get("research_run_id") or payload.get("id") or new_id()).strip()
+                room = str(payload.get("room") or payload.get("room_name") or f"research-{research_run_id[:8]}").strip().lower()
+                if not _ROOM_NAME_RE.match(room):
+                    raise ValueError("room name must be lowercase alphanumeric (- and _ allowed), max 63 chars")
+                if not self.fabric.storage.room_exists(room):
+                    self.fabric.storage.create_room(room, f"Research: {question[:80]}", _utc_now_iso(), members=agents)
+                else:
+                    for agent in agents:
+                        self.fabric.add_room_member(room, agent, actor="research")
+                self.fabric.storage.create_research_run(research_run_id, question, room_name=room, agents=agents)
+                result = self.fabric.dispatch({
+                    "source": "research",
+                    "target": f"room:{room}",
+                    "body": f"Research question:\n{question}\n\nReturn evidence, risks, and a concise recommendation.",
+                    "metadata": {"research_run_id": research_run_id, "phase": "research"},
+                })
+                deliveries = result.get("deliveries") or []
+                report_lines = [f"# Research: {question}", ""]
+                for delivery in deliveries:
+                    report_lines.append(f"## {delivery.get('adapter_id')}")
+                    report_lines.append(delivery.get("body") or delivery.get("error") or "(no response)")
+                    report_lines.append("")
+                run = self.fabric.storage.update_research_run(
+                    research_run_id,
+                    status="completed" if any(item.get("ok") for item in deliveries) else "failed",
+                    report="\n".join(report_lines).strip(),
+                    result={"dispatch": result},
+                    completed_at=_utc_now_iso(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, run or {})
+            return
+
+        if path == "/v1/runbooks":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                steps = payload.get("steps") or []
+                if isinstance(steps, str):
+                    steps = [line.strip() for line in steps.splitlines() if line.strip()]
+                if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
+                    raise ValueError("steps must be a list of strings")
+                runbook = self.fabric.storage.create_runbook(
+                    str(payload.get("runbook_id") or payload.get("id") or new_id()),
+                    title,
+                    purpose=str(payload.get("purpose", "")).strip(),
+                    steps=steps,
+                    status=str(payload.get("status", "draft")).strip() or "draft",
+                    owner=str(payload.get("owner", "")).strip(),
+                    risk_level=str(payload.get("risk_level", "medium")).strip() or "medium",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, runbook)
+            return
+
+        m = re.fullmatch(r"/v1/runbooks/([^/]+)/(approve|reject|apply)", path)
+        if m:
+            runbook_id = unquote(m.group(1))
+            action = m.group(2)
+            status = {"approve": "approved", "reject": "rejected", "apply": "applied"}[action]
+            runbook = self.fabric.storage.update_runbook_status(runbook_id, status)
+            if not runbook:
+                self._send(HTTPStatus.NOT_FOUND, {"error": f"runbook not found: {runbook_id}"})
+                return
+            self._send(HTTPStatus.OK, runbook)
+            return
+
+        if path == "/v1/artifacts":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                artifact = self.fabric.storage.create_artifact(
+                    str(payload.get("artifact_id") or payload.get("id") or new_id()),
+                    title,
+                    artifact_type=str(payload.get("artifact_type") or payload.get("type") or "note").strip() or "note",
+                    body=str(payload.get("body", "")),
+                    status=str(payload.get("status", "draft")).strip() or "draft",
+                    owner=str(payload.get("owner", "")).strip(),
+                    source=payload.get("source") if isinstance(payload.get("source"), dict) else {},
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, artifact)
+            return
+
+        if path == "/v1/evidence":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                evidence = self.fabric.storage.create_evidence(
+                    str(payload.get("evidence_id") or payload.get("id") or new_id()),
+                    title,
+                    uri=str(payload.get("uri", "")).strip(),
+                    summary=str(payload.get("summary", "")).strip(),
+                    source_type=str(payload.get("source_type", "manual")).strip() or "manual",
+                    linked_object_type=str(payload.get("linked_object_type", "")).strip(),
+                    linked_object_id=str(payload.get("linked_object_id", "")).strip(),
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, evidence)
+            return
+
+        if path == "/v1/approvals":
+            try:
+                payload = self._read_json()
+                title = str(payload.get("title", "")).strip()
+                if not title:
+                    raise ValueError("title required")
+                approval = self.fabric.storage.create_approval(
+                    str(payload.get("approval_id") or payload.get("id") or new_id()),
+                    title,
+                    approval_type=str(payload.get("approval_type") or payload.get("type") or "operator").strip() or "operator",
+                    requested_by=str(payload.get("requested_by", "operator")).strip() or "operator",
+                    reason=str(payload.get("reason", "")).strip(),
+                    linked_object_type=str(payload.get("linked_object_type", "")).strip(),
+                    linked_object_id=str(payload.get("linked_object_id", "")).strip(),
+                    payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, approval)
+            return
+
+        m = re.fullmatch(r"/v1/approvals/([^/]+)/(approve|reject)", path)
+        if m:
+            approval_id = unquote(m.group(1))
+            action = m.group(2)
+            try:
+                payload = self._read_json()
+                approval = self.fabric.storage.resolve_approval(
+                    approval_id,
+                    "approved" if action == "approve" else "rejected",
+                    str(payload.get("actor", "operator")).strip() or "operator",
+                )
+                if not approval:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": f"approval not found: {approval_id}"})
+                    return
+            except Exception as exc:  # noqa: BLE001
+                self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send(HTTPStatus.OK, approval)
             return
 
         if path == "/v1/assignments":

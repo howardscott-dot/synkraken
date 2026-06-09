@@ -743,6 +743,106 @@ CREATE INDEX IF NOT EXISTS idx_proposals_goal ON proposals(goal_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_proposal_events_proposal ON proposal_events(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_proposal_events_created ON proposal_events(created_at);
+
+CREATE TABLE IF NOT EXISTS arena_runs (
+    arena_run_id TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    agents_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    winner_agent TEXT,
+    judge_reason TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS arena_events (
+    event_id TEXT PRIMARY KEY,
+    arena_run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(arena_run_id) REFERENCES arena_runs(arena_run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS research_runs (
+    research_run_id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    room_name TEXT NOT NULL DEFAULT '',
+    agents_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    report TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS runbooks (
+    runbook_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    approved_at TEXT,
+    applied_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artifact_type TEXT NOT NULL DEFAULT 'note',
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    owner TEXT NOT NULL DEFAULT '',
+    source_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_files (
+    evidence_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    uri TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    source_type TEXT NOT NULL DEFAULT 'manual',
+    linked_object_type TEXT NOT NULL DEFAULT '',
+    linked_object_id TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    approval_type TEXT NOT NULL DEFAULT 'operator',
+    status TEXT NOT NULL,
+    requested_by TEXT NOT NULL DEFAULT 'operator',
+    resolved_by TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    linked_object_type TEXT NOT NULL DEFAULT '',
+    linked_object_id TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_arena_runs_created ON arena_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_arena_events_run ON arena_events(arena_run_id);
+CREATE INDEX IF NOT EXISTS idx_research_runs_created ON research_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runbooks_status ON runbooks(status);
+CREATE INDEX IF NOT EXISTS idx_artifacts_status ON artifacts(status);
+CREATE INDEX IF NOT EXISTS idx_evidence_link ON evidence_files(linked_object_type, linked_object_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+CREATE INDEX IF NOT EXISTS idx_approvals_link ON approvals(linked_object_type, linked_object_id);
 """
 
 
@@ -6686,6 +6786,421 @@ class Storage:
                 (handoff["id"],),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── phase 4 operator primitives ────────────────────────────────────────
+
+    def _json_value(self, value: str | None, fallback):
+        try:
+            return json.loads(value or "")
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    def _phase4_row(self, row: sqlite3.Row | None, json_fields: dict[str, object]) -> dict | None:
+        if row is None:
+            return None
+        data = dict(row)
+        for field, fallback in json_fields.items():
+            data[field[:-5] if field.endswith("_json") else field] = self._json_value(data.pop(field, None), fallback)
+        return data
+
+    def create_arena_run(
+        self,
+        arena_run_id: str,
+        prompt: str,
+        agents: list[str],
+        *,
+        status: str = "running",
+        result: dict | None = None,
+        created_at: str | None = None,
+    ) -> dict:
+        now = created_at or utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO arena_runs (
+                    arena_run_id, prompt, agents_json, status, result_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (arena_run_id, prompt, json.dumps(agents), status, json.dumps(result or {}), now, now),
+            )
+        self.record_arena_event(arena_run_id, "created", "operator", {"agents": agents})
+        return self.get_arena_run(arena_run_id) or {}
+
+    def get_arena_run(self, arena_run_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM arena_runs WHERE arena_run_id = ?", (arena_run_id,)).fetchone()
+        return self._phase4_row(row, {"agents_json": [], "result_json": {}})
+
+    def list_arena_runs(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM arena_runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._phase4_row(row, {"agents_json": [], "result_json": {}}) or {} for row in rows]
+
+    def update_arena_run(
+        self,
+        arena_run_id: str,
+        *,
+        status: str | None = None,
+        winner_agent: str | None = None,
+        judge_reason: str | None = None,
+        result: dict | None = None,
+        completed_at: str | None = None,
+    ) -> dict | None:
+        updates = {"updated_at": utc_now_iso()}
+        if status is not None:
+            updates["status"] = status
+        if winner_agent is not None:
+            updates["winner_agent"] = winner_agent
+        if judge_reason is not None:
+            updates["judge_reason"] = judge_reason
+        if result is not None:
+            updates["result_json"] = json.dumps(result)
+        if completed_at is not None:
+            updates["completed_at"] = completed_at
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        with self._lock, self._conn:
+            changed = self._conn.execute(
+                f"UPDATE arena_runs SET {set_clause} WHERE arena_run_id = ?",
+                [*updates.values(), arena_run_id],
+            ).rowcount
+        return self.get_arena_run(arena_run_id) if changed else None
+
+    def record_arena_event(self, arena_run_id: str, event_type: str, actor: str, details: dict | None = None) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO arena_events (event_id, arena_run_id, event_type, actor, details_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), arena_run_id, event_type, actor, json.dumps(details or {}), utc_now_iso()),
+            )
+
+    def create_research_run(
+        self,
+        research_run_id: str,
+        question: str,
+        *,
+        room_name: str = "",
+        agents: list[str] | None = None,
+        status: str = "running",
+    ) -> dict:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO research_runs (
+                    research_run_id, question, room_name, agents_json, status,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (research_run_id, question, room_name, json.dumps(agents or []), status, now, now),
+            )
+        return self.get_research_run(research_run_id) or {}
+
+    def get_research_run(self, research_run_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM research_runs WHERE research_run_id = ?", (research_run_id,)).fetchone()
+        return self._phase4_row(row, {"agents_json": [], "result_json": {}})
+
+    def list_research_runs(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM research_runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._phase4_row(row, {"agents_json": [], "result_json": {}}) or {} for row in rows]
+
+    def update_research_run(
+        self,
+        research_run_id: str,
+        *,
+        status: str,
+        report: str = "",
+        result: dict | None = None,
+        completed_at: str | None = None,
+    ) -> dict | None:
+        updates = {
+            "status": status,
+            "report": report,
+            "result_json": json.dumps(result or {}),
+            "updated_at": utc_now_iso(),
+            "completed_at": completed_at,
+        }
+        with self._lock, self._conn:
+            changed = self._conn.execute(
+                """
+                UPDATE research_runs
+                SET status = ?, report = ?, result_json = ?, updated_at = ?, completed_at = ?
+                WHERE research_run_id = ?
+                """,
+                (*updates.values(), research_run_id),
+            ).rowcount
+        return self.get_research_run(research_run_id) if changed else None
+
+    def create_runbook(
+        self,
+        runbook_id: str,
+        title: str,
+        *,
+        purpose: str = "",
+        steps: list[str] | None = None,
+        status: str = "draft",
+        owner: str = "",
+        risk_level: str = "medium",
+    ) -> dict:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO runbooks (
+                    runbook_id, title, purpose, steps_json, status, owner,
+                    risk_level, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (runbook_id, title, purpose, json.dumps(steps or []), status, owner, risk_level, now, now),
+            )
+        return self.get_runbook(runbook_id) or {}
+
+    def get_runbook(self, runbook_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM runbooks WHERE runbook_id = ?", (runbook_id,)).fetchone()
+        return self._phase4_row(row, {"steps_json": []})
+
+    def list_runbooks(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM runbooks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT * FROM runbooks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [self._phase4_row(row, {"steps_json": []}) or {} for row in rows]
+
+    def update_runbook_status(self, runbook_id: str, status: str) -> dict | None:
+        now = utc_now_iso()
+        extra = ""
+        values: list[str] = [status, now]
+        if status == "approved":
+            extra = ", approved_at = ?"
+            values.append(now)
+        elif status == "applied":
+            extra = ", applied_at = ?"
+            values.append(now)
+        values.append(runbook_id)
+        with self._lock, self._conn:
+            changed = self._conn.execute(
+                f"UPDATE runbooks SET status = ?, updated_at = ?{extra} WHERE runbook_id = ?",
+                values,
+            ).rowcount
+        return self.get_runbook(runbook_id) if changed else None
+
+    def create_artifact(
+        self,
+        artifact_id: str,
+        title: str,
+        *,
+        artifact_type: str = "note",
+        body: str = "",
+        status: str = "draft",
+        owner: str = "",
+        source: dict | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, title, artifact_type, body, status, owner,
+                    source_json, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (artifact_id, title, artifact_type, body, status, owner, json.dumps(source or {}), json.dumps(metadata or {}), now, now),
+            )
+        return self.get_artifact(artifact_id) or {}
+
+    def get_artifact(self, artifact_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
+        return self._phase4_row(row, {"source_json": {}, "metadata_json": {}})
+
+    def list_artifacts(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM artifacts WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT * FROM artifacts ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [self._phase4_row(row, {"source_json": {}, "metadata_json": {}}) or {} for row in rows]
+
+    def create_evidence(
+        self,
+        evidence_id: str,
+        title: str,
+        *,
+        uri: str = "",
+        summary: str = "",
+        source_type: str = "manual",
+        linked_object_type: str = "",
+        linked_object_id: str = "",
+        metadata: dict | None = None,
+    ) -> dict:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO evidence_files (
+                    evidence_id, title, uri, summary, source_type, linked_object_type,
+                    linked_object_id, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (evidence_id, title, uri, summary, source_type, linked_object_type, linked_object_id, json.dumps(metadata or {}), utc_now_iso()),
+            )
+        return self.get_evidence(evidence_id) or {}
+
+    def get_evidence(self, evidence_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM evidence_files WHERE evidence_id = ?", (evidence_id,)).fetchone()
+        return self._phase4_row(row, {"metadata_json": {}})
+
+    def list_evidence(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM evidence_files ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [self._phase4_row(row, {"metadata_json": {}}) or {} for row in rows]
+
+    def create_approval(
+        self,
+        approval_id: str,
+        title: str,
+        *,
+        approval_type: str = "operator",
+        requested_by: str = "operator",
+        reason: str = "",
+        linked_object_type: str = "",
+        linked_object_id: str = "",
+        payload: dict | None = None,
+    ) -> dict:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id, title, approval_type, status, requested_by, reason,
+                    linked_object_type, linked_object_id, payload_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (approval_id, title, approval_type, requested_by, reason, linked_object_type, linked_object_id, json.dumps(payload or {}), now, now),
+            )
+        return self.get_approval(approval_id) or {}
+
+    def get_approval(self, approval_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM approvals WHERE approval_id = ?", (approval_id,)).fetchone()
+        return self._phase4_row(row, {"payload_json": {}})
+
+    def list_approvals(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT * FROM approvals ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [self._phase4_row(row, {"payload_json": {}}) or {} for row in rows]
+
+    def resolve_approval(self, approval_id: str, status: str, actor: str) -> dict | None:
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            changed = self._conn.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_by = ?, updated_at = ?, resolved_at = ?
+                WHERE approval_id = ?
+                """,
+                (status, actor, now, now, approval_id),
+            ).rowcount
+        return self.get_approval(approval_id) if changed else None
+
+    def operator_briefing(self) -> dict:
+        agents = self.list_agents()
+        rooms = self.list_rooms()
+        missions = self.list_missions(limit=20)
+        assignments = self.list_assignments(limit=50)
+        proposals = self.list_proposals(status="proposed", limit=20)
+        approvals = self.list_approvals(status="pending", limit=20)
+        dead_letters = self.list_dead_letters(limit=10).get("dead_letters", [])
+        blocked_assignments = [item for item in assignments if item.get("status") == "blocked"]
+        waiting_assignments = [item for item in assignments if item.get("status") in {"waiting", "handoff", "review"}]
+        actions = []
+        for proposal in proposals[:5]:
+            actions.append(f"Review proposal {proposal.get('proposal_id')}: {proposal.get('title')}")
+        for approval in approvals[:5]:
+            actions.append(f"Resolve approval {approval.get('approval_id')}: {approval.get('title')}")
+        for assignment in blocked_assignments[:5]:
+            actions.append(f"Unblock assignment {assignment.get('assignment_id')}: {assignment.get('title')}")
+        if dead_letters:
+            actions.append(f"Inspect {len(dead_letters)} recent dead letter(s)")
+        if not actions:
+            actions.append("No urgent operator action recorded")
+        return {
+            "generated_at": utc_now_iso(),
+            "workforce": {
+                "agents_total": len(agents),
+                "agents_online": len([item for item in agents if item.get("status") == "online"]),
+            },
+            "rooms": rooms,
+            "missions": missions,
+            "assignments": assignments[:20],
+            "pending_proposals": proposals,
+            "pending_approvals": approvals,
+            "blocked_assignments": blocked_assignments,
+            "waiting_assignments": waiting_assignments,
+            "dead_letters": dead_letters,
+            "recommended_actions": actions[:10],
+        }
+
+    def workforce_cookbook(self) -> dict:
+        agents = self.list_agents()
+        recipes = [
+            {
+                "name": "fast-direct-answer",
+                "when": "A single concise answer is enough",
+                "command": "synkraken send <worker> \"<message>\"",
+                "recommended_workers": [item.get("adapter_id") for item in agents if item.get("enabled", True)][:3],
+            },
+            {
+                "name": "compare-workers",
+                "when": "You want multiple agents to answer the same prompt",
+                "command": "synkraken arena run \"<prompt>\" --agents <worker> <worker>",
+                "recommended_workers": [item.get("adapter_id") for item in agents if item.get("enabled", True)][:4],
+            },
+            {
+                "name": "room-research",
+                "when": "You want a persistent multi-agent transcript",
+                "command": "synkraken research run \"<question>\" --agents <worker> <worker>",
+                "recommended_workers": [item.get("adapter_id") for item in agents if "research" in (item.get("capabilities") or [])][:4],
+            },
+            {
+                "name": "approval-gated-action",
+                "when": "The next step changes files, runs shell, restarts services, or deletes data",
+                "command": "synkraken approval request \"<title>\" --reason \"<why>\"",
+                "recommended_workers": [],
+            },
+        ]
+        return {"generated_at": utc_now_iso(), "workers": agents, "recipes": recipes}
 
     # ── projects ────────────────────────────────────────────────────────────
 
