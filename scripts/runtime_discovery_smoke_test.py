@@ -157,8 +157,8 @@ def test_remote_discovery_preserves_ssh_config(tmp: Path) -> None:
         )
 
     by_id = {runtime["runtime_id"]: runtime for runtime in runtimes}
-    assert set(by_id) == {"claude", "goose", "openclaw-main"}
-    assert by_id["openclaw-main"]["command"] == ["/home/operator/.nvm/versions/node/v24.15.0/bin/openclaw"]
+    assert set(by_id) == {"claude", "goose", "openclaw"}
+    assert by_id["openclaw"]["command"] == ["/home/operator/.nvm/versions/node/v24.15.0/bin/openclaw"]
     assert by_id["goose"]["remote_host"] == "agent-box.local"
     assert by_id["goose"]["remote_user"] == "operator"
     assert by_id["goose"]["remote_port"] == 2222
@@ -170,7 +170,7 @@ def test_remote_discovery_preserves_ssh_config(tmp: Path) -> None:
 
     merged, _summary = merge_discovered_config({"adapters": {}, "runtime_registry": {}}, runtimes, behaviour="replace")
     goose = merged["adapters"]["goose"]
-    openclaw = merged["adapters"]["openclaw-main"]
+    openclaw = merged["adapters"]["openclaw"]
     assert goose["remote_host"] == "agent-box.local"
     assert goose["remote_user"] == "operator"
     assert goose["remote_working_dir"] == "/workspace/project"

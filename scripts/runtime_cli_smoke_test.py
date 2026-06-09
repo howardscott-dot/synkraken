@@ -35,6 +35,29 @@ def run_cli(argv: list[str]) -> tuple[int, str]:
 def main() -> None:
     parser = cli_main.build_parser()
     assert parser.parse_args(["runtimes"]).command == "runtimes"
+    config_args = parser.parse_args(["config"])
+    configure_args = parser.parse_args(["configure"])
+    assert config_args.command == "config"
+    assert configure_args.command == "config"
+    configure_remote_args = parser.parse_args([
+        "configure",
+        "--remote",
+        "agent-box.local",
+        "--remote-user",
+        "operator",
+        "--remote-port",
+        "2222",
+        "--remote-working-dir",
+        "/workspace/project",
+        "--remote-path",
+        "/opt/agents/bin",
+    ])
+    assert configure_remote_args.command == "config"
+    assert configure_remote_args.remote == "agent-box.local"
+    assert configure_remote_args.remote_user == "operator"
+    assert configure_remote_args.remote_port == 2222
+    assert configure_remote_args.remote_working_dir == "/workspace/project"
+    assert configure_remote_args.remote_path == ["/opt/agents/bin"]
     runtime_args = parser.parse_args(["runtime", "codex"])
     assert runtime_args.command == "runtime"
     assert runtime_args.runtime_args == ["codex"]
@@ -67,6 +90,41 @@ def main() -> None:
                 }
             raise AssertionError(f"unexpected URL: {url}")
 
+        original_run_setup = cli_main.run_setup
+
+        setup_calls: list[dict] = []
+
+        def fake_run_setup(**kwargs) -> None:
+            setup_calls.append(kwargs)
+
+        cli_main.run_setup = fake_run_setup
+        code, _output = run_cli(["configure"])
+        assert code == 0
+        assert setup_calls[-1]["prompt_discovery"] is True
+        assert setup_calls[-1]["remote_host"] is None
+
+        code, _output = run_cli([
+            "configure",
+            "--remote",
+            "agent-box.local",
+            "--remote-user",
+            "operator",
+            "--remote-port",
+            "2222",
+            "--remote-working-dir",
+            "/workspace/project",
+            "--remote-path",
+            "/opt/agents/bin",
+        ])
+        assert code == 0
+        assert setup_calls[-1]["prompt_discovery"] is False
+        assert setup_calls[-1]["remote_host"] == "agent-box.local"
+        assert setup_calls[-1]["remote_user"] == "operator"
+        assert setup_calls[-1]["remote_port"] == 2222
+        assert setup_calls[-1]["remote_working_dir"] == "/workspace/project"
+        assert setup_calls[-1]["remote_path"] == ["/opt/agents/bin"]
+
+        cli_main.run_setup = original_run_setup
         cli_main.get_json = fake_get_json
         code, output = run_cli(["runtime", "doctor"])
         assert code == 0
@@ -129,6 +187,7 @@ def main() -> None:
     finally:
         os.chdir(original_cwd)
         cli_main.get_json = original_get_json
+        cli_main.run_setup = original_run_setup
 
     print("runtime CLI smoke test: ok")
 

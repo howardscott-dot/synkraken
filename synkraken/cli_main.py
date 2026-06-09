@@ -924,7 +924,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_discover.add_argument("--verbose", action="store_true", help="Print full command paths and probe output")
     add_remote_discovery_args(p_discover)
 
-    p_config = sub.add_parser("config", help="Interactive setup: detect runtimes, install the bridge skill, create config.local.json")
+    p_config = sub.add_parser(
+        "config",
+        aliases=["configure"],
+        help="Interactive setup: detect local or SSH runtimes, install the bridge skill, create config.local.json",
+    )
+    p_config.set_defaults(command="config")
     p_config.add_argument("--rediscover", action="store_true", help="Rescan runtimes and merge them into config.local.json")
     p_config.add_argument("--install-skills", action="store_true", help="Install bridge skills for configured workers")
     add_remote_discovery_args(p_config)
@@ -1026,7 +1031,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _print_no_command() -> None:
     print("SYNKRAKEN needs a command.\n")
     print("First-time setup:")
-    print("  synkraken config            # configure workers")
+    print("  synkraken config            # configure local or SSH workers")
+    print("  synkraken configure         # same as synkraken config")
     print("  synkraken install           # install and start SynKraken\n")
     print("Day-to-day:")
     print("  synkraken start             # start SynKraken")
