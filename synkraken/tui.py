@@ -1975,8 +1975,26 @@ def _delivery_summary_label(deliveries: list[dict]) -> str:
     )
 
 
+def _pending_room_name(pending: dict) -> str:
+    target = str(pending.get('target') or '')
+    if target.startswith('room:'):
+        return target.split(':', 1)[1].lstrip('#').lower()
+    metadata = pending.get('metadata') or {}
+    if isinstance(metadata, dict):
+        room_context = str(metadata.get('room_context') or '')
+        if room_context.startswith('room:'):
+            return room_context.split(':', 1)[1].lstrip('#').lower()
+    return ''
+
+
 def _merge_dispatch_result_into_room_transcript(base: str, room_name: str, result: dict) -> dict:
-    transcript = _handle_room_transcript(base, room_name)
+    try:
+        transcript = _handle_room_transcript(base, room_name)
+    except TuiHttpError as exc:
+        if exc.status == 404:
+            transcript = _room_error_result(room_name, _room_not_found_message(room_name))
+        else:
+            transcript = _room_error_result(room_name, f'Unable to load room transcript: {exc.detail}')
     deliveries = list(result.get('deliveries', []))
     dead_letters = list(result.get('dead_letters', []))
     transcript['deliveries'] = deliveries
@@ -3584,21 +3602,13 @@ def _main(stdscr, base_url: str | None = None):
                             _handle_history(base, cid) if cid else result,
                         )
                         state['chat_target'] = 'discussion'
-                    elif state.get('view') == 'chat' and state.get('current_room'):
-                        room_name = state['current_room']
+                    elif _pending_room_name(p):
+                        room_name = _pending_room_name(p)
                         state['command_result'] = (
                             f'#{room_name}',
                             _merge_dispatch_result_into_room_transcript(base, room_name, p.get('result') or {}),
                         )
                         state['chat_target'] = f'room:{room_name}'
-                    elif (state.get('view') == 'chat'
-                            and str(p.get('target', '')).startswith('room:')):
-                        room_name = str(p['target']).split(':', 1)[1]
-                        state['command_result'] = (
-                            f'#{room_name}',
-                            _merge_dispatch_result_into_room_transcript(base, room_name, p.get('result') or {}),
-                        )
-                        state['chat_target'] = p['target']
                     else:
                         state['command_result'] = (
                             p['label'],

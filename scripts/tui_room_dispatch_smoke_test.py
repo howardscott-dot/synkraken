@@ -103,6 +103,10 @@ def main() -> None:
         target, dashboard_body = tui._mention_route(targets[0], body, tui._chat_input_room_name(dashboard_state))
         assert target == "broadcast"
         assert dashboard_body == "Reply with your ID only."
+        assert tui._pending_room_name({"target": "broadcast", "metadata": {}}) == ""
+        assert tui._pending_room_name({"target": "crush", "metadata": {}}) == ""
+        assert tui._pending_room_name({"target": "room:stress1", "metadata": {}}) == "stress1"
+        assert tui._pending_room_name({"target": "crush", "metadata": {"room_context": "room:stress1"}}) == "stress1"
 
         chat_state = {"view": "chat", "current_room": "stress1", "chat_target": "room:stress1"}
         assert tui._chat_input_room_name(chat_state) == "stress1"
