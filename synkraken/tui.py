@@ -540,6 +540,22 @@ def _active_room_name(state: dict) -> str:
     return ''
 
 
+def _chat_input_room_name(state: dict) -> str:
+    if state.get('view') != 'chat':
+        return ''
+    target = str(state.get('chat_target') or '')
+    if target.startswith('room:'):
+        return target.split(':', 1)[1].lstrip('#').lower()
+    if state.get('current_room'):
+        return str(state['current_room']).lstrip('#').lower()
+    result = state.get('command_result')
+    if isinstance(result, tuple) and result:
+        label = str(result[0] or '')
+        if label.startswith('#'):
+            return label[1:].lower()
+    return ''
+
+
 def _time_ago(iso_str: str | None) -> str:
     if not iso_str:
         return ''
@@ -4135,8 +4151,9 @@ def _main(stdscr, base_url: str | None = None):
                         if len(targets_list) == 1:
                             t = targets_list[0]
                             metadata = None
+                            input_room = _chat_input_room_name(state)
                             if t == 'broadcast':
-                                t, body = _mention_route(t, body, state.get('current_room'))
+                                t, body = _mention_route(t, body, input_room)
                                 if t.startswith('room:'):
                                     try:
                                         enabled_members = set(_agent_ids(data))
@@ -4171,8 +4188,8 @@ def _main(stdscr, base_url: str | None = None):
                                         continue
                             elif body.startswith('--global '):
                                 body = body[len('--global '):].strip()
-                            elif state.get('current_room'):
-                                metadata = {'room_context': f"room:{state['current_room']}"}
+                            elif input_room:
+                                metadata = {'room_context': f"room:{input_room}"}
                             label = ('broadcast' if t == 'broadcast'
                                      else f'#{t.split(":", 1)[1]}' if t.startswith('room:')
                                      else f'@{t}')
@@ -4182,8 +4199,9 @@ def _main(stdscr, base_url: str | None = None):
                     continue
 
                 # ── in-room plain text → local room note ──────────────
-                if state.get('current_room') and raw and not raw.startswith(('/', '@', '#')):
-                    name = state['current_room']
+                input_room = _chat_input_room_name(state)
+                if input_room and raw and not raw.startswith(('/', '@', '#')):
+                    name = input_room
                     _start_async_room_note(state, base, name, raw)
                     continue
 

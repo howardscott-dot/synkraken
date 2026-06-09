@@ -98,6 +98,14 @@ def main() -> None:
         aliases = tui._mention_alias_map(data)
         targets, body = tui._parse_leading_mentions("@everyone Reply with your ID only.", aliases)
         assert targets == ["broadcast"]
+        dashboard_state = {"view": "dashboard", "current_room": "stress1"}
+        assert tui._chat_input_room_name(dashboard_state) == ""
+        target, dashboard_body = tui._mention_route(targets[0], body, tui._chat_input_room_name(dashboard_state))
+        assert target == "broadcast"
+        assert dashboard_body == "Reply with your ID only."
+
+        chat_state = {"view": "chat", "current_room": "stress1", "chat_target": "room:stress1"}
+        assert tui._chat_input_room_name(chat_state) == "stress1"
         target, body = tui._mention_route(targets[0], body, "stress1")
         assert target == "room:stress1"
         assert tui._room_member_ids("http://daemon", "stress1") == ["crush", "goose"]
