@@ -43,6 +43,19 @@ synkraken web
 synkraken config
 ```
 
+### Active operator surfaces
+
+The supported product surfaces are:
+
+- CLI
+- TUI
+- Web Command Deck
+- daemon API and future MCP-compliant tool surface
+
+The historical Tauri Console under `apps/console` is retired as an active
+surface. Do not add release-blocking console smoke tests, Console build steps,
+or new Console UI work unless explicitly reviving the prototype.
+
 ### Live integration test
 
 `scripts/live_integration_test.py` exercises a running local daemon through the
@@ -89,5 +102,7 @@ service is installed and restart coverage is desired.
 - [ ] Run `scripts/smoke_test.py`
 - [ ] Run `python3 scripts/live_integration_test.py --skip-restart`
 - [ ] Test TUI with all configured agents
+- [ ] Smoke-test Web Command Deck if web-facing routes changed
+- [ ] Smoke-test MCP tool surface when MCP routes/tools change
 - [ ] Verify docs are complete
 - [ ] Tag and push

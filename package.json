@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "console:dev": "npm --prefix apps/console run tauri dev",
-    "console:build": "npm --prefix apps/console run build"
+    "console:dev": "echo \"SynKraken Console is retired. Use: synkraken web\"",
+    "console:build": "echo \"SynKraken Console is retired and is not release-blocking.\""
   }
 }

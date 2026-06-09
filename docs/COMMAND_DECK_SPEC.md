@@ -3,21 +3,14 @@
 ## Purpose
 
 The Command Deck is the local Web GUI surface for SynKraken's AI Workforce
-Operating System. It complements the TUI and native Console; it does not
-replace either one.
+Operating System. It complements the TUI and CLI and is the official browser
+surface. The historical Tauri Console is retired as an active product surface;
+useful Console ideas should be folded into this Web Command Deck, the TUI, or
+daemon read models.
 
-SynKraken Console is a separate Tauri desktop client surface. It follows the
-same daemon-owned backend contract and visual direction. Console is the spatial
-operations console for workforce visibility, room operations, flight recorder
-investigation, proposal governance, incidents, dead letters, and
-command-palette navigation. Its canvas relationship lines and inspector jumps
-come from daemon-backed relationship records through `GET
-/v1/canvas/relationships`. Console does not replace the Web Command Deck and
-does not add a second backend.
+## Command Deck API Scope
 
-## Console v0.2 scope
-
-Console v0.2 consumes these daemon APIs:
+The Web Command Deck consumes daemon APIs such as:
 
 - `GET /health`
 - `GET /v1/agents`
@@ -41,11 +34,17 @@ Console v0.2 consumes these daemon APIs:
 - `GET /v1/incident/latest`
 - `GET /v1/dead-letters?limit=N`
 
-Console v0.2 must not read SQLite directly, mutate daemon-owned state outside
+The Web Command Deck must not read SQLite directly, mutate daemon-owned state outside
 existing APIs, add auth, add cloud features, add autonomous execution, or
 implement full memory, goal, team, decision, or handoff management.
 
-## Console v0.3 Operations Canvas scope
+## Retired Console Canvas Reference
+
+The following canvas notes are historical reference from the retired Console
+prototype. They are not active Command Deck scope unless deliberately rebuilt
+on daemon read models.
+
+## Operations Canvas scope
 
 Operations Canvas represents daemon-owned objects as movable node panels on a
 dark 24px dot-grid canvas. It uses React/TypeScript UI state only; Rust remains

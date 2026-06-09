@@ -1,5 +1,12 @@
 # UI Console Doctrine
 
+## Retired Prototype Doctrine
+
+This document is historical. The Tauri Console is retired as an active product
+surface. Its useful ideas should be harvested into daemon read models, the TUI,
+the Web Command Deck, or future MCP-compliant tools. See
+[`CONSOLE_RETIREMENT.md`](CONSOLE_RETIREMENT.md).
+
 SynKraken Console is the native desktop operations surface for the SynKraken
 daemon. It is a Tauri shell with React/TypeScript UI over daemon HTTP APIs.
 It does not own SQLite state, duplicate governance logic, or become a second

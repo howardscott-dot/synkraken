@@ -34,7 +34,7 @@ surfaces:
 
 ```text
              ┌─────────────────────────────────────────┐
-             │ TUI / Web Command Deck / Console desktop │
+             │ CLI / TUI / Web Command Deck / MCP tools │
              └───────────────────┬─────────────────────┘
                                  │ HTTP + SSE where used
                                  ▼
@@ -54,28 +54,10 @@ surfaces:
 The daemon remains the source of truth. Client surfaces render and invoke
 daemon-owned workforce concepts; they should not create parallel data models.
 
-Console adds the Spatial Operations Canvas as the desktop Console home. It is
-a React/TypeScript spatial operator surface over the same daemon APIs, not a
-second backend. Canvas nodes represent daemon-owned objects such as runtimes,
-rooms, proposals, traces, incidents, and dead letters. Canvas layout state is
-local UI state persisted in browser localStorage; durable business state,
-execution authority, governance, recovery, and trace data remain owned by the
-daemon. Rust remains limited to Tauri shell, packaging, native integration, and
-future native affordances.
-
-Console v0.4 extends that canvas with client-side inspector and focus controls.
-Those controls are still presentation and navigation state only: they create or
-focus local node panels and route operators to existing detail screens. They do
-not add daemon state, direct SQLite access, Rust business logic, or alternate
-execution authority.
-
-Console v0.5 introduces a daemon-owned canvas relationship read model exposed
-at `GET /v1/canvas/relationships`. The endpoint derives relationship records
-from persisted proposals, proposal links, rooms, dead letters, runtime
-reputation, and latest incident anchors. Console renders relationship lines and
-inspector jumps from these records instead of deriving production graph edges
-in the browser. The endpoint is a read model only; it does not create new
-workflow state or layout state.
+The historical Tauri Console and Spatial Operations Canvas under
+`apps/console` are retired prototype surfaces. Their useful ideas should be
+harvested into daemon read models, the TUI, Web Command Deck, or MCP-compliant
+tools. They are no longer release-blocking client architecture.
 
 Runtime discovery is a config-time control-plane action. It checks local
 executables, common binary directories, safe version output, and generic config
@@ -344,15 +326,6 @@ context, or industry assumptions.
 
 The TUI calls the daemon directly on `127.0.0.1:9460`.
 
-### Console Desktop
-
-SynKraken Console v0.1 lives in `apps/console`. It is a Tauri v2 desktop client
-using React, TypeScript, and Tailwind. It connects to the daemon HTTP API at
-`http://127.0.0.1:9460` by default and focuses on workforce health, proposals,
-proposal detail, trace inspection, latest incident context, dead letters, and
-command-palette navigation. It must not read or mutate SQLite directly, run a
-separate backend service, or duplicate daemon governance logic.
-
 ### Web Command Deck
 
 The web command deck runs on `127.0.0.1:9461` and serves:
@@ -366,6 +339,12 @@ the web UI reuse exactly the same backend contract as the TUI.
 
 The browser-facing proxy is a transport convenience, not a second domain API.
 The daemon contract remains authoritative.
+
+### MCP Tools
+
+MCP is the planned standards-compliant external tool surface. MCP tools should
+wrap daemon-owned operations and read models rather than bypassing the daemon,
+reading SQLite directly, or creating a second state model.
 
 ## Data flow
 

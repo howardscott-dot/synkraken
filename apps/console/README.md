@@ -1,5 +1,18 @@
 # SynKraken Console
 
+## Retired Prototype
+
+SynKraken Console is retired as an active product surface. The supported
+surfaces are now the daemon API, CLI, TUI, Web Command Deck, and future
+MCP-compliant tools.
+
+This directory remains as historical prototype/design reference only. Do not
+add new Console product features or make Console builds release-blocking
+without explicitly reversing the retirement decision. See
+[`../../docs/CONSOLE_RETIREMENT.md`](../../docs/CONSOLE_RETIREMENT.md).
+
+## Historical Notes
+
 SynKraken Console is the native Tauri desktop surface for SynKraken's
 open-source AI Workforce Operating System. It connects to the local SynKraken
 daemon, renders daemon-owned workforce state, and provides the Spatial
@@ -138,32 +151,11 @@ operator-led, and governance-first.
   Internals
 - Command Palette: `Ctrl+K` navigation and object focus
 
-## Run
+## Run And Build
 
-Start the daemon separately, then run:
-
-```bash
-cd apps/console
-npm install
-npm run tauri dev
-```
-
-From the repo root:
-
-```bash
-npm run console:dev
-```
-
-## Build
-
-```bash
-cd apps/console
-npm run build
-npm run tauri build
-```
-
-The frontend-only build validates TypeScript and Vite output. The Tauri build
-also requires local Rust and system WebView build dependencies.
+The Console is not an active runtime target. Normal SynKraken development does
+not require installing Console dependencies, running Tauri, or building this
+app. Historical commands may remain in old PRDs for audit context only.
 
 ## Daemon API
 

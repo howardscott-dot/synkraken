@@ -45,25 +45,23 @@ synkraken health workforce
 
 Use `synkraken config --rediscover` when local runtimes change.
 
-## Open Console
+## Open Operator Surfaces
 
 ```bash
-cd apps/console
-npm install
-npm run tauri dev
+synkraken tui
+synkraken web
+synkraken --help
 ```
 
-Or from the repo root:
-
-```bash
-npm run console:dev
-```
+The historical Tauri Console is retired as an active operator surface. Use the
+TUI for terminal operation and the Web Command Deck for browser operation.
 
 ## Start At Home
 
-Open Console Home to read the Company Briefing before inspecting individual
-workers or objects. Home is deterministic and uses existing daemon records; it
-does not summarize with AI, plan work, or schedule work.
+Start with `synkraken briefing`, `/briefing` in the TUI, or the Web Command
+Deck home view before inspecting individual workers or objects. The briefing
+is deterministic and uses existing daemon records; it does not summarize with
+AI, plan work, or schedule work.
 
 Use Home to answer:
 
@@ -80,7 +78,7 @@ Recommended Next Actions are capped at five and come from explicit rules over
 proposal approvals, blocked assignments, missing mission ownership, waiting
 assignments, blocked outcomes, at-risk missions, and incidents.
 
-Console v2.0 uses a project-centric Company OS model:
+SynKraken uses a project-centric Company OS model where useful:
 
 - Projects first.
 - Conversations inside projects.
@@ -95,7 +93,7 @@ reject work. Use Advanced only when you need internals.
 
 ## Use Projects
 
-Open Console Projects to create and operate project workspaces.
+Use project-oriented daemon records through the CLI, TUI, and Web Command Deck.
 
 A project gathers:
 
@@ -154,10 +152,10 @@ technical details.
 
 ## Inspect Presence And Activity
 
-Open Console Home or Workforce. The operator summary answers whether the
+Open `synkraken briefing`, `/briefing` in the TUI, or the Web Command Deck
+home/workforce views. The operator summary answers whether the
 workforce is usable, how many workers are active or idle, who needs attention,
-and what to inspect next. Canvas is available as advanced spatial inspection,
-not the default starting point.
+and what to inspect next.
 
 Presence states:
 
@@ -297,11 +295,12 @@ Conversation drawers also show most active workers, active/idle/attention
 member counts, last message, last broadcast, last room event, activity rate,
 mission association, current outcome, current assignments, recent handoffs,
 and blocked assignments. These are derived from persisted room messages and
-daemon read models; Console does not invent summaries.
+daemon read models; clients do not invent summaries.
 
 ## Use Knowledge
 
-Open Console Knowledge to inspect what the workforce should know. Knowledge is
+Use memory commands, TUI memory views, or the Web Command Deck to inspect what
+the workforce should know. Knowledge is
 visible Shared Workforce Memory grouped as Company, Projects, People,
 Technical, Lessons Learned, and Pending Review. Use Teach Workforce for
 explicit operator guidance that workers should inherit.
@@ -321,13 +320,14 @@ not active context.
 
 ## Review Governance
 
-Open Console Governance to answer "what needs approval?" Governance groups
+Use `synkraken proposals`, `synkraken approval list`, the TUI, or Web Command
+Deck governance views to answer "what needs approval?" Governance groups
 pending approvals, recent decisions, recent handoffs, and executed proposals.
 Approve and reject actions remain explicit operator actions through daemon
 governance endpoints.
 
 Room rename and bulk remove-all-members are daemon/API gaps and are shown as
-unavailable actions in Console.
+unavailable actions in clients.
 
 ## Review Proposals
 
@@ -381,19 +381,14 @@ or recent trace may require action now.
 When an incident is linked to a mission, Console shows the affected mission so
 the operator can understand outcome impact quickly.
 
-When an incident is linked to an outcome, Console shows the affected outcome
+When an incident is linked to an outcome, SynKraken surfaces the affected outcome
 first.
 
-## Use The Canvas
+## Historical Canvas Prototype
 
-Open Console and start on Canvas. Use presets for Coding, Operations, Research,
-or Incident Response. Add or focus runtime, room, mission, outcome, proposal,
-trace, incident, dead-letter, or Activity Feed nodes. Runtime nodes show
-presence, last activity, idle time, current room, current mission, current
-outcome, attention reason, and suggested action. Use the inspector to jump
-through relationships and open detail screens for full workflows. Runtime nodes
-use subtle live indicators for active, idle, and attention states; the
-indicators are visual context only and do not imply autonomous behavior.
+The old Console Canvas is retired prototype material. Relationship and spatial
+inspection ideas should be rebuilt only when they are backed by daemon read
+models and surfaced through the Web Command Deck or TUI.
 
 Mission nodes appear in Operations, Research, and Incident Response presets
 when mission records are available. They connect to workers, rooms, proposals,

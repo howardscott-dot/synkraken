@@ -6,8 +6,8 @@ SynKraken is a local-first control plane for managing heterogeneous AI workers:
 Claude Code, Goose, Hermes, OpenClaw, Crush, Google Antigravity, and future
 CLI runtimes. It gives operators one place to coordinate workers, govern
 proposals, inspect runtime health, replay what happened, recover failures, and
-operate a spatial desktop console without replacing the runtimes they already
-use.
+operate through terminal, web, CLI, and MCP-facing surfaces without replacing
+the runtimes they already use.
 
 SynKraken is not a chatbot wrapper, an orchestration LLM, a CrewAI clone, a
 cloud SaaS product, or a hidden autonomous swarm. It is an operator system for
@@ -16,8 +16,8 @@ AI work: workers may propose, humans approve, and SynKraken records the trail.
 ## What SynKraken Is
 
 SynKraken runs a local daemon that owns state in SQLite and exposes HTTP/SSE
-APIs to several operator surfaces: a native Tauri Console, a terminal TUI, a
-local Web Command Deck, and a CLI. Adapters invoke external AI runtimes through
+APIs to several operator surfaces: a terminal TUI, a local Web Command Deck,
+the CLI, and future MCP-compliant tools. Adapters invoke external AI runtimes through
 their native CLIs. The daemon records messages, deliveries, missions,
 outcomes, rooms, tasks, goals, decisions, handoffs, proposals, memory events,
 incidents, dead letters, and replayable traces.
@@ -33,13 +33,13 @@ SynKraken manages the workforce state around AI work.
 
 ## Feature Overview
 
-SynKraken has four primary operator surfaces:
+SynKraken has three primary operator surfaces:
 
 ```
 CLI                → synkraken send, synkraken rooms, synkraken memory, etc.
 Terminal TUI       → Interactive dashboard with panels for workforce, rooms, events
 Web Command Deck   → Browser-based at http://localhost:9460 (when daemon is running)
-Tauri Console      → Native desktop app (apps/console/)
+MCP tools          → Planned standards-compliant tool surface over daemon state
 ```
 
 Key capabilities in brief:
@@ -68,19 +68,18 @@ Key capabilities in brief:
 - peer-reviewed shared memory governance with bounded injection
 - Shared Workforce Memory for visible, approved operator notes and scoped
   mission, outcome, assignment, room, runtime, and global context
-- spatial operations canvas in the native desktop Console
-- deterministic live activity feed and operational awareness in the Console
-- CLI, TUI, Web Command Deck, and Tauri desktop Console surfaces
+- deterministic briefing, live activity, and operational awareness from daemon read models
+- CLI, TUI, Web Command Deck, and future MCP-compliant surfaces
 
 ## Architecture
 
 ```text
 Operator
   │
-  ├─ SynKraken Console (Tauri desktop)
   ├─ CLI
   ├─ TUI
-  └─ Web Command Deck
+  ├─ Web Command Deck
+  └─ MCP clients and tools
         │ HTTP / SSE on loopback
         ▼
 SynKraken Daemon
@@ -139,20 +138,6 @@ synkraken web
 See [`docs/INSTALLATION.md`](docs/INSTALLATION.md) for Linux, macOS, uninstall,
 diagnostics, and the Windows roadmap.
 
-Run the native Console from a checkout with the daemon running:
-
-```bash
-cd apps/console
-npm install
-npm run tauri dev
-```
-
-From the repo root, if Console dependencies are installed:
-
-```bash
-npm run console:dev
-```
-
 Basic operator commands:
 
 ```text
@@ -182,33 +167,13 @@ synkraken run --config config.paths.local.example.json
 Edit the `adapters.<name>.command` array to use the full path to each binary,
 for example `["/home/myuser/.local/bin/goose"]` instead of `["goose"]`.
 
-## Console
+## Retired Console Prototype
 
-SynKraken Console is the native Tauri desktop surface in `apps/console`. It
-opens on the Spatial Operations Canvas: a dark, dense workspace of movable
-nodes for workforce summary, runtimes, missions, outcomes, rooms, proposal
-queues, proposal details, assignments, traces, incidents, and dead letters.
-Relationship lines come from daemon relationship records where the persisted
-data supports them.
-
-Console also includes:
-
-- Workforce Command Centre
-- Mission Centre
-- Outcome Centre
-- Assignment Centre
-- Activity
-- Memory Centre
-- Rooms
-- Proposal Governance
-- Flight Recorder / Trace Explorer
-- Incident Centre
-- Canvas Inspector
-- `Ctrl+K` command palette
-- global daemon and workforce status bar
-- live summary bar for active workers, recent events, and last activity age
-
-Console does not own state, read SQLite directly, or add a second backend.
+The native Tauri Console in `apps/console` is retired as an active product
+surface. It remains in the repository as prototype/design history only. New
+operator work should target the daemon API, CLI, TUI, Web Command Deck, and
+future MCP-compliant tools. See
+[`docs/CONSOLE_RETIREMENT.md`](docs/CONSOLE_RETIREMENT.md).
 
 Shared Workforce Memory is visible and governed. Approved memory can be
 retrieved and injected into worker dispatches; proposed, rejected, and archived
@@ -302,18 +267,17 @@ Operators can inspect latest incident context, open traces, retry failed
 deliveries, replay dead letters, and see how incidents relate to workers,
 rooms, proposals, and messages.
 
-## Spatial Operations Canvas
+## Operator Surfaces
 
-SynKraken is moving from screens to spaces. The canvas exists because workforce
-objects are connected: workers propose actions, rooms produce decisions, traces
-explain incidents, and dead letters point to recovery. The canvas lets an
-operator arrange these objects spatially while the daemon remains the source
-of truth.
+SynKraken is daemon-first. The TUI is the primary terminal operator surface.
+The Web Command Deck is the browser operator surface. The CLI remains the
+scriptable surface. MCP compliance is the next standards-based integration
+surface. All of them call daemon APIs; none reads SQLite directly or owns a
+second state model.
 
 ## Development
 
-Runtime code is Python 3.10+ and stdlib-only. Console is a Tauri v2 app with
-React, TypeScript, and Tailwind.
+Runtime code is Python 3.10+ and stdlib-only.
 
 Useful checks:
 
@@ -322,9 +286,6 @@ python3 scripts/smoke_test.py
 python3 scripts/live_integration_test.py --skip-restart
 python3 scripts/context_audit.py
 python3 -m compileall synkraken scripts
-
-cd apps/console
-npm run build
 ```
 
 The live integration test requires a running daemon. Individual subsystem smoke
@@ -334,10 +295,9 @@ tests live under `scripts/`.
 
 Near-term direction:
 
-- richer spatial canvas and relationship inspection
 - room-scoped delivery and runtime histories
-- memory, decision, handoff, team, and goal detail screens in Console
-- stronger packaging and release flow for the desktop Console
+- richer TUI and Web Command Deck workflows
+- MCP-compliant tool surface over daemon state
 - more adapter conformance coverage
 - governed execution extensions beyond the current simulated proposal execution
   model, still under explicit operator authority
