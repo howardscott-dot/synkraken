@@ -35,6 +35,9 @@ def _validate_server(raw: dict) -> None:
         raise ValueError("server.host must be a non-empty string")
     if not isinstance(port, int) or port <= 0 or port > 65535:
         raise ValueError("server.port must be an integer between 1 and 65535")
+    auth_token = server.get("auth_token")
+    if auth_token is not None and (not isinstance(auth_token, str) or not auth_token):
+        raise ValueError("server.auth_token must be a non-empty string when set")
 
 
 def _validate_storage(raw: dict) -> None:
@@ -44,7 +47,12 @@ def _validate_storage(raw: dict) -> None:
         raise ValueError("storage.sqlite_path must be a non-empty string")
     instance_name = raw.get("instance", {}).get("instance_name", "")
     if instance_name:
-        sqlite_path = sqlite_path.replace(".db", f"-{instance_name}.db")
+        # Only rewrite the trailing suffix — a global replace would corrupt a
+        # path like "/srv/foo.db/synkraken.db" and silently no-op otherwise.
+        if sqlite_path.endswith(".db"):
+            sqlite_path = sqlite_path[:-3] + f"-{instance_name}.db"
+        else:
+            sqlite_path = f"{sqlite_path}-{instance_name}"
         storage["sqlite_path"] = sqlite_path
 
 
@@ -108,8 +116,8 @@ def _validate_goal(raw: dict) -> None:
 
 def _validate_adapters(raw: dict) -> None:
     adapters = raw.setdefault("adapters", {})
-    if not isinstance(adapters, dict) or not adapters:
-        raise ValueError("adapters must be a non-empty object")
+    if not isinstance(adapters, dict):
+        raise ValueError("adapters must be an object")
     for adapter_id, adapter in adapters.items():
         if not isinstance(adapter, dict):
             raise ValueError(f"adapter '{adapter_id}' must be an object")

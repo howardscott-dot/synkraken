@@ -5,6 +5,49 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Daemon and web deck now validate the `Host` header on loopback binds
+  (DNS-rebinding defense), cap request-body size, and clamp query `limit`s.
+- Added optional bearer-token authentication (`server.auth_token` or
+  `SYNKRAKEN_TOKEN`), enforced on every request when set and sent by the CLI,
+  TUI, and web deck. Non-loopback binds warn and require a token.
+- Web command deck: fixed attribute-injection XSS by escaping quotes in
+  agent-authored output, and added a strict Content-Security-Policy plus
+  `X-Content-Type-Options`/`X-Frame-Options`.
+- Adapter subprocesses now run in their own process group and are killed as a
+  tree on timeout (no more orphaned agents), read no stdin, and have capped
+  output. CLI output strips terminal control sequences from untrusted runtime
+  text. Antigravity gains a `--` end-of-options guard against argument injection.
+- Agent-proposed team memory is no longer auto-approved by a peer agent by
+  default (`memory.auto_review`, default off) — closing a self-replicating
+  prompt-injection channel.
+- Added a global concurrent-dispatch cap (`routing.max_concurrent_dispatch`) to
+  bound broadcast amplification.
+
+### Fixed
+
+- Storage: `create_mission`, `create_outcome`, and `save_message` used
+  `INSERT OR REPLACE`, which cascade-deleted child rows / violated foreign keys
+  on re-create; they now use `ON CONFLICT DO UPDATE`.
+- Enabled SQLite WAL mode and a busy timeout for better concurrency.
+- `find_duplicate_memory` now escapes `LIKE` wildcards (no more false-positive
+  duplicate rejections).
+- TUI no longer crashes with a traceback when the daemon is unreachable
+  (`URLError` is surfaced as a normal error).
+- Config: instance-name suffixing no longer corrupts paths containing `.db`
+  in a directory component. Daemon prints a clear message on invalid config.
+- Corrected `synkraken run` references (the command is `synkraken-daemon
+  --config`) across README, Makefile, and CONTRIBUTING.
+
+### Changed
+
+- Declared zero runtime dependencies (the project is stdlib-only); removed the
+  unused `httpx`/`sse-starlette`/`uvicorn`/`watchdog` dependencies.
+- Added a real `tests/` pytest suite and a GitHub Actions CI workflow.
+- Standardized the supported Python floor on 3.11.
+- Archived retired-console smoke tests under `scripts/archive/console/`.
+
 ### Added
 
 - SynKraken Console v2.0 Project-Centric Company OS: reframed SynKraken as a

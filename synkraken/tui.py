@@ -19,7 +19,6 @@ from typing import Any
 from .branding import (
     BANNER_HEIGHT,
     KRAKEN_COL,
-    KRAKEN_HEIGHT,
     KRAKEN_ROW_XTERM256,
     KRAKEN_WIDTH,
     LOGO_KRAKEN_FADE_INDEX,
@@ -131,19 +130,27 @@ def _raise_http_error(exc: urllib.error.HTTPError) -> None:
     raise TuiHttpError(exc.code, detail) from None
 
 
+def _auth_headers() -> dict:
+    token = os.environ.get('SYNKRAKEN_TOKEN')
+    return {'Authorization': f'Bearer {token}'} if token else {}
+
+
 def _get_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         _raise_http_error(exc)
+    except urllib.error.URLError as exc:
+        raise TuiHttpError(0, f'daemon unreachable: {exc.reason}') from None
 
 
 def _post_json(url: str, payload: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', **_auth_headers()},
         method='POST',
     )
     try:
@@ -151,13 +158,15 @@ def _post_json(url: str, payload: dict) -> dict:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         _raise_http_error(exc)
+    except urllib.error.URLError as exc:
+        raise TuiHttpError(0, f'daemon unreachable: {exc.reason}') from None
 
 
 def _put_json(url: str, payload: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', **_auth_headers()},
         method='PUT',
     )
     try:
@@ -165,15 +174,19 @@ def _put_json(url: str, payload: dict) -> dict:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         _raise_http_error(exc)
+    except urllib.error.URLError as exc:
+        raise TuiHttpError(0, f'daemon unreachable: {exc.reason}') from None
 
 
 def _delete(url: str) -> dict:
-    req = urllib.request.Request(url, method='DELETE')
+    req = urllib.request.Request(url, method='DELETE', headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         _raise_http_error(exc)
+    except urllib.error.URLError as exc:
+        raise TuiHttpError(0, f'daemon unreachable: {exc.reason}') from None
 
 
 # ── SSE event stream ───────────────────────────────────────────────────────
@@ -853,8 +866,8 @@ def _format_event(event: dict[str, Any]) -> tuple[str, int]:
         return (f"  {ts}  ✗ {d.get('adapter_id')} — {d.get('reason', '')[:60]}", C_RED)
     if etype == 'typing.started':
         aid = d.get('adapter_id', '')
-        _, l = _agent_color(aid)
-        return (f"  {ts}  … {d.get('runtime_name', aid)} typing", l)
+        _, line_color = _agent_color(aid)
+        return (f"  {ts}  … {d.get('runtime_name', aid)} typing", line_color)
     if etype == 'typing.stopped':
         aid = d.get('adapter_id', '')
         return (f"  {ts}  · {d.get('runtime_name', aid)} idle", C_MUTED)
@@ -899,7 +912,7 @@ def _view_conversations(stdscr, data, top, h, w):
             lines.append((f"  {idx:>2}. {src} → {tgt}    {ago:>4} ago    [{cid[:12]}]", src_d, curses.A_BOLD))
             lines.append((f"       {preview}", None, curses.A_DIM))
             lines.append(('', None, 0))
-        lines.append((f'  /open <n>  open conversation n as chat', C_MUTED, curses.A_DIM))
+        lines.append(('  /open <n>  open conversation n as chat', C_MUTED, curses.A_DIM))
     _panel_lines(stdscr, top, 0, w, avail_h, lines)
 
 
@@ -1175,7 +1188,7 @@ def _transcript_mode_lines(state: dict, base: str) -> list[str]:
             '',
             'last team run',
             f"  view                  /team-run {run_id}",
-            f"  export                /save-transcript",
+            "  export                /save-transcript",
             f"  review                /team-run {run_id}",
         ])
     try:
@@ -3054,7 +3067,6 @@ def _parse_handoff_create_args(rest: str, current_room: str | None) -> dict[str,
 
 
 def _start_async_discussion(state: dict, base: str, params: dict[str, Any]) -> None:
-    agents = params['agents']
     topic = params['topic']
     room_name = params.get('room_name')
     label = f"discussion #{room_name}" if room_name else 'discussion'

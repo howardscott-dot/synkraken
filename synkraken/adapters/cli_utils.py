@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+import os
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
 from typing import Sequence
+
+
+# Bound how much subprocess output is retained, so a runaway or hostile runtime
+# cannot force unbounded memory growth downstream (storage, rendering).
+MAX_OUTPUT_CHARS = 1_000_000
+
+
+def _cap(text: str | None) -> str:
+    text = text or ""
+    if len(text) > MAX_OUTPUT_CHARS:
+        return text[:MAX_OUTPUT_CHARS] + "\n[synkraken] output truncated"
+    return text
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill the child and any grandchildren it spawned (node, MCP servers, ...)."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def is_remote_config(config: dict) -> bool:
@@ -50,20 +78,33 @@ def run_command(
     env: dict | None = None,
 ) -> tuple[int, str, str, int]:
     started = time.perf_counter()
-    kwargs: dict = {
-        "capture_output": True,
+    popen_kwargs: dict = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
         "text": True,
-        "timeout": timeout_seconds,
+        # Never let a child inherit and block on the daemon's stdin.
+        "stdin": subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
     }
     if cwd is not None:
-        kwargs["cwd"] = cwd
-    if input_text is not None:
-        kwargs["input"] = input_text
+        popen_kwargs["cwd"] = cwd
     if env is not None:
-        kwargs["env"] = env
-    proc = subprocess.run(
-        list(command),
-        **kwargs,
-    )
+        popen_kwargs["env"] = env
+    if os.name == "posix":
+        # Run in a new process group so a timeout can kill the entire tree,
+        # not just the direct child — agent CLIs spawn node/MCP grandchildren
+        # that would otherwise keep running (and keep spending) after we give up.
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(list(command), **popen_kwargs)
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            # Drain briefly so pipes close and we don't leak the reader.
+            proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            pass
+        raise
     duration_ms = int((time.perf_counter() - started) * 1000)
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip(), duration_ms
+    return proc.returncode, _cap(stdout).strip(), _cap(stderr).strip(), duration_ms

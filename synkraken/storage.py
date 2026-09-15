@@ -45,6 +45,51 @@ SHARED_MEMORY_SCOPES = {"global", "room", "mission", "outcome", "assignment", "r
 SCHEMA_VERSION = 2
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS workspace_state (
+    name TEXT PRIMARY KEY,
+    data_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_cards (
+    card_id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL,
+    data_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_connections (
+    provider_id TEXT PRIMARY KEY,
+    config_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_runs (
+    run_id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL REFERENCES bot_profiles(bot_id),
+    request_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    UNIQUE(bot_id, request_key)
+);
+CREATE TABLE IF NOT EXISTS bot_run_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES bot_runs(run_id),
+    event_type TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_memory (
+    bot_id TEXT NOT NULL REFERENCES bot_profiles(bot_id),
+    memory_key TEXT NOT NULL,
+    body TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(bot_id, memory_key)
+);
+CREATE TABLE IF NOT EXISTS bot_profiles (
+    bot_id TEXT PRIMARY KEY,
+    profile_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_profile_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL REFERENCES bot_profiles(bot_id),
+    profile_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS messages (
     message_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
@@ -854,6 +899,12 @@ class Storage:
         self._conn = sqlite3.connect(self.sqlite_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # WAL lets readers proceed during writes and makes commits cheaper;
+        # busy_timeout avoids spurious "database is locked" errors under the
+        # threaded HTTP server. synchronous=NORMAL is durable under WAL.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         with self._conn:
             self._conn.executescript(SCHEMA)
             self._migrate_schema()
@@ -1453,13 +1504,28 @@ class Storage:
 
     def save_message(self, message: FabricMessage) -> None:
         with self._lock, self._conn:
+            # ON CONFLICT rather than INSERT OR REPLACE: REPLACE deletes the row
+            # first, which violates the deliveries.message_id foreign key once a
+            # message has deliveries (retry/replay paths re-save the message).
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO messages (
+                INSERT INTO messages (
                     message_id, conversation_id, source, target, timestamp,
                     message_type, subject, priority, reply_to, hop_count,
                     body, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    conversation_id=excluded.conversation_id,
+                    source=excluded.source,
+                    target=excluded.target,
+                    timestamp=excluded.timestamp,
+                    message_type=excluded.message_type,
+                    subject=excluded.subject,
+                    priority=excluded.priority,
+                    reply_to=excluded.reply_to,
+                    hop_count=excluded.hop_count,
+                    body=excluded.body,
+                    metadata_json=excluded.metadata_json
                 """,
                 (
                     message.message_id,
@@ -1823,6 +1889,150 @@ class Storage:
                 ids,
             ).fetchall()
         return [self._message_from_row(row) for row in rows]
+
+    def list_providers(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT config_json FROM provider_connections ORDER BY rowid").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_provider(self, provider_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT config_json FROM provider_connections WHERE provider_id = ?", (provider_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_provider(self, data: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO provider_connections VALUES (?, ?) ON CONFLICT(provider_id) DO UPDATE SET config_json=excluded.config_json", (data["provider_id"], json.dumps(data)))
+
+    def save_bot_run(self, data: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO bot_runs VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status, data_json=excluded.data_json", (data["run_id"], data["bot_id"], data["request_key"], data["status"], json.dumps(data)))
+
+    def get_bot_run(self, run_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT data_json FROM bot_runs WHERE run_id = ?", (run_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def find_bot_run(self, bot_id: str, request_key: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT data_json FROM bot_runs WHERE bot_id = ? AND request_key = ?", (bot_id, request_key)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_bot_runs(self, bot_id: str, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data_json FROM bot_runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT ?", (bot_id, limit)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def add_bot_run_event(self, run_id: str, event_type: str, data: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO bot_run_events (run_id,event_type,data_json,created_at) VALUES (?,?,?,?)", (run_id, event_type, json.dumps(data), utc_now_iso()))
+
+    def bot_run_events(self, run_id: str, limit: int = 200) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM bot_run_events WHERE run_id = ? ORDER BY event_id DESC LIMIT ?", (run_id, limit)).fetchall()
+        return [dict(row) | {"data": json.loads(row["data_json"])} for row in reversed(rows)]
+
+    def interrupt_bot_runs(self) -> None:
+        with self._lock, self._conn:
+            rows = self._conn.execute("SELECT data_json FROM bot_runs WHERE status IN ('queued','running','cancelling')").fetchall()
+            for row in rows:
+                data = json.loads(row[0])
+                data.update(status="interrupted", error="Daemon stopped before this run completed", updated_at=utc_now_iso())
+                self._conn.execute("UPDATE bot_runs SET status='interrupted', data_json=? WHERE run_id=?", (json.dumps(data), data["run_id"]))
+                if data.get("task_id"):
+                    self._conn.execute("UPDATE tasks SET status='blocked', updated_at=? WHERE task_id=?", (utc_now_iso(), data["task_id"]))
+                self._conn.execute("INSERT INTO bot_run_events (run_id,event_type,data_json,created_at) VALUES (?,?,?,?)", (data["run_id"], "interrupted", "{}", utc_now_iso()))
+
+    def read_bot_memory(self, bot_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT memory_key,body,updated_at FROM bot_memory WHERE bot_id=? ORDER BY memory_key", (bot_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def write_bot_memory(self, bot_id: str, key: str, body: str) -> None:
+        with self._lock, self._conn:
+            count = self._conn.execute("SELECT COUNT(*) FROM bot_memory WHERE bot_id=?", (bot_id,)).fetchone()[0]
+            exists = self._conn.execute("SELECT 1 FROM bot_memory WHERE bot_id=? AND memory_key=?", (bot_id, key)).fetchone()
+            if count >= 32 and not exists:
+                raise ValueError("Bot memory is full; update an existing entry")
+            self._conn.execute("INSERT INTO bot_memory VALUES (?,?,?,?) ON CONFLICT(bot_id,memory_key) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at", (bot_id, key, body, utc_now_iso()))
+
+    def list_bots(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT profile_json FROM bot_profiles ORDER BY rowid").fetchall()
+        return [json.loads(row["profile_json"]) for row in rows]
+
+    def workspace_value(self, name: str) -> dict:
+        with self._lock:
+            row = self._conn.execute("SELECT data_json FROM workspace_state WHERE name=?", (name,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def save_workspace_value(self, name: str, value: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO workspace_state VALUES (?,?) ON CONFLICT(name) DO UPDATE SET data_json=excluded.data_json", (name, json.dumps(value)))
+
+    def save_chat_card(self, card: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO chat_cards VALUES (?,?,?) ON CONFLICT(card_id) DO UPDATE SET data_json=excluded.data_json", (card["card_id"], card["bot_id"], json.dumps(card)))
+
+    def chat_cards(self, bot_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data_json FROM chat_cards WHERE bot_id=? ORDER BY rowid DESC LIMIT 50", (bot_id,)).fetchall()
+        return [json.loads(row[0]) for row in reversed(rows)]
+
+    def get_chat_card(self, card_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT data_json FROM chat_cards WHERE card_id=?", (card_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_bot(self, bot_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT profile_json FROM bot_profiles WHERE bot_id = ?", (bot_id,)
+            ).fetchone()
+        return json.loads(row["profile_json"]) if row else None
+
+    def save_bot(self, profile: dict) -> None:
+        encoded = json.dumps(profile)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO bot_profiles VALUES (?, ?) "
+                "ON CONFLICT(bot_id) DO UPDATE SET profile_json = excluded.profile_json",
+                (profile["bot_id"], encoded),
+            )
+            self._conn.execute(
+                "INSERT INTO bot_profile_events (bot_id, profile_json, created_at) VALUES (?, ?, ?)",
+                (profile["bot_id"], encoded, profile["updated_at"]),
+            )
+
+    def get_bot_conversation(self, conversation_id: str, limit: int = 100) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT ?", (conversation_id, limit),
+            ).fetchall()
+            entries = []
+            activity = []
+            for row in reversed(rows):
+                message = self._message_from_row(row)
+                entries.append(message)
+                deliveries = self._conn.execute(
+                    "SELECT * FROM deliveries WHERE message_id = ? ORDER BY delivery_id",
+                    (row["message_id"],),
+                ).fetchall()
+                for delivery in deliveries:
+                    activity.append({
+                        "message_id": row["message_id"], "runtime_id": delivery["adapter_id"],
+                        "status": delivery["status"], "error": delivery["error"],
+                        "duration_ms": delivery["duration_ms"], "timestamp": delivery["created_at"],
+                        "task_id": message["metadata"].get("task_id"),
+                    })
+                    entries.append({
+                        "message_id": f"delivery-{delivery['delivery_id']}",
+                        "source": delivery["adapter_id"], "body": delivery["body"],
+                        "error": delivery["error"], "ok": bool(delivery["ok"]),
+                        "timestamp": delivery["created_at"], "reply_to": row["message_id"],
+                    })
+        return {"conversation_id": conversation_id, "messages": entries, "activity": activity}
 
     def get_conversation(self, conversation_id: str) -> dict:
         with self._lock:
@@ -3394,12 +3604,25 @@ class Storage:
         now = created_at or utc_now_iso()
         updated = updated_at or now
         with self._lock, self._conn:
+            # ON CONFLICT (not INSERT OR REPLACE): REPLACE is DELETE+INSERT,
+            # which would cascade-delete every child row (workers, rooms,
+            # traces, incidents, proposals, outcomes) via ON DELETE CASCADE.
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO missions (
+                INSERT INTO missions (
                     mission_id, title, description, status, priority,
                     created_at, updated_at, owner, goal, outcome, risk_level
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mission_id) DO UPDATE SET
+                    title=excluded.title,
+                    description=excluded.description,
+                    status=excluded.status,
+                    priority=excluded.priority,
+                    updated_at=excluded.updated_at,
+                    owner=excluded.owner,
+                    goal=excluded.goal,
+                    outcome=excluded.outcome,
+                    risk_level=excluded.risk_level
                 """,
                 (mission_id, title, description, status, priority, now, updated, owner, goal, outcome, risk_level),
             )
@@ -3682,12 +3905,24 @@ class Storage:
         with self._lock, self._conn:
             if self._conn.execute("SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)).fetchone() is None:
                 raise ValueError(f"mission not found: {mission_id}")
+            # ON CONFLICT rather than INSERT OR REPLACE: the REPLACE form would
+            # cascade-delete outcome children (workers, traces, incidents,
+            # proposals, assignments) on every re-create.
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO outcomes (
+                INSERT INTO outcomes (
                     outcome_id, mission_id, title, description, status,
                     confidence, owner, created_at, updated_at, completed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(outcome_id) DO UPDATE SET
+                    mission_id=excluded.mission_id,
+                    title=excluded.title,
+                    description=excluded.description,
+                    status=excluded.status,
+                    confidence=excluded.confidence,
+                    owner=excluded.owner,
+                    updated_at=excluded.updated_at,
+                    completed_at=excluded.completed_at
                 """,
                 (outcome_id, mission_id, title, description, status, confidence, owner, now, updated, completed_at),
             )
@@ -4262,8 +4497,11 @@ class Storage:
         normalized = " ".join(str(content or "").split()).lower()
         if not normalized:
             return None
-        like = f"%{normalized}%"
-        clauses = ["LOWER(content) = ? OR LOWER(content) LIKE ?"]
+        # Escape LIKE wildcards so content containing % or _ can't match
+        # unrelated rows (which would wrongly reject a memory as a duplicate).
+        escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
+        clauses = ["LOWER(content) = ? OR LOWER(content) LIKE ? ESCAPE '\\'"]
         params: list[object] = [normalized, like]
         if room_name is not None:
             clauses.append("(room_name = ? OR room_name IS NULL)")

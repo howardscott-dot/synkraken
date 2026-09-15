@@ -1,5 +1,15 @@
 # SynKraken
 
+SynKraken starts with a conversation. Choose a default model during setup,
+then use a blank bot to create and configure other bots in chat. Secure inputs
+appear as contextual cards. A small side drawer holds the bot profile, progress
+and its isolated browser workspace.
+
+Run `synkraken setup` to begin. Multiple provider connections, encrypted host
+credentials, native tool execution and retained CLI runtimes share the existing
+daemon. See [Bot engine implementation](docs/BOT_ENGINE.md) for the implemented
+contract and current limits. Advanced legacy workflows remain at `/deck`.
+
 Open-source AI Workforce Operating System.
 
 SynKraken is a local-first control plane for managing heterogeneous AI workers:
@@ -9,9 +19,9 @@ proposals, inspect runtime health, replay what happened, recover failures, and
 operate through terminal, web, CLI, and MCP-facing surfaces without replacing
 the runtimes they already use.
 
-SynKraken is not a chatbot wrapper, an orchestration LLM, a CrewAI clone, a
-cloud SaaS product, or a hidden autonomous swarm. It is an operator system for
-AI work: workers may propose, humans approve, and SynKraken records the trail.
+SynKraken combines native persistent bots with the existing workforce control
+plane. Operators choose providers, models, tools and permitted delegates;
+SynKraken records execution and preserves the existing proposal approval flows.
 
 ## What SynKraken Is
 
@@ -151,7 +161,7 @@ locations, copy `examples/config.paths.local.example.json` to your working
 directory and pass it when starting the daemon:
 
 ```bash
-synkraken run --config config.paths.local.example.json
+synkraken-daemon --config config.paths.local.example.json
 ```
 
 Edit the `adapters.<name>.command` array to use the full path to each binary,
@@ -267,7 +277,7 @@ second state model.
 
 ## Development
 
-Runtime code is Python 3.10+ and stdlib-only.
+Runtime code is Python 3.11+ and stdlib-only (zero runtime dependencies).
 
 Useful checks:
 
@@ -312,8 +322,8 @@ conflict with other running instances. Attempting to start two instances with
 the same `instance_name` will fail fast with a lock error.
 
 ```bash
-synkraken run --config config-dev.json
-synkraken run --config config-prod.json
+synkraken-daemon --config config-dev.json
+synkraken-daemon --config config-prod.json
 ```
 
 ## Documentation

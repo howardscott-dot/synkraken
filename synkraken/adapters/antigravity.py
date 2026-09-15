@@ -52,6 +52,9 @@ class AntigravityAdapter(BaseAdapter):
         local_command = list(base_command) + [
             "--dangerously-skip-permissions",
             "--print",
+            # End-of-options guard so a body starting with "-" cannot be parsed
+            # as a flag (argument injection).
+            "--",
             message.body,
         ]
         command = build_adapter_command(self.config, local_command)

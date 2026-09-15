@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -97,7 +98,8 @@ def main() -> None:
         os.chdir(tmp)
         try:
             path = tui._save_current_transcript(state)
-            assert path == Path("exports/room-test1-20260519.txt")
+            stamp = datetime.now().strftime("%Y%m%d")
+            assert path == Path(f"exports/room-test1-{stamp}.txt")
             text = path.read_text(encoding="utf-8")
             assert "Transcript: #test1" in text
             assert "nomination phase owner vote" in text

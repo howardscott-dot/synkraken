@@ -54,12 +54,17 @@ EXCEPTIONS = [
         "reason": "generic path example in docs",
     },
     {
-        "path": "docs/INSTALL.md",
-        "pattern": "/home/myuser",
-        "reason": "generic path example in docs",
+        "path": "README.md",
+        "pattern": "howardscott-dot",
+        "reason": "public project repository URL",
     },
     {
-        "path": "README.md",
+        "path": "pyproject.toml",
+        "pattern": "howardscott-dot",
+        "reason": "public project repository URL",
+    },
+    {
+        "path": "SECURITY.md",
         "pattern": "howardscott-dot",
         "reason": "public project repository URL",
     },

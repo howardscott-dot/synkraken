@@ -63,7 +63,10 @@ def main() -> None:
         })
         elapsed = time.perf_counter() - started
 
-        assert elapsed < 0.8, f"fanout should run concurrently, took {elapsed:.3f}s"
+        # Three 0.35s adapters run concurrently (~0.35s); serial execution would
+        # be ~1.05s. The 0.9s bound still definitively catches serialization while
+        # tolerating cold-process/scheduler jitter on a loaded machine.
+        assert elapsed < 0.9, f"fanout should run concurrently, took {elapsed:.3f}s"
         assert result["routing"]["requested_target"] == "broadcast"
         assert result["routing"]["resolved_targets"] == ["alpha", "bravo", "charlie"]
         assert {adapter.seen_targets[-1] for adapter in adapters.values()} == {"alpha", "bravo", "charlie"}

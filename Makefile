@@ -14,7 +14,7 @@ install:
 	pip install -e ".[dev]"
 
 run:
-	synkraken run --config examples/config.example.json
+	synkraken-daemon --config examples/config.example.json
 
 console:
 	cd apps/console/src-tauri && cargo build --release && cd ../..

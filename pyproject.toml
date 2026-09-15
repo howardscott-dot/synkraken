@@ -12,17 +12,27 @@ authors = [
     {name = "SynKraken Contributors"}
 ]
 requires-python = ">=3.11"
-dependencies = [
-    "httpx>=0.25.0",
-    "sse-starlette>=1.8.0",
-    "uvicorn>=0.24.0",
-    "watchdog>=3.0.0",
+dependencies = ["cryptography>=46,<52", "keyring>=25,<27"]
+keywords = ["ai", "agents", "workforce", "orchestration", "cli", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
 ]
 
+[project.urls]
+Homepage = "https://github.com/howardscott-dot/synkraken"
+Documentation = "https://github.com/howardscott-dot/synkraken/tree/main/docs"
+Source = "https://github.com/howardscott-dot/synkraken"
+
 [project.optional-dependencies]
+browser = ["playwright>=1.56,<2"]
 dev = [
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
 ]
 
@@ -35,10 +45,12 @@ synkraken-send = "synkraken.cli_send:main"
 where = ["."]
 include = ["synkraken*"]
 
+[tool.setuptools.package-data]
+synkraken = ["static/*.html", "static/*.css", "static/*.js"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"

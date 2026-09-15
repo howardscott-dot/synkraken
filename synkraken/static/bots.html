@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SynKraken</title><link rel="stylesheet" href="/bots.css"><script src="/bots.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand-row"><a href="/" class="brand" aria-label="SynKraken home"><span class="brand-mark">S</span>SynKraken</a><button id="new-chat" class="icon-button" aria-label="Create a bot through chat">+</button></div>
+    <label class="sr-only" for="search">Search conversations</label><input id="search" type="search" placeholder="Search" autocomplete="off">
+    <nav id="roster" aria-label="Bots"></nav>
+    <div id="channel-section" hidden><h2 class="section-label">Conversations</h2><nav id="channels" aria-label="Channels"></nav></div>
+    <footer><span class="status-dot"></span><span id="connection">Connecting…</span><span class="host-label">On this device</span></footer>
+  </aside>
+  <main>
+    <header><span id="header-avatar" class="avatar small">S</span><h1 id="title">SynKraken</h1><span id="presence"></span><button id="details-toggle" class="icon-button" aria-label="Open bot workspace">»</button></header>
+    <div id="notice" role="status" hidden></div>
+    <div class="content">
+      <section class="conversation">
+        <div id="timeline" aria-label="Conversation" aria-live="polite"></div>
+        <div id="input-cards" aria-label="Input cards"></div>
+        <form id="composer"><label class="sr-only" for="message">Message</label><button id="capabilities-toggle" type="button" aria-label="Explore bot capabilities">+</button><textarea id="message" rows="1" maxlength="20000" placeholder="Message SynKraken…" required></textarea><button id="stop" type="button" hidden aria-label="Stop current run">■</button><button id="send" type="submit" aria-label="Send message">↑</button></form>
+        <p id="composer-note"></p>
+      </section>
+      <aside id="inspector" hidden>
+          <div class="drawer-tabs"><button id="show-context" type="button">Progress</button><button id="show-browser" type="button">Browser</button><button id="show-settings" type="button">Bot profile</button></div>
+          <section id="context-pane"><h2>Conversation context</h2><div id="context"></div><h2>Activity</h2><div id="activity"></div></section>
+          <section id="settings-pane" hidden>
+            <div id="settings-avatar" class="avatar">S</div><div id="avatar-picker" aria-label="Choose bot appearance"></div>
+            <form id="basic-settings"><label for="settings-name">Display name</label><input id="settings-name" maxlength="80" required>
+              <label for="settings-label">Short label</label><input id="settings-label" maxlength="80" placeholder="A short note for the roster">
+              <label for="settings-description">Guidance</label><textarea id="settings-description" rows="9" maxlength="6000" placeholder="Anything you want this bot to know about how it should work"></textarea>
+              <button type="submit">Save profile</button><p id="settings-status" role="status"></p>
+            </form>
+          </section>
+          <section id="browser-pane" hidden>
+            <form id="browser-address"><label class="sr-only" for="browser-url">Browser address</label><input id="browser-url" placeholder="https://…" required><button type="submit">Go</button></form>
+            <p id="browser-status">This bot's browser has not opened a page yet.</p>
+            <button id="browser-image-button" type="button" aria-label="Click inside bot browser" hidden><img id="browser-image" alt="Current page in this bot's browser"></button>
+            <div class="browser-actions"><button id="browser-refresh" type="button">Read page</button><button id="browser-up" type="button">↑</button><button id="browser-down" type="button">↓</button></div>
+            <p class="browser-help">A separate browser for this bot. Click the preview to interact; stop a running bot before taking over.</p>
+          </section>
+        </aside>
+    </div>
+  </main>
+</body>
+</html>

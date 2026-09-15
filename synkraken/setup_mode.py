@@ -382,7 +382,6 @@ def _update_config_from_selection(runtimes: list[dict], selected: list[dict], *,
         print(f'     ✓ wrote {DEFAULT_CONFIG_PATH.name}')
         adapters = summary.get('adapters_added') or []
         replaced = summary.get('adapters_replaced') or []
-        registry = summary.get('registry_added') or []
         if adapters:
             print(f'     enabled workers: {", ".join(adapters)}')
         if replaced:
@@ -600,8 +599,8 @@ def run_uninstall() -> None:
     print('Uninstall walkthrough complete.')
     print()
     print('Still installed (left untouched):')
-    print(f'  - config.local.json (your local adapter config)')
-    print(f'  - the synkraken Python package itself')
+    print('  - config.local.json (your local adapter config)')
+    print('  - the synkraken Python package itself')
     print()
     print('To finish removing the package:')
     print('  pip uninstall synkraken')

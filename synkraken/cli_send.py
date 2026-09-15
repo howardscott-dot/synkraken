@@ -7,6 +7,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from .adapters.text_normalize import strip_terminal_controls
+
 DEFAULT_BASE = "http://127.0.0.1:9460"
 
 
@@ -25,8 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _auth_headers() -> dict:
+    token = os.environ.get("SYNKRAKEN_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    req = urllib.request.Request(url, headers=_auth_headers())
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
 
@@ -34,7 +42,7 @@ def post_json(url: str, payload: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers()},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
@@ -66,7 +74,7 @@ def print_result(data: dict, raw: bool) -> None:
         print(f"ok: {delivery.get('ok')}")
         if delivery.get("error"):
             print(f"error: {delivery.get('error')}")
-        body = (delivery.get("body") or "").strip()
+        body = strip_terminal_controls((delivery.get("body") or "").strip())
         print(body)
     dead_letters = data.get("dead_letters", [])
     if dead_letters:

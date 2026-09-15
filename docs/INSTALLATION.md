@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - Linux with a user systemd session, or macOS with LaunchAgents
 - at least one supported AI runtime for workforce dispatch
 

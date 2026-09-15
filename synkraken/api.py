@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+import os
 import re
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -10,7 +12,17 @@ import json
 from uuid import uuid4
 
 from .fabric import AgentFabric
+from .bots import BotBusyError
 from .models import new_id
+
+
+# Reject request bodies larger than this to bound memory use on the
+# unauthenticated loopback surface (an oversized POST would otherwise be read
+# fully into memory before parsing).
+MAX_BODY_BYTES = 4 * 1024 * 1024
+# Cap for caller-supplied `limit` query params so a single request cannot force
+# an unbounded query/serialization.
+MAX_QUERY_LIMIT = 1000
 
 
 _ROOM_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,62}$')
@@ -44,16 +56,44 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "synkraken/0.1"
 
+    # Host header allow-list — defeats DNS-rebinding against the loopback API.
+    # None disables the check (operator opted into a non-loopback bind).
+    allowed_hosts: frozenset[str] | None = frozenset({"127.0.0.1", "localhost", "::1"})
+    # Optional shared secret. When set, every request must present a matching
+    # `Authorization: Bearer <token>`. When None, the API relies on the loopback
+    # bind + Host check only (the default single-operator posture).
+    auth_token: str | None = None
+
+    def _gate(self) -> bool:
+        """Validate Host and (if configured) bearer token. Returns True to proceed."""
+        if self.allowed_hosts is not None:
+            host = self.headers.get("Host", "")
+            hostname = host.rsplit(":", 1)[0].strip("[]").lower() if host else ""
+            if hostname not in self.allowed_hosts:
+                self._send(HTTPStatus.FORBIDDEN, {"error": "host not allowed"})
+                return False
+        if self.auth_token is not None:
+            header = self.headers.get("Authorization", "")
+            prefix = "Bearer "
+            presented = header[len(prefix):] if header.startswith(prefix) else ""
+            if not hmac.compare_digest(presented, self.auth_token):
+                self._send(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return False
+        return True
+
     def _send(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise ValueError("request body too large")
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
 
@@ -62,9 +102,146 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         return qs.get(key, [default])[0]
 
+    def _limit_param(self, default: int, maximum: int = MAX_QUERY_LIMIT) -> int:
+        """Parse a `limit` query param safely, clamped to [1, maximum]."""
+        raw = self._query_param("limit", str(default))
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(value, maximum))
+
+    def _bot_route(self, method: str, path: str) -> bool:
+        if path == "/v1/workspace" or path.startswith("/v1/workspace/") or path.startswith("/v1/chat-cards/"):
+            return self._workspace_route(method, path)
+        if path == "/v1/providers" or path.startswith("/v1/providers/"):
+            return self._provider_route(method, path)
+        run_match = re.fullmatch(r"/v1/bot-runs/([^/]+)(/cancel)?", path)
+        if run_match:
+            try:
+                if method == "POST" and run_match[2]:
+                    result = self.fabric.bots.cancel(run_match[1])
+                elif method == "GET" and not run_match[2]:
+                    run = self.fabric.storage.get_bot_run(run_match[1])
+                    if run is None:
+                        raise KeyError(run_match[1])
+                    result = {"run": run, "events": self.fabric.storage.bot_run_events(run_match[1])}
+                else:
+                    self._send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+                    return True
+            except KeyError:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "run not found"})
+            else:
+                self._send(HTTPStatus.OK, result)
+            return True
+        if path != "/v1/bots" and not path.startswith("/v1/bots/"):
+            return False
+        try:
+            match = re.fullmatch(r"/v1/bots/([^/]+)(?:/(conversation|messages|runs|browser))?", path)
+            if method == "GET" and path == "/v1/bots":
+                result = {"bots": self.fabric.bots.list(), "runtimes": self.fabric.bots.runtimes(),
+                          "providers": self.fabric.bots.providers.list()}
+            elif method == "POST" and path == "/v1/bots":
+                result = {"bot": self.fabric.bots.save(self._read_json())}
+            elif match:
+                bot_id, resource = unquote(match[1]), match[2]
+                if method == "GET" and resource == "conversation":
+                    result = self.fabric.bots.conversation(bot_id)
+                elif method == "GET" and resource == "browser":
+                    self.fabric.bots.get(bot_id)
+                    result = self.fabric.bots.browsers.view(bot_id)
+                elif method == "POST" and resource == "browser":
+                    if self.fabric.bots.get(bot_id)["status"] == "working":
+                        raise BotBusyError("Stop the bot before taking over its browser")
+                    payload = self._read_json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("Expected a browser action")
+                    result = self.fabric.bots.browsers.act(bot_id, payload.get("action"), payload)
+                elif method == "GET" and resource is None:
+                    result = {"bot": self.fabric.bots.get(bot_id)}
+                elif method == "PATCH" and resource is None:
+                    result = {"bot": self.fabric.bots.save(self._read_json(), bot_id)}
+                elif method == "POST" and resource == "messages":
+                    result = self.fabric.bots.send(bot_id, self._read_json())
+                elif method == "POST" and resource == "runs":
+                    result = {"run": self.fabric.bots.submit(bot_id, self._read_json())}
+                else:
+                    self._send(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method not allowed"})
+                    return True
+            else:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "bot route not found"})
+                return True
+        except KeyError:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "bot not found"})
+        except BotBusyError as exc:
+            self._send(HTTPStatus.CONFLICT, {"error": str(exc)})
+        except (ValueError, TypeError) as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        else:
+            self._send(HTTPStatus.OK, result)
+        return True
+
+    def _workspace_route(self, method: str, path: str) -> bool:
+        workspace = self.fabric.bots.workspace
+        if method == "POST" and self.headers.get_content_type() != "application/json":
+            self._send(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "JSON required"})
+            return True
+        try:
+            payload = self._read_json() if method == "POST" else {}
+            if not isinstance(payload, dict):
+                raise ValueError("Expected an object")
+            if method == "GET" and path == "/v1/workspace":
+                result = workspace.state()
+            elif method == "GET" and path == "/v1/workspace/capabilities":
+                result = workspace.capabilities()
+            elif method == "POST" and path == "/v1/workspace/setup":
+                result = workspace.setup(payload)
+            elif method == "POST" and path == "/v1/workspace/oauth/start":
+                result = workspace.start_oauth(payload.get("card_id", ""))
+            elif method == "POST" and path == "/v1/workspace/oauth/finish":
+                result = workspace.finish_oauth(payload.get("flow_id", ""), payload.get("code", ""))
+            elif method == "POST" and re.fullmatch(r"/v1/chat-cards/[^/]+", path):
+                result = workspace.resolve_card(path.rsplit("/", 1)[-1], payload)
+            else:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "workspace route not found"})
+                return True
+        except KeyError:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "workspace item not found"})
+        except BotBusyError as exc:
+            self._send(HTTPStatus.CONFLICT, {"error": str(exc)})
+        except (ValueError, TypeError) as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        else:
+            self._send(HTTPStatus.OK, result)
+        return True
+
+    def _provider_route(self, method: str, path: str) -> bool:
+        match = re.fullmatch(r"/v1/providers/([^/]+)(/probe)?", path)
+        try:
+            if path == "/v1/providers" and method == "GET":
+                result = {"providers": self.fabric.bots.providers.list()}
+            elif path == "/v1/providers" and method == "POST":
+                result = {"provider": self.fabric.bots.providers.save(self._read_json())}
+            elif match and method == "PATCH" and not match[2]:
+                result = {"provider": self.fabric.bots.providers.save(self._read_json(), match[1])}
+            elif match and method == "POST" and match[2]:
+                result = self.fabric.bots.providers.probe(match[1])
+            else:
+                self._send(HTTPStatus.NOT_FOUND, {"error": "provider route not found"})
+                return True
+        except (ValueError, TypeError) as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        else:
+            self._send(HTTPStatus.OK, result)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._gate():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
+        if self._bot_route("GET", path):
+            return
 
         if path == "/health":
             self._send(HTTPStatus.OK, self.fabric.health())
@@ -911,8 +1088,12 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
             self.fabric.event_bus.unsubscribe(q)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._gate():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
+        if self._bot_route("POST", path):
+            return
 
         if path == "/v1/messages":
             try:
@@ -1757,8 +1938,12 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_PATCH(self) -> None:  # noqa: N802
+        if not self._gate():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
+        if self._bot_route("PATCH", path):
+            return
         m = re.fullmatch(r"/v1/agents/([^/]+)/profile", path)
         if m:
             agent_id = unquote(m.group(1))
@@ -1886,6 +2071,8 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, task)
 
     def do_PUT(self) -> None:  # noqa: N802
+        if not self._gate():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         m = re.fullmatch(r"/v1/rooms/([^/]+)/memory", path)
@@ -1916,6 +2103,8 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, memory)
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self._gate():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -2012,11 +2201,35 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.NO_CONTENT, {})
 
 
-def serve(fabric: AgentFabric, host: str, port: int) -> None:
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", ""}
+
+
+def serve(fabric: AgentFabric, host: str, port: int, auth_token: str | None = None) -> None:
     class BoundHandler(FabricRequestHandler):
         pass
 
     BoundHandler.fabric = fabric
+    # Prefer an explicit token, else fall back to the environment.
+    token = auth_token or os.environ.get("SYNKRAKEN_TOKEN") or None
+    BoundHandler.auth_token = token
+
+    is_loopback = host in {"127.0.0.1", "localhost", "::1"}
+    if is_loopback:
+        BoundHandler.allowed_hosts = frozenset({"127.0.0.1", "localhost", "::1"})
+    else:
+        # Operator explicitly bound to a routable address; relax the Host check
+        # (it would otherwise reject the real hostname) but demand a token,
+        # because the API drives permission-bypassed code-executing runtimes.
+        BoundHandler.allowed_hosts = None
+        if token is None:
+            print(
+                f"WARNING: binding to non-loopback host {host!r} without an auth "
+                "token. Any host that can reach this port can drive your AI "
+                "runtimes. Set server.auth_token (or SYNKRAKEN_TOKEN) to require "
+                "authentication."
+            )
+    if token is not None:
+        print("synkraken auth: bearer token required")
     with ThreadingHTTPServer((host, port), BoundHandler) as httpd:
         print(f"synkraken listening on http://{host}:{port}")
         httpd.serve_forever()

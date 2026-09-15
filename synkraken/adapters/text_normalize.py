@@ -6,6 +6,17 @@ from typing import Any
 
 
 FINAL_LINE_RE = re.compile(r'^[A-Z0-9_-]+(?:\s|:).+$')
+# Control characters except tab and newline. Agent/runtime output is untrusted;
+# an embedded ESC/OSC sequence would otherwise be interpreted by the operator's
+# terminal (screen rewrite, title/clipboard attacks) when a reply is printed.
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def strip_terminal_controls(text: str) -> str:
+    """Remove terminal control characters, preserving tab and newline."""
+    if not text:
+        return text
+    return _CONTROL_CHARS_RE.sub('', text)
 NOISY_PREFIXES = (
     '{"content":',
     '{"message":',

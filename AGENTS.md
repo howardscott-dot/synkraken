@@ -6,7 +6,7 @@ SynKraken is a local-first, runtime-neutral **AI workforce control plane** that 
 
 The daemon (`synkraken-daemon`) owns all state: SQLite persistence, message routing, event bus, agent orchestration. The TUI and Web Command Deck are clients over HTTP + SSE. The bridge skill (`skills/synkraken-bridge/`) is read by participating agents so they can call back into SynKraken.
 
-**It is not a coding agent, orchestration LLM, or CrewAI clone.** The architectural doctrine is documented in `docs/`.
+The September 2026 product direction adds a native, provider-neutral bot engine alongside retained CLI runtimes. Bots own identity, memory, permissions and conversations independently of their provider/model. The native loop handles model calls, tools and bounded delegation; older control-plane-only doctrine applies to the retained runtime layer. See `docs/BOT_ENGINE.md`.
 
 ---
 
@@ -57,7 +57,7 @@ synkraken config           # interactive: discover runtimes, install bridge skil
 synkraken config --rediscover  # re-scan and merge/replace/skip
 synkraken discover          # show detected runtimes without changing config
 synkraken discover --json --verbose  # full details
-synkraken install-skills    # install bridge skill into configured runtimes only
+synkraken config --install-skills  # install bridge skill into configured runtimes only
 synkraken uninstall        # interactive removal of skills + cleanup
 ```
 
@@ -129,7 +129,7 @@ SQLite is the authoritative store. Schema is defined in `storage.py` `SCHEMA` co
 - Python 3.10+
 - `from __future__ import annotations` in every module
 - Type hints encouraged but not enforced
-- **No runtime dependencies** — stdlib only (except no framework deps)
+- Keep the runtime lightweight. The operator-requested encrypted vault uses `cryptography` and `keyring`; do not implement cryptographic primitives locally. The HTTP/storage/UI stack remains standard library.
 - **No `# noqa`, no comments** unless explaining non-obvious intent (never communicate through code comments)
 - Dataclasses with `slots=True` for models (`models.py`)
 - Composition over factory abstraction

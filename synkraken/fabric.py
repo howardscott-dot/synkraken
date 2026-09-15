@@ -4,18 +4,18 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from queue import Queue
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Any
 import json
-import os
 import re
 import subprocess
 import time
 
 from .adapters import build_adapter
+from .bots import BotService
 from .models import AdapterReply, FabricMessage, new_id, utc_now_iso
 from .router import resolve_targets
-from .storage import LEGACY_SHARED_MEMORY_TYPES, PROPOSAL_TYPES, SHARED_MEMORY_IMPORTANCE, SHARED_MEMORY_SCOPES, SHARED_MEMORY_TYPES, Storage
+from .storage import PROPOSAL_TYPES, SHARED_MEMORY_IMPORTANCE, SHARED_MEMORY_SCOPES, SHARED_MEMORY_TYPES, Storage
 
 
 class EventBus:
@@ -71,6 +71,13 @@ class AgentFabric:
         self._sync_runtime_registry()
         routing = config.get("routing", {})
         self.max_hops = int(routing.get("max_hops", 4))
+        # Global ceiling on concurrent adapter (subprocess) executions across the
+        # whole daemon. Nested agent->bridge->dispatch chains each create their
+        # own fan-out pool, so without a shared cap a broadcast amplification
+        # could spawn unbounded concurrent inference. This bounds that blast
+        # radius (cost + thread/process exhaustion) regardless of hop lineage.
+        self.max_concurrent_dispatch = max(1, int(routing.get("max_concurrent_dispatch", 8)))
+        self._dispatch_semaphore = BoundedSemaphore(self.max_concurrent_dispatch)
         self.retry_limit = int(routing.get("retry_limit", 1))
         self.retry_backoff_seconds = int(routing.get("retry_backoff_seconds", 1))
         memory = config.get("memory", {})
@@ -78,6 +85,11 @@ class AgentFabric:
         self.memory_max_chars_injected = int(memory.get("max_chars_injected", 1200))
         self.memory_max_memory_chars = int(memory.get("max_memory_chars", 500))
         self.memory_min_confidence = int(memory.get("min_confidence", 70))
+        # When False (default), agent-proposed team memory is NOT auto-approved by
+        # a peer agent — it stays `proposed` for a human to approve. Auto-review
+        # lets an LLM approve attacker-shaped text that is then injected into every
+        # future prompt in scope (a self-replicating prompt-injection channel).
+        self.memory_auto_review = bool(memory.get("auto_review", False))
         goal = config.get("goal", {})
         self.goal_default_max_rounds = int(goal.get("max_rounds", 3))
         self.goal_default_threshold = int(goal.get("threshold", 80))
@@ -102,6 +114,7 @@ class AgentFabric:
             or None
         )
         self.started_at = utc_now_iso()
+        self.bots = BotService(self)
 
     def health(self) -> dict[str, Any]:
         return {
@@ -1291,7 +1304,7 @@ class AgentFabric:
                 "content": content,
                 "source_team_run_id": team_run_id,
                 "source_task_id": task_id,
-                "auto_review": True,
+                "auto_review": self.memory_auto_review,
             })
             proposals.append({"agent_id": agent, "status": proposed.get("status"), "memory": proposed.get("memory")})
         self.storage.record_team_event(
@@ -2126,7 +2139,7 @@ class AgentFabric:
         now = utc_now_iso()
         updated = self.storage.update_shared_memory(
             memory_id,
-            {"status": "approved", "approved_by": actor, "approved_at": now, "confidence": max(100, int(memory.get("confidence") or 0))},
+            {"status": "approved", "approved_by": actor, "approved_at": now, "confidence": max(0, min(100, int(memory.get("confidence") or 0)))},
             actor=actor,
             event_type="memory_approved",
         )
@@ -2987,7 +3000,7 @@ class AgentFabric:
         result['memory_items'] = memory_items
         return result
 
-    def dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(self, payload: dict[str, Any], *, context_prefix: str = "") -> dict[str, Any]:
         message_id = str(payload.get("message_id") or "").strip() or new_id()
         message = FabricMessage(
             source=str(payload["source"]),
@@ -3062,6 +3075,8 @@ class AgentFabric:
             adapter = self.adapters[delivery_target]
             runtime_name = adapter.health().get('runtime_name', delivery_target)
             delivery_message = self._delivery_message_for_target(message, delivery_target)
+            if context_prefix:
+                delivery_message.body = context_prefix + delivery_message.body
             target_memory_context, target_memory_items = self._prompt_memory_context(
                 memory_room,
                 runtime_id=delivery_target,
@@ -3085,7 +3100,8 @@ class AgentFabric:
                 self._publish_typing_started(delivery_message, delivery_target, runtime_name, original_target, reply_context)
                 self._set_agent_working(delivery_target, delivery_message, reply_context=reply_context)
                 try:
-                    reply = adapter.send(delivery_message)
+                    with self._dispatch_semaphore:
+                        reply = adapter.send(delivery_message)
                 except Exception as exc:  # noqa: BLE001
                     reply, terminal_status = self._adapter_exception_reply(delivery_target, exc)
                 else:

@@ -83,16 +83,17 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "SynKraken needs Python 3.10+ on PATH as $PYTHON_BIN." >&2
+  echo "SynKraken needs Python 3.11+ on PATH as $PYTHON_BIN." >&2
   exit 1
 fi
 
-PY_VERSION="$("$PYTHON_BIN" - <<'PY'
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
-raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
-PY
-)"
+# Print the version (never exits non-zero here), then check it explicitly so a
+# too-old Python produces a clear message instead of a silent set -e abort.
+PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "SynKraken needs Python 3.11+, but $PYTHON_BIN is $PY_VERSION." >&2
+  exit 1
+fi
 
 SRC_DIR="$INSTALL_HOME/src"
 VENV_DIR="$INSTALL_HOME/venv"
@@ -115,7 +116,8 @@ fi
 echo "Creating Python $PY_VERSION environment"
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel >/dev/null
-"$VENV_DIR/bin/pip" install -e "$SRC_DIR"
+"$VENV_DIR/bin/pip" install -e "$SRC_DIR[browser]"
+"$VENV_DIR/bin/python" -m playwright install chromium
 
 for name in synkraken synkraken-daemon synkraken-send; do
   cat > "$BIN_DIR/$name" <<EOF

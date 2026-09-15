@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + dev tooling)
+        run: pip install -e ".[dev]"
+
+      - name: Byte-compile
+        run: python -m compileall synkraken scripts
+
+      - name: Lint
+        run: ruff check synkraken/
+
+      - name: Unit tests
+        run: pytest tests/ -v
+
+      - name: Console script sanity
+        run: synkraken --help
+
+      - name: Leak guard (no private material)
+        run: python scripts/context_audit.py

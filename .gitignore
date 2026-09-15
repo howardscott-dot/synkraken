@@ -20,6 +20,10 @@ cache/
 # Local config
 config.local.json
 
+# Private / non-shipping material
+.monitor/
+docs/sales/
+
 # Local runtime state
 *.pid
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from importlib.resources import files
+import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -498,9 +500,12 @@ async function api(path, options = {}) {
 
 function setNotice(text) { $("notice").textContent = text; }
 function esc(text) {
+  // textContent->innerHTML escapes &, <, > but NOT quotes. esc() output is
+  // interpolated into double-quoted HTML attributes carrying untrusted agent
+  // output, so quotes must be escaped too to prevent attribute-injection XSS.
   const div = document.createElement("div");
   div.textContent = text ?? "";
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function hhmmss(iso) { return iso ? iso.slice(11, 19) : ""; }
 function timeAgo(iso) {
@@ -1729,10 +1734,40 @@ bootstrap().catch((error) => setNotice(`startup failed: ${error.message}`));
 
 class CommandDeckHandler(BaseHTTPRequestHandler):
     daemon_url = DEFAULT_DAEMON_URL
+    # Host header allow-list. When the deck is bound to loopback, only requests
+    # whose Host is a loopback name are served — this defeats DNS-rebinding
+    # attacks where a malicious web page resolves its own domain to 127.0.0.1
+    # to reach the unauthenticated deck. None disables the check (non-loopback
+    # bind, where the operator has explicitly opted into remote exposure).
+    allowed_hosts: frozenset[str] | None = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def _host_ok(self) -> bool:
+        if self.command not in {"GET", "HEAD"}:
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                self.send_error(HTTPStatus.FORBIDDEN, "Cross-origin write rejected")
+                return False
+        if self.allowed_hosts is None:
+            return True
+        host = self.headers.get("Host", "")
+        hostname = host.rsplit(":", 1)[0].strip("[]").lower() if host else ""
+        if hostname in self.allowed_hosts:
+            return True
+        self.send_error(HTTPStatus.FORBIDDEN, "Host not allowed")
+        return False
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            self._send_text(files("synkraken").joinpath("static/bots.html").read_text(), "text/html; charset=utf-8")
+            return
+        if parsed.path in {"/bots.css", "/bots.js"}:
+            content_type = "text/css" if parsed.path.endswith(".css") else "application/javascript"
+            self._send_text(files("synkraken").joinpath("static" + parsed.path).read_text(), content_type + "; charset=utf-8")
+            return
+        if parsed.path == "/deck":
             self._send_text(INDEX_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/styles.css":
@@ -1750,18 +1785,32 @@ class CommandDeckHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
         if self.path.startswith("/api/"):
             self._proxy_json()
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PATCH(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
         if self.path.startswith("/api/"):
             self._proxy_json()
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PUT(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
+        if self.path.startswith("/api/"):
+            self._proxy_json()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return
         if self.path.startswith("/api/"):
             self._proxy_json()
             return
@@ -1772,20 +1821,50 @@ class CommandDeckHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
+        # Defense-in-depth for the operator's browser. The deck is same-origin
+        # and self-contained, so a strict CSP costs nothing and blocks injected
+        # script/exfiltration if the escaping in esc() is ever bypassed.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+            "form-action 'self'; frame-ancestors 'none'",
+        )
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(encoded)
 
     def _daemon_target(self) -> str:
         return f"{self.daemon_url}{self.path[len('/api'):]}"
 
+    def _daemon_headers(self, extra: dict | None = None) -> dict:
+        headers = dict(extra or {})
+        token = os.environ.get("SYNKRAKEN_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
     def _proxy_json(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > 4 * 1024 * 1024:
+                raise ValueError()
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request size")
+            return
+        if length and self.headers.get_content_type() != "application/json":
+            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "JSON required")
+            return
         body = self.rfile.read(length) if length else None
         req = Request(
             self._daemon_target(),
             data=body,
             method=self.command,
-            headers={"Content-Type": self.headers.get("Content-Type", "application/json")},
+            headers=self._daemon_headers(
+                {"Content-Type": self.headers.get("Content-Type", "application/json")}
+            ),
         )
         try:
             with urlopen(req, timeout=180) as resp:
@@ -1793,6 +1872,7 @@ class CommandDeckHandler(BaseHTTPRequestHandler):
                 self.send_response(resp.status)
                 self.send_header("Content-Type", resp.headers.get_content_type() + "; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(payload)
         except HTTPError as exc:
@@ -1811,7 +1891,7 @@ class CommandDeckHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _proxy_sse(self) -> None:
-        req = Request(self._daemon_target(), headers={"Accept": "text/event-stream"})
+        req = Request(self._daemon_target(), headers=self._daemon_headers({"Accept": "text/event-stream"}))
         try:
             with urlopen(req, timeout=60) as resp:
                 self.send_response(resp.status)
@@ -1834,6 +1914,15 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, daemon_url: str = 
         pass
 
     BoundHandler.daemon_url = daemon_url.rstrip("/")
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        BoundHandler.allowed_hosts = frozenset({"127.0.0.1", "localhost", "::1"})
+    else:
+        BoundHandler.allowed_hosts = None
+        print(
+            f"WARNING: binding the web deck to non-loopback host {host!r}. The "
+            "deck proxies the daemon API; anyone who can reach this port can "
+            "drive your AI runtimes."
+        )
     with ThreadingHTTPServer((host, port), BoundHandler) as httpd:
         print(f"synkraken command deck listening on http://{host}:{port}")
         httpd.serve_forever()

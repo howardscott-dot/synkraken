@@ -7,14 +7,14 @@ from pathlib import Path
 import shutil
 import socket
 import sqlite3
-import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from .branding import NAME, TAGLINE, print_logo
+from .adapters.text_normalize import strip_terminal_controls
+from .branding import NAME, print_logo
 from .discovery import RUNTIME_REGISTRY, SUPPORTED_ADAPTER_TYPES, discover_local_runtimes, discover_remote_runtimes
 from .setup_mode import run_install_skills, run_quick_setup, run_setup, run_uninstall
 from .runtime_service import RuntimeServiceError, format_uptime, runtime_service_for_platform
@@ -24,8 +24,14 @@ from .web import serve as serve_web
 DEFAULT_BASE = os.environ.get("SYNKRAKEN_URL", "http://127.0.0.1:9460")
 
 
+def _auth_headers() -> dict:
+    token = os.environ.get("SYNKRAKEN_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    req = urllib.request.Request(url, headers=_auth_headers())
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
 
@@ -33,7 +39,7 @@ def post_json(url: str, payload: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers()},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
@@ -41,7 +47,7 @@ def post_json(url: str, payload: dict) -> dict:
 
 
 def delete_json(url: str) -> dict:
-    req = urllib.request.Request(url, method="DELETE")
+    req = urllib.request.Request(url, method="DELETE", headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
@@ -572,7 +578,7 @@ def print_result(data: dict, raw: bool) -> None:
             print(f"   quality: {delivery.get('quality')}")
         if delivery.get("error"):
             print(f"   error: {delivery.get('error')}")
-        body = (delivery.get("body") or "").strip()
+        body = strip_terminal_controls((delivery.get("body") or "").strip())
         if body:
             print(f"   {body}")
         print()
@@ -726,7 +732,7 @@ def handle_lifecycle_command(action: str, base: str, wait_seconds: int = 15, *, 
 
 def doctor_runtime(config_path: Path, base: str) -> int:
     checks: list[tuple[str, bool, str, str]] = []
-    checks.append(("Python", sys.version_info >= (3, 10), sys.version.split()[0], "Install Python 3.10 or newer."))
+    checks.append(("Python", sys.version_info >= (3, 11), sys.version.split()[0], "Install Python 3.11 or newer."))
     try:
         service = runtime_service_for_platform()
         state = service.status()
@@ -858,7 +864,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--wait-seconds", type=int, default=20, help="Seconds to wait for health validation")
     add_base_url_arg(p_install)
 
-    p_setup = sub.add_parser("setup", help="Auto-configure local workers, install, and start SynKraken")
+    p_setup = sub.add_parser("setup", help="Install SynKraken and choose a default model in chat")
+    p_setup.add_argument("--legacy", action="store_true", help="Use existing external-runtime discovery setup")
     p_setup.add_argument("--fresh", action="store_true", help="Replace existing local worker configuration instead of merging")
     p_setup.add_argument("--wait-seconds", type=int, default=20, help="Seconds to wait for health validation")
     add_base_url_arg(p_setup)
@@ -1169,20 +1176,24 @@ def main() -> None:
     if args.command == 'uninstall':
         raise SystemExit(uninstall_runtime(remove_skills=args.remove_skills))
     if args.command == 'setup':
-        config_path = run_quick_setup(rediscover=not args.fresh)
+        from .chat_install import prepare_config, open_setup
+        config_path = run_quick_setup(rediscover=not args.fresh) if args.legacy else prepare_config(_config_path())
         result = install_runtime(config_path, args.url.rstrip("/"), args.wait_seconds, quiet=True)
         if result == 0:
             print()
             print("Ready.")
-            print("Run: synkraken tui")
-            print("Or:  synkraken web")
+            open_setup(args.url.rstrip("/"), config_path.parent / "data")
         raise SystemExit(result)
     if args.command == 'install':
         config_path = _config_path(args.config)
         if not config_path.exists() and args.config is None:
-            print("No configuration found. Starting setup...")
-            run_setup()
-        raise SystemExit(install_runtime(config_path, args.url.rstrip("/"), args.wait_seconds))
+            from .chat_install import prepare_config
+            prepare_config(config_path)
+        result = install_runtime(config_path, args.url.rstrip("/"), args.wait_seconds)
+        if result == 0:
+            from .chat_install import open_setup
+            open_setup(args.url.rstrip("/"), config_path.parent / "data")
+        raise SystemExit(result)
     if args.command == 'doctor':
         raise SystemExit(doctor_runtime(_config_path(args.config), args.url.rstrip("/")))
     if args.command == 'tui':
@@ -1446,7 +1457,7 @@ def main() -> None:
                     if not messages:
                         print(f"No messages in room: {name}")
                     for message in messages:
-                        print(f"{message.get('timestamp')} {message.get('source')}: {message.get('body')}")
+                        print(f"{message.get('timestamp')} {message.get('source')}: {strip_terminal_controls(str(message.get('body') or ''))}")
                 return
             if action == "send":
                 if not name or not args.values:
@@ -1481,7 +1492,7 @@ def main() -> None:
                     print(json.dumps(data, indent=2, ensure_ascii=False))
                 else:
                     for message in data.get("messages", []):
-                        print(f"{message.get('timestamp')} {message.get('source')}: {message.get('body')}")
+                        print(f"{message.get('timestamp')} {message.get('source')}: {strip_terminal_controls(str(message.get('body') or ''))}")
                 return
             if args.action == "summarize":
                 if not args.name:
