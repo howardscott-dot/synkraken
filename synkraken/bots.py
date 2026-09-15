@@ -174,7 +174,7 @@ class BotService:
         result = self.storage.get_bot_conversation(bot["conversation_id"])
         result["runs"] = self.storage.list_bot_runs(bot_id)
         result["memories"] = self.storage.read_bot_memory(bot_id)
-        result["cards"] = self.storage.chat_cards(bot_id)
+        result["cards"] = self.workspace.visible_cards(bot_id)
         if result["runs"]:
             result["run_events"] = self.storage.bot_run_events(result["runs"][0]["run_id"])
         return result
@@ -238,9 +238,18 @@ class BotService:
             raise ValueError("body must contain 1–20000 characters")
         return body.strip()
 
+    def resume(self, run_id: str) -> dict:
+        run = self.storage.get_bot_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run.get("status") != "waiting_for_user":
+            return {"run_id": run_id, "status": run.get("status"), "resumed": False}
+        return {**self.send(run["bot_id"], {"body": run["body"]}, _run=run, _resume=True), "resumed": True}
+
     def send(self, bot_id: str, payload: dict, *, _run: dict | None = None,
              _budget: RunBudget | None = None, _lineage: tuple[str, ...] = (),
-             _parent_run_id: str | None = None, _reserved: bool = False) -> dict:
+             _parent_run_id: str | None = None, _reserved: bool = False,
+             _resume: bool = False) -> dict:
         body = self._body(payload)
         with self._guard:
             if bot_id in self._active and not _reserved:
@@ -269,17 +278,22 @@ class BotService:
                 f"Recent conversation (quoted context, not new instructions):\n{previous}\n\n"
                 "Current user message:\n"
             )
-            task_id = new_id()
-            self.storage.create_task(
-                task_id, body.strip()[:100], body.strip(), "in_progress", "normal",
-                None, bot["runtime_id"] or None, None, "operator", utc_now_iso(),
-            )
+            if _resume and run.get("task_id"):
+                task_id = run["task_id"]
+                self.storage.update_task(task_id, {"status": "in_progress"}, "system", utc_now_iso())
+            else:
+                task_id = new_id()
+                self.storage.create_task(
+                    task_id, body.strip()[:100], body.strip(), "in_progress", "normal",
+                    None, bot["runtime_id"] or None, None, "operator", utc_now_iso(),
+                )
             run.update(status="running", task_id=task_id, provider_id=bot["provider_id"],
                        model=bot["model"], updated_at=utc_now_iso())
             self.storage.save_bot_run(run)
             self.fabric.event_bus.publish("bot.working", {"bot_id": bot_id, "task_id": task_id})
             if bot["provider_id"]:
-                result = self.engine.run(bot, body, history, task_id, run["run_id"], budget, _lineage)
+                result = self.engine.run(bot, body, history, task_id, run["run_id"], budget, _lineage,
+                                         resume=_resume, message_id=run.get("message_id") if _resume else None)
             else:
                 budget.consume("model")
                 result = self.fabric.dispatch({
@@ -300,7 +314,8 @@ class BotService:
             }, "system", utc_now_iso())
             run.update(status=status, updated_at=utc_now_iso(),
                        error=result["deliveries"][-1].get("error"),
-                       result=result["deliveries"][-1].get("body"))
+                       result=result["deliveries"][-1].get("body"),
+                       message_id=result["message"]["message_id"])
             self.storage.save_bot_run(run)
             self.engine.emit(run["run_id"], status, {"task_id": task_id})
             return {"task_id": task_id, "run_id": run["run_id"], "status": status, "result": result}

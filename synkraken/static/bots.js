@@ -1,10 +1,20 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const state = {workspace: {}, bots: [], rooms: [], selected: null, data: {}, loading: false,
-  pending: false, drafts: new Map(), requests: new Map(), timelineKey: '', cardKey: '', revision: 0};
+  pending: false, drafts: new Map(), requests: new Map(), timelineKey: '', cardKey: '', revision: 0,
+  connected: null, inspector: false};
 const providerNames = {openrouter: 'OpenRouter', anthropic: 'Anthropic', openai: 'OpenAI', grok: 'Grok', minimax: 'MiniMax', ollama: 'Local · Ollama'};
 function el(tag, className, text) { const n = document.createElement(tag); if(className) n.className = className; if(text !== undefined) n.textContent = text; return n; }
 function button(label, action, parent) { const n = el('button','',label); n.type = 'button'; n.onclick = action; if(parent) parent.append(n); return n; }
+function slug(value) { return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'item'; }
+function hook(node, testId, label) {
+  if(testId) node.setAttribute('data-testid', testId);
+  if(label) node.setAttribute('aria-label', label);
+  return node;
+}
+function persistSelection() {
+  try { localStorage.setItem('synkraken.chat.selection', JSON.stringify(state.selected)); } catch {}
+}
 async function api(path, body, method) {
   const response = await fetch('/api' + path, {method: method || (body === undefined ? 'GET' : 'POST'), headers: {'Content-Type':'application/json'}, ...(body === undefined ? {} : {body: JSON.stringify(body)}), cache:'no-store'});
   const value = await response.json(); if(!response.ok) throw Error(value.error || 'The request could not finish'); return value;
@@ -93,24 +103,44 @@ function message(text, user=false, timestamp) {
   $('timeline').append(row); return row;
 }
 function roster() {
-  const query=$('search').value.toLowerCase(); $('roster').replaceChildren();
+  const query=$('search').value.toLowerCase();
+  const nav=$('roster');
   const bots=state.bots.length?state.bots:[{bot_id:'setup',name:'SynKraken',job:''}];
-  for(const bot of bots.filter(b=>(b.name+' '+b.job).toLowerCase().includes(query))) {
-    const n=button('',()=>select(bot.bot_id==='setup'?null:{kind:'bot',id:bot.bot_id}));
+  const visible=bots.filter(b=>(b.name+' '+b.job).toLowerCase().includes(query));
+  const keep=new Set(visible.map(b=>b.bot_id));
+  for(const node of [...nav.children]) { if(!keep.has(node.dataset.botId)) node.remove(); }
+  for(const bot of visible) {
+    let n=nav.querySelector('[data-bot-id="'+CSS.escape(bot.bot_id)+'"]');
+    if(!n){
+      n=button('',()=>select(bot.bot_id==='setup'?null:{kind:'bot',id:bot.bot_id}));
+      n.dataset.botId=bot.bot_id;
+      nav.append(n);
+    }
     n.className='bot-item'+((state.selected?.id===bot.bot_id || (!state.selected && bot.bot_id==='setup'))?' selected':'');
-    n.setAttribute('aria-label',bot.name); n.setAttribute('aria-pressed',String(state.selected?.id===bot.bot_id));
-    n.append(avatar(bot),el('span','bot-name',bot.name));
-    if(bot.label||bot.job) n.append(el('span','bot-role',bot.label||bot.job)); $('roster').append(n);
+    hook(n, 'bot-'+slug(bot.name), 'Open conversation with '+bot.name);
+    n.setAttribute('aria-pressed',String(state.selected?.id===bot.bot_id || (!state.selected && bot.bot_id==='setup')));
+    if(!n.querySelector('.avatar')) n.append(avatar(bot),el('span','bot-name',bot.name));
+    else { n.querySelector('.avatar').replaceWith(avatar(bot)); n.querySelector('.bot-name').textContent=bot.name; }
+    let role=n.querySelector('.bot-role');
+    if(bot.label||bot.job){
+      if(!role){role=el('span','bot-role');n.append(role);}
+      role.textContent=bot.label||bot.job;
+    } else if(role) role.remove();
   }
   $('channel-section').hidden=!state.rooms.length; $('channels').replaceChildren();
-  for(const room of state.rooms) { const b=button(room.name,()=>select({kind:'room',id:room.name}),$('channels')); b.className='channel-item'; }
+  for(const room of state.rooms) {
+    const b=button(room.name,()=>select({kind:'room',id:room.name}),$('channels'));
+    b.className='channel-item'; hook(b, 'channel-'+slug(room.name), 'Open conversation '+room.name);
+  }
 }
 function header() {
   const bot=current(), setup=!state.selected;
   document.body.classList.toggle('setting-up',setup);
   $('title').textContent=bot?.name || (state.selected?.kind==='room'?state.selected.id:'SynKraken');
   $('header-avatar').replaceChildren(avatar(bot));
-  $('presence').textContent=setup?'Setup':bot?.status==='working'?'Working…':bot?.status==='unavailable'?'Connection needed':'';
+  $('presence').textContent=setup?'Setup':bot?.status==='working'?'Working…':bot?.status==='waiting_for_user'?'Waiting for approval':bot?.status==='unavailable'?'Connection needed':'';
+  $('presence').setAttribute('data-testid', 'run-status');
+  $('presence').setAttribute('aria-label', $('presence').textContent || 'Run status');
   const working=state.pending||bot?.status==='working';
   document.querySelectorAll('[data-wait-idle]').forEach(b=>b.disabled=working);
   $('send').disabled=working; $('stop').hidden=!bot?.last_run||bot.status!=='working';
@@ -119,12 +149,13 @@ function header() {
 }
 async function select(selected) {
   state.drafts.set(key(),$('message').value); state.selected=selected; state.revision++; state.timelineKey=''; state.cardKey='';
-  $('message').value=state.drafts.get(key())||''; $('inspector').hidden=true;
-  try { localStorage.setItem('synkraken.chat.selection',JSON.stringify(selected)); } catch {}
+  $('message').value=state.drafts.get(key())||'';
+  persistSelection();
   notice(); roster(); header(); await loadConversation();
 }
 function cardShell(title, description) {
   const card=el('section','input-card'); card.append(el('h2','',title)); if(description)card.append(el('p','',description));
+  hook(card, 'input-card', title);
   $('input-cards').append(card); return card;
 }
 function privateField(card,label,name) {
@@ -144,6 +175,7 @@ function connectionCard(provider, cardId='') {
   const card=cardShell(provider==='ollama'?'Connect your local model':`Connect ${name}`,
     provider==='ollama'?'SynKraken will use the model server on localhost:11434.':
     'Credentials go directly to the encrypted host vault. They are never sent as chat messages. The master key stays in your host keychain. Cloud sync is not connected.');
+  hook(card, cardId?'card-connection':'card-setup-connection');
   const save=payload=>cardId?api('/v1/chat-cards/'+cardId,payload):api('/v1/workspace/setup',{action:'connect',...payload});
   if(provider==='ollama') {button('Use local model',()=>submitCard(card,()=>save({})),card);return;}
   if(['anthropic','openai','grok'].includes(provider)) card.append(el('p','auth-status','Account sign-in is not connected in this build yet. An API key is an optional, separately billed connection.'));
@@ -196,39 +228,49 @@ function renderCards() {
     } else if(w.step==='connect') {connectionCard(w.provider_kind);button('Choose a different model or provider',()=>{api('/v1/workspace/setup',{action:'restart'}).then(()=>refresh(true)).catch(e=>notice(e.message));},$('input-cards').lastElementChild);}
     return;
   }
-  for(const item of cards.filter(c=>c.status==='pending')) {
+  for(const item of cards.filter(c=>c.status==='pending' && !c.probe)) {
     if(item.kind==='connection') {connectionCard(item.provider,item.card_id);continue;}
     if(item.kind==='capability') {
-      const card=cardShell('Enable '+item.capability+' for '+item.target_name,item.reason);
+      const card=cardShell('Enable '+item.capability+' for '+(item.target_name||current()?.name||'this bot'),item.reason);
+      hook(card, 'card-capability'); card.dataset.cardId=item.card_id; card.dataset.kind=item.kind;
+      card.append(el('p','',`Capability: ${item.capability}. Target: ${item.target_name||current()?.name||''}.`));
       card.append(el('p','','This enables the requested tools. Websites still require their own access approval.'));
-      const original=state.data.runs?.find(r=>r.run_id===item.run_id)?.body||state.data.runs?.[0]?.body;
       const apply=button('Enable and continue',()=>submitCard(card,async()=>{
         await api('/v1/chat-cards/'+item.card_id,{approve:true});
-        if(original)await api('/v1/bots/'+item.bot_id+'/runs',{body:'Continue this request using the newly enabled capability: '+original,request_key:'continue-'+item.card_id});
       }),card);apply.dataset.waitIdle='true';apply.disabled=current()?.status==='working';
-      button('Not now',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card);continue;
+      hook(apply, 'approve-capability', 'Enable '+item.capability+' and continue');
+      hook(button('Not now',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card), 'dismiss-capability', 'Cancel '+item.capability+' request');continue;
     }
     if(item.kind==='browser_access') {
-      const card=cardShell('Browser access',`Allow this bot to navigate and interact with ${item.origin}? Other sites remain blocked until allowed.`);
-      const original=state.data.runs?.[0]?.body;
+      const card=cardShell('Browser access',`Allow ${(item.target_name||current()?.name||'this bot')} to navigate and interact with ${item.origin}? Other sites remain blocked until allowed.`);
+      hook(card, 'card-origin'); card.dataset.cardId=item.card_id; card.dataset.kind=item.kind;
+      card.append(el('p','',`Capability: browser. Target: ${item.target_name||current()?.name||''}. Origin: ${item.origin}.`));
       const allow=button('Allow site and continue',()=>submitCard(card,async()=>{
         await api('/v1/chat-cards/'+item.card_id,{approve:true});
-        await api('/v1/bots/'+item.bot_id+'/browser',{action:'open',url:item.url});
         showDrawer('browser');
-        if(original)await api('/v1/bots/'+item.bot_id+'/runs',{body:'Continue this request; the requested website is now available in your browser: '+original,request_key:'continue-'+item.card_id});
       }),card);allow.dataset.waitIdle='true';allow.disabled=current()?.status==='working';
-      button('Dismiss',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card);continue;
+      hook(allow, 'approve-origin', 'Allow '+item.origin+' and continue');
+      hook(button('Dismiss',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card), 'dismiss-origin', 'Cancel browser access');continue;
     }
     const card=cardShell(item.kind==='credential'?`Secure input · ${item.service}`:`Update ${item.target_name}`,
-      item.kind==='credential'?`${item.purpose}\nEncrypted on this host. Not shared with the model. Saving does not sign in to the service. Cloud sync is not connected.`:'Review this change from your conversation.');
+      item.kind==='credential'?`${item.purpose}\nEncrypted on this host. Not shared with the model. Saving does not sign in to the service. Cloud sync is not connected.`:item.reason||'Review this change from your conversation.');
+    hook(card, item.kind==='credential'?'card-credential':'card-bot-change');
+    card.dataset.cardId=item.card_id; card.dataset.kind=item.kind;
     if(item.kind==='credential') {
       const username=privateField(card,'Username','username'),password=privateField(card,'Password','password');
-      button('Save securely',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{username:username.value,password:password.value})),card);
+      hook(button('Save securely',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{username:username.value,password:password.value})),card), 'approve-credential', 'Save secure input');
     } else {
+      const grant = item.grant === 'chief_delegation' ? 'delegation' : 'bot configuration';
+      card.append(el('p','',`Capability: ${grant}. Target: ${item.target_name||''}.`));
       for(const [name,value] of Object.entries(item.changes||{})) card.append(el('p','',`${name.replaceAll('_',' ')}: ${Array.isArray(value)?value.join(', '):value}`));
-      button('Apply change',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{approve:true})),card);
+      hook(button('Apply change',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{approve:true})),card), 'approve-bot-change', 'Apply bot change');
     }
-    button('Dismiss',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card);
+    hook(button('Dismiss',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card), item.kind==='credential'?'dismiss-credential':'dismiss-bot-change', 'Cancel this card');
+  }
+  const waiting=current()?.status==='waiting_for_user' || current()?.last_run?.status==='waiting_for_user';
+  if(waiting && $('input-cards').firstElementChild){
+    $('input-cards').scrollIntoView({block:'center', inline:'nearest'});
+    $('input-cards').firstElementChild.scrollIntoView({block:'center', inline:'nearest'});
   }
   const bot=current(), provider=state.workspace.providers?.find(p=>p.provider_id===bot?.provider_id);
   const error=state.data.runs?.[0]?.error||'';
@@ -259,8 +301,14 @@ function renderConversation() {
       if(item.ok===false)row.classList.add('error');
     }
     if(bot?.status==='working') timeline.append(el('p','thinking','Working…'));
-    for(const card of (data.cards||[]).filter(c=>c.status!=='pending')) timeline.append(el('div','receipt',
-      `${card.kind==='credential'?'Secure input saved on this host':card.kind==='connection'?'Provider connection':card.kind==='browser_access'?`Browser access · ${card.origin}`:`Change to ${card.target_name}`} · ${card.status}`));
+    if(bot?.status==='waiting_for_user') timeline.append(el('p','thinking','Waiting for approval in the card below.'));
+    for(const card of (data.cards||[]).filter(c=>c.status!=='pending' && !c.probe)) {
+      const title=card.kind==='credential'?'Secure input saved on this host':card.kind==='connection'?'Provider connection':card.kind==='browser_access'?`Browser access · ${card.origin}`:card.kind==='capability'?`Capability · ${card.capability}`:`Change to ${card.target_name}`;
+      const receipt=el('div','receipt',`${title} · ${card.status}`);
+      hook(receipt, 'card-receipt', title+' '+card.status);
+      receipt.dataset.cardId=card.card_id; receipt.dataset.status=card.status;
+      timeline.append(receipt);
+    }
     for(const event of data.run_events||[]) {
       if(event.event_type!=='tool_finished'||event.data?.name!=='create_bot')continue;
       try {const created=JSON.parse(event.data.result);if(!created.created||!state.bots.some(b=>b.bot_id===created.bot_id))continue;
@@ -270,11 +318,75 @@ function renderConversation() {
     }
     const run=data.runs?.[0];
     if(run){const details=el('details','run-disclosure');details.append(el('summary','',run.status==='done'?'Activity':`Run ${run.status}`));
+      hook(details, 'run-activity', 'Activity');
       if(run.error)details.append(el('p','',run.error));
-      for(const event of data.run_events||[]) {const n=el('p','',event.event_type.replaceAll('_',' ')+(event.data?.name?' · '+event.data.name:''));if(event.data?.result)n.append(el('pre','',event.data.result));details.append(n);}timeline.append(details);}
+      for(const event of data.run_events||[]) {const n=el('p','',event.event_type.replaceAll('_',' ')+(event.data?.name?' · '+event.data.name:''));if(event.data?.result)n.append(el('pre','',event.data.result));details.append(n);}timeline.append(details);
+      const finished=(data.run_events||[]).filter(event=>event.event_type==='tool_finished');
+      const diag=finished.find(event=>event.data?.name==='run_diagnostics');
+      const health=finished.find(event=>event.data?.name==='workspace_health');
+      const approvals=finished.find(event=>event.data?.name==='pending_approvals');
+      if(diag) renderToolCard(parseToolResult(diag.data.result), 'diagnostics');
+      if(health) renderToolCard(parseToolResult(health.data.result), 'health');
+      if(approvals) renderToolCard(parseToolResult(approvals.data.result), 'approvals');
+    }
     timeline.scrollTop=nearBottom?timeline.scrollHeight:oldScroll;
   }
   renderCards();renderContext();if(!$('inspector').hidden&&!$('browser-pane').hidden)refreshBrowser();
+}
+function parseToolResult(raw) {
+  try { return JSON.parse(raw); } catch { return null; }
+}
+function renderToolCard(result, kind) {
+  if(!result) return;
+  const card=el('section','input-card');
+  if(kind==='diagnostics') {
+    card.append(el('h2','','SynKraken diagnostics'));
+    hook(card, 'diagnostics-card', 'SynKraken diagnostics');
+    for(const check of result.checks||[]) {
+      const row=el('p',check.status==='skip'?'diag-skip':(check.ok?'diag-pass':'diag-fail'),
+        `${check.status==='skip'?'Skip':(check.ok?'Pass':'Fail')} · ${check.label} — ${check.detail||''}`);
+      hook(row, 'diag-'+check.id); card.append(row);
+    }
+    if((result.checks||[]).some(check=>!check.ok)) {
+      const rerun=button('Rerun failed checks',()=>{$('message').value='Rerun failed SynKraken diagnostics checks.';$('composer').requestSubmit();},card);
+      hook(rerun, 'rerun-failed-diagnostics', 'Rerun failed diagnostics checks');
+    }
+  } else if(kind==='approvals') {
+    hook(card, 'approvals-card', 'Pending approvals');
+    card.append(el('h2','','Pending approvals'));
+    const items=result.pending||[];
+    if(!items.length) card.append(el('p','','None.'));
+    for(const item of items) {
+      const row=el('section','input-card');
+      const kindId=item.kind==='browser_access'?'origin':item.kind;
+      hook(row, 'card-'+kindId, (item.kind||'approval')+' for '+(item.target_name||item.bot_name||'bot'));
+      row.dataset.cardId=item.card_id; row.dataset.kind=item.kind;
+      row.append(el('h2','',`${item.kind} · ${item.target_name||item.bot_name||'bot'}`));
+      row.append(el('p','',item.reason||'No reason'));
+      row.append(el('p','',`Capability: ${item.capability||'n/a'}. Target: ${item.target_name||item.bot_name||''}.`));
+      row.append(el('p','',`Created ${item.created_at||'unknown'}. Run ${item.run_status||'none'}. ${item.resumes_paused_run?'Resumes paused run':'No paused run'}.`));
+      if(item.kind==='credential'||item.kind==='connection') {
+        row.append(el('p','','Complete this card in its conversation. Inbox cannot submit secrets.'));
+      } else {
+        const approve=button('Approve',()=>submitCard(row,()=>api('/v1/chat-cards/'+item.card_id,{approve:true})),row);
+        hook(approve, 'approve-'+kindId, 'Approve '+kindId);
+        hook(button('Cancel',()=>submitCard(row,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),row), 'dismiss-'+kindId, 'Cancel '+kindId);
+      }
+      card.append(row);
+    }
+    if(items.length && (current()?.status==='waiting_for_user' || current()?.last_run?.status==='waiting_for_user')) {
+      card.scrollIntoView({block:'center', inline:'nearest'});
+    }
+  } else {
+    hook(card, 'health-card', 'Workspace health');
+    card.append(el('h2','','Workspace health'));
+    card.append(el('p','',`Bots: ${result.bot_count||0}`));
+    card.append(el('p','',`Pending approval cards: ${result.pending_cards||0}`));
+    for(const bot of result.bots||[]) card.append(el('p','',`${bot.name}: ${bot.model||'unassigned'}`));
+    const last=result.last_diagnostics;
+    card.append(el('p','',last?`Last diagnostics: ${last.ok?'pass':'fail'}`:'Last diagnostics: none'));
+  }
+  $('timeline').append(card);
 }
 function showDrawer(mode) {
   $('inspector').hidden=false;
@@ -329,10 +441,27 @@ async function refresh(force=false) {
   try {
     const [workspace,bots,rooms]=await Promise.all([api('/v1/workspace'),api('/v1/bots'),api('/v1/rooms')]);
     state.workspace=workspace;state.bots=bots.bots;state.rooms=rooms.rooms;
+    document.title='SynKraken';
+    document.body.dataset.workspaceReady=String(!!workspace.home_bot_id);
     if(state.selected?.kind==='bot'&&!current())state.selected=null;
-    if(!state.selected&&workspace.home_bot_id){state.selected={kind:'bot',id:workspace.home_bot_id};state.timelineKey='';state.cardKey='';state.revision++;}
+    if(!state.selected&&workspace.home_bot_id){
+      try {
+        const saved=JSON.parse(localStorage.getItem('synkraken.chat.selection'));
+        if(saved&&saved.kind==='bot'&&bots.bots.some(bot=>bot.bot_id===saved.id))state.selected=saved;
+        else if(saved&&saved.kind==='room'&&rooms.rooms.some(room=>room.name===saved.id))state.selected=saved;
+      } catch {}
+      if(!state.selected)state.selected={kind:'bot',id:workspace.home_bot_id};
+      state.timelineKey='';state.cardKey='';state.revision++;
+    }
+    persistSelection();
+    if(state.connected===false){
+      try { await api('/v1/workspace/bridge-log',{event:'api_connection_reestablished'}); } catch {}
+    } else if(state.connected===null){
+      try { await api('/v1/workspace/bridge-log',{event:'ui_bridge_ready'}); } catch {}
+    }
+    state.connected=true;
     $('connection').textContent='Local workspace'; roster();header();await loadConversation();
-  } catch(e){$('connection').textContent='Connection interrupted';notice(e.message);}
+  } catch(e){state.connected=false;$('connection').textContent='Connection interrupted';notice(e.message);}
   finally{state.loading=false;}
 }
 $('composer').onsubmit=async event=>{
@@ -359,5 +488,6 @@ $('details-toggle').onclick=()=>{if($('inspector').hidden)showDrawer('context');
 $('stop').onclick=async()=>{try{await api('/v1/bot-runs/'+current().last_run.run_id+'/cancel',{});notice('Stopping after the current operation finishes.');}catch(e){notice(e.message);}};
 try{const saved=JSON.parse(localStorage.getItem('synkraken.chat.selection'));if(saved&&['bot','room'].includes(saved.kind)&&typeof saved.id==='string')state.selected=saved;}catch{}
 document.querySelector('.brand-mark').replaceChildren(avatar());
+document.title='SynKraken';
 refresh();setInterval(()=>{if(!document.hidden)refresh();},3000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

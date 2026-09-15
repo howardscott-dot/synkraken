@@ -8,3 +8,4 @@
 .brand-mark{padding:0;background:none}.brand-mark>.avatar{width:34px;height:34px}.setting-up #timeline{flex:0 0 auto;margin-top:auto;padding-top:32px}.setting-up #input-cards{margin-bottom:auto}.setting-up .message{margin-left:0}.setting-up .input-card{max-width:600px}
 
 .formatted{white-space:normal}.formatted p{margin:0 0 10px}.formatted p:last-child{margin:0}.formatted h2,.formatted h3,.formatted h4{font-size:1.05em;margin:12px 0 8px}.formatted ul{padding-left:22px;margin:8px 0}.formatted li{margin:4px 0}.formatted code{background:#ffffff10;border-radius:4px;padding:2px 4px;font-size:.9em}.formatted pre{white-space:pre-wrap;overflow-wrap:anywhere}.table-scroll{overflow:auto}.formatted table{border-collapse:collapse;font-size:.9em}.formatted td,.formatted th{text-align:left;border-bottom:1px solid var(--line);padding:7px 10px}
+.diag-pass{color:#a5c4b1;font-size:12px;margin:6px 0}.diag-fail{color:#edb2ad;font-size:12px;margin:6px 0}
