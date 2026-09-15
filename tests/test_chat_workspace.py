@@ -45,6 +45,29 @@ def test_blank_bootstrap_inherits_model_without_persona_or_skills(fabric):
         assert fabric.bots.workspace.state()['home_bot_id'] == bot['bot_id']
 
 
+def test_workspace_health_and_diagnostics_are_chat_safe(fabric):
+    with provider_server(lambda *_: answer('OK')) as (endpoint, requests):
+        state = bootstrap(fabric, endpoint)
+        home = fabric.bots.get(state['home_bot_id'])
+        health = fabric.bots.workspace.host_tool(home, 'workspace_health', {}, 'run')
+        assert health['bot_count'] == 1
+        assert 'credential_ready' in health['provider_status'][0]
+        assert all('api_key' not in json.dumps(value) for value in health.values())
+        result = fabric.bots.workspace.host_tool(home, 'run_diagnostics', {'scope': 'all'}, 'run')
+        ids = {item['id'] for item in result['checks']}
+        assert ids >= {'provider', 'provider_roundtrip', 'roster', 'minimax_assignment', 'delegation',
+                       'delegation_execution', 'memory', 'browser_capability', 'browser_origin',
+                       'same_run_continuation', 'browser_failure', 'card_visibility'}
+        assert 'api_key' not in json.dumps(result)
+        assert result['ok'] is False
+        failed = {item['id'] for item in result['checks'] if not item['ok']}
+        assert 'roster' in failed
+        rerun = fabric.bots.workspace.host_tool(home, 'run_diagnostics', {'scope': 'failed'}, 'run')
+        assert {item['id'] for item in rerun['checks']} == failed
+        assert fabric.bots.workspace.state()['last_diagnostics']['failed'] == [
+            item['id'] for item in rerun['checks'] if not item['ok']]
+
+
 def test_chat_creates_real_blank_bot_and_preserves_default(fabric):
     def respond(body, count):
         return answer('', [call('create_bot', {'name': 'Quinn', 'job': '', 'instructions': ''})]) if count == 1 else answer('Quinn is ready.')

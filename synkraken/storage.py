@@ -1923,6 +1923,14 @@ class Storage:
             rows = self._conn.execute("SELECT data_json FROM bot_runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT ?", (bot_id, limit)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def waiting_bot_run(self, bot_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data_json FROM bot_runs WHERE bot_id = ? AND status = ? ORDER BY rowid DESC LIMIT 1",
+                (bot_id, "waiting_for_user"),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
     def add_bot_run_event(self, run_id: str, event_type: str, data: dict) -> None:
         with self._lock, self._conn:
             self._conn.execute("INSERT INTO bot_run_events (run_id,event_type,data_json,created_at) VALUES (?,?,?,?)", (run_id, event_type, json.dumps(data), utc_now_iso()))
@@ -1976,8 +1984,19 @@ class Storage:
 
     def chat_cards(self, bot_id: str) -> list[dict]:
         with self._lock:
-            rows = self._conn.execute("SELECT data_json FROM chat_cards WHERE bot_id=? ORDER BY rowid DESC LIMIT 50", (bot_id,)).fetchall()
-        return [json.loads(row[0]) for row in reversed(rows)]
+            rows = self._conn.execute(
+                "SELECT data_json FROM chat_cards WHERE bot_id=? ORDER BY rowid", (bot_id,)).fetchall()
+        cards = [json.loads(row[0]) for row in rows]
+        pending = [card for card in cards if card.get('status') == 'pending']
+        done = [card for card in cards if card.get('status') != 'pending'][-50:]
+        merged = pending + done
+        merged.sort(key=lambda card: (card.get('created_at') or '', card.get('card_id') or ''))
+        return merged
+
+    def all_chat_cards(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data_json FROM chat_cards ORDER BY rowid").fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def get_chat_card(self, card_id: str) -> dict | None:
         with self._lock:

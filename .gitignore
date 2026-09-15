@@ -17,6 +17,10 @@ cache/
 *.sqlite3
 *.log
 
+# Local Mac build/test artifacts (apps, DMGs, helper logs — not shipping)
+work/
+*.dmg
+
 # Local config
 config.local.json
 

@@ -4,27 +4,27 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SynKraken</title><link rel="stylesheet" href="/bots.css"><script src="/bots.js" defer></script>
 </head>
-<body>
-  <aside class="sidebar">
-    <div class="brand-row"><a href="/" class="brand" aria-label="SynKraken home"><span class="brand-mark">S</span>SynKraken</a><button id="new-chat" class="icon-button" aria-label="Create a bot through chat">+</button></div>
-    <label class="sr-only" for="search">Search conversations</label><input id="search" type="search" placeholder="Search" autocomplete="off">
-    <nav id="roster" aria-label="Bots"></nav>
-    <div id="channel-section" hidden><h2 class="section-label">Conversations</h2><nav id="channels" aria-label="Channels"></nav></div>
-    <footer><span class="status-dot"></span><span id="connection">Connecting…</span><span class="host-label">On this device</span></footer>
+<body data-testid="synkraken-app">
+  <aside class="sidebar" data-testid="sidebar" aria-label="Workspace sidebar">
+    <div class="brand-row"><a href="/" class="brand" aria-label="SynKraken home" data-testid="brand-home"><span class="brand-mark">S</span>SynKraken</a><button id="new-chat" class="icon-button" aria-label="Create a bot through chat" data-testid="new-chat">+</button></div>
+    <label class="sr-only" for="search">Search conversations</label><input id="search" type="search" placeholder="Search" autocomplete="off" data-testid="search-conversations" aria-label="Search conversations">
+    <nav id="roster" aria-label="Bots" data-testid="bot-roster"></nav>
+    <div id="channel-section" hidden><h2 class="section-label">Conversations</h2><nav id="channels" aria-label="Channels" data-testid="channel-list"></nav></div>
+    <footer><span class="status-dot"></span><span id="connection" data-testid="connection-status">Connecting…</span><span class="host-label">On this device</span></footer>
   </aside>
-  <main>
-    <header><span id="header-avatar" class="avatar small">S</span><h1 id="title">SynKraken</h1><span id="presence"></span><button id="details-toggle" class="icon-button" aria-label="Open bot workspace">»</button></header>
-    <div id="notice" role="status" hidden></div>
+  <main id="workspace" data-testid="synkraken-workspace" aria-label="SynKraken workspace">
+    <header><span id="header-avatar" class="avatar small">S</span><h1 id="title">SynKraken</h1><span id="presence" data-testid="run-status" aria-label="Run status"></span><button id="details-toggle" class="icon-button" aria-label="Open bot workspace" data-testid="open-workspace-drawer">»</button></header>
+    <div id="notice" role="status" hidden data-testid="notice"></div>
     <div class="content">
       <section class="conversation">
-        <div id="timeline" aria-label="Conversation" aria-live="polite"></div>
-        <div id="input-cards" aria-label="Input cards"></div>
-        <form id="composer"><label class="sr-only" for="message">Message</label><button id="capabilities-toggle" type="button" aria-label="Explore bot capabilities">+</button><textarea id="message" rows="1" maxlength="20000" placeholder="Message SynKraken…" required></textarea><button id="stop" type="button" hidden aria-label="Stop current run">■</button><button id="send" type="submit" aria-label="Send message">↑</button></form>
+        <div id="timeline" aria-label="Conversation" aria-live="polite" data-testid="conversation"></div>
+        <div id="input-cards" aria-label="Input cards" data-testid="input-cards"></div>
+        <form id="composer" data-testid="composer"><label class="sr-only" for="message">Message</label><button id="capabilities-toggle" type="button" aria-label="Explore bot capabilities" data-testid="capabilities-toggle">+</button><textarea id="message" rows="1" maxlength="20000" placeholder="Message SynKraken…" required data-testid="chat-input" aria-label="Chat message"></textarea><button id="stop" type="button" hidden aria-label="Stop current run" data-testid="stop-run">■</button><button id="send" type="submit" aria-label="Send message" data-testid="send-message">↑</button></form>
         <p id="composer-note"></p>
       </section>
-      <aside id="inspector" hidden>
-          <div class="drawer-tabs"><button id="show-context" type="button">Progress</button><button id="show-browser" type="button">Browser</button><button id="show-settings" type="button">Bot profile</button></div>
-          <section id="context-pane"><h2>Conversation context</h2><div id="context"></div><h2>Activity</h2><div id="activity"></div></section>
+      <aside id="inspector" hidden data-testid="workspace-drawer" aria-label="Bot workspace drawer">
+          <div class="drawer-tabs"><button id="show-context" type="button" data-testid="tab-progress" aria-label="Progress">Progress</button><button id="show-browser" type="button" data-testid="tab-browser" aria-label="Browser">Browser</button><button id="show-settings" type="button" data-testid="tab-profile" aria-label="Bot profile">Bot profile</button></div>
+          <section id="context-pane"><h2>Conversation context</h2><div id="context"></div><h2>Activity</h2><div id="activity" data-testid="activity" aria-label="Activity"></div></section>
           <section id="settings-pane" hidden>
             <div id="settings-avatar" class="avatar">S</div><div id="avatar-picker" aria-label="Choose bot appearance"></div>
             <form id="basic-settings"><label for="settings-name">Display name</label><input id="settings-name" maxlength="80" required>

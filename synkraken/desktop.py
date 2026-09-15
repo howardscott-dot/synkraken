@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import sys
 from threading import Thread
 
 from synkraken.api import FabricRequestHandler
@@ -38,6 +39,7 @@ def main() -> None:
         web = ThreadingHTTPServer(('127.0.0.1', 0), Web)
         signal.signal(signal.SIGTERM, lambda *_: exit_process())
         print(f'http://127.0.0.1:{web.server_port}/', flush=True)
+        print('synkraken: workspace api listening', file=sys.stderr, flush=True)
         try:
             web.serve_forever()
         finally:

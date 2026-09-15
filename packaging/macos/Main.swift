@@ -25,9 +25,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "SynKraken"
         window.minSize = NSSize(width: 640, height: 500)
+        window.identifier = NSUserInterfaceItemIdentifier("synkraken-main-window")
+        window.setAccessibilityLabel("SynKraken")
+        window.setAccessibilityIdentifier("synkraken-main-window")
+        window.setFrameAutosaveName("SynKrakenMainWindow")
+        window.isReleasedWhenClosed = false
         web = WKWebView(frame: .zero)
         web.navigationDelegate = self
         web.uiDelegate = self
+        web.setAccessibilityLabel("SynKraken workspace")
+        web.setAccessibilityIdentifier("synkraken-workspace")
         window.contentView = web
         web.loadHTMLString("<body style='background:#101415;color:#e6f7f3;font:20px -apple-system;text-align:center;padding-top:25vh'><h1>SynKraken</h1><p>A conversation is all it takes to begin.</p><p style='font-size:14px'>Opening your workspace…</p></body>", baseURL: nil)
         window.center()
@@ -69,6 +76,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         alert.messageText = "The workspace could not open"
         alert.informativeText = "Check the desktop.log file in Library/Application Support/SynKraken. Your saved conversations have been kept."
         alert.runModal()
+    }
+    func appendLog(_ line: String) {
+        let logDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("SynKraken")
+        try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        let log = logDirectory.appendingPathComponent("desktop.log")
+        if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
+        guard let handle = try? FileHandle(forWritingTo: log) else { return }
+        handle.seekToEndOfFile()
+        handle.write("synkraken: \(line)\n".data(using: .utf8)!)
+        try? handle.close()
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        window.title = "SynKraken"
+        if localURL != nil { appendLog("ui bridge ready") }
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        appendLog("ui bridge reestablished")
+        if let url = localURL { webView.load(URLRequest(url: url)) }
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }

@@ -200,6 +200,8 @@ class FabricRequestHandler(BaseHTTPRequestHandler):
                 result = workspace.start_oauth(payload.get("card_id", ""))
             elif method == "POST" and path == "/v1/workspace/oauth/finish":
                 result = workspace.finish_oauth(payload.get("flow_id", ""), payload.get("code", ""))
+            elif method == "POST" and path == "/v1/workspace/bridge-log":
+                result = workspace.note_bridge(payload.get("event", ""))
             elif method == "POST" and re.fullmatch(r"/v1/chat-cards/[^/]+", path):
                 result = workspace.resolve_card(path.rsplit("/", 1)[-1], payload)
             else:
