@@ -166,7 +166,7 @@ class BotEngine:
         if name in HOST_TOOLS:
             return self.service.workspace.host_tool(bot, name, args, run_id)
         if name.startswith("browser_"):
-            return self.service.browsers.act(bot["bot_id"], name.removeprefix("browser_"), args, budget)
+            return self.service.browsers.act(bot["bot_id"], name.removeprefix("browser_"), args, budget, run_id=run_id)
         if name == "memory_read":
             return {"memories": self.storage.read_bot_memory(bot["bot_id"])}
         if name == "memory_write":
@@ -212,23 +212,27 @@ class BotEngine:
                 "error": result["result"]["deliveries"][-1].get("error")}
 
     def run(self, bot: dict, body: str, history: list[dict], task_id: str, run_id: str,
-            budget: RunBudget, lineage: tuple[str, ...]) -> dict:
+            budget: RunBudget, lineage: tuple[str, ...], *, resume: bool = False,
+            message_id: str | None = None) -> dict:
         started = time.monotonic()
         message = FabricMessage(
             source=f"bot:{lineage[-1]}" if lineage else "operator", target=f"bot:{bot['bot_id']}",
             body=body, conversation_id=bot["conversation_id"],
             metadata={"bot_id": bot["bot_id"], "task_id": task_id, "run_id": run_id, "role": "user",
                       "provider_id": bot["provider_id"], "model": bot["model"]},
+            **({"message_id": message_id} if resume and message_id else {}),
         ).normalized()
-        self.storage.save_message(message)
-        self.storage.update_task(task_id, {"source_message_id": message.message_id}, "system", utc_now_iso())
+        if not (resume and message_id):
+            self.storage.save_message(message)
+            self.storage.update_task(task_id, {"source_message_id": message.message_id}, "system", utc_now_iso())
         model_messages = [{"role": "system", "content": RUNTIME_RULES +
                            "\nCurrent host date and time: " + datetime.now().astimezone().isoformat() +
                            "\nEnabled tools: " + ", ".join(sorted(set(bot['tools']) | CORE_TOOLS))}]
         supplied_context = "\n".join(value for value in (bot['job'], bot['instructions'], bot['notes']) if value)
         if supplied_context:
             model_messages.append({"role": "system", "content": supplied_context})
-        completed_cards = [{key: card.get(key) for key in ('card_id', 'kind', 'status', 'provider_id', 'target_id')}
+        completed_cards = [{key: card.get(key) for key in
+                            ('card_id', 'kind', 'status', 'provider_id', 'target_id', 'origin', 'url', 'capability')}
                            for card in self.storage.chat_cards(bot['bot_id']) if card['status'] != 'pending'][-10:]
         if completed_cards:
             model_messages.append({"role": "system", "content": "Host input-card receipts: " + json.dumps(completed_cards)})
@@ -262,6 +266,7 @@ class BotEngine:
             r'\b(?:workspace_bots|saved bot names|currently saved|current bot names|bot roster|roster)\b',
             body, re.I))
         retry_tool = None
+        skip_loop = False
         output, error, usage = "", None, []
         visited_pages = []
         authoritative_roster = None
@@ -269,6 +274,41 @@ class BotEngine:
         try:
             client = self.service.providers.client(bot["provider_id"])
             schemas = [item for item in TOOLS if item["name"] in set(bot["tools"]) | CORE_TOOLS]
+            if resume:
+                model_messages.insert(-1, {"role": "system", "content":
+                    "The operator approved the pending access card. Continue the original request with the enabled tools. "
+                    "Do not invent live or date-sensitive facts if a required page cannot be read."})
+                related = [card for card in self.storage.chat_cards(bot['bot_id'])
+                           if card.get('run_id') == run_id and card['status'] in {'applied', 'approved'}]
+                last = related[-1] if related else None
+                if (last and last.get('kind') == 'capability' and last.get('capability') == 'browser'
+                        and 'browser_open' in bot['tools']):
+                    retry_tool = 'browser_open'
+                elif (last and last.get('kind') == 'browser_access' and last.get('url')
+                        and 'browser_open' in bot['tools']):
+                    budget.consume('tool')
+                    call_id = 'resume-browser-open'
+                    self.emit(run_id, 'tool_started', {'name': 'browser_open', 'call_id': call_id})
+                    try:
+                        opened = self.service.browsers.act(bot['bot_id'], 'open', {'url': last['url']},
+                                                           budget, run_id=run_id)
+                    except (ValueError, OSError, KeyError, TypeError) as exc:
+                        opened = {'error': str(exc)[:500]}
+                    encoded = json.dumps(opened, ensure_ascii=False)[:24000]
+                    self.emit(run_id, 'tool_finished', {'name': 'browser_open', 'call_id': call_id,
+                                                         'result': encoded})
+                    if opened.get('status') == 'waiting_for_user':
+                        waiting_for_input = True
+                        output = "I need the access shown in the card below to continue. Approve it there and I’ll pick up your request."
+                        skip_loop = True
+                    elif opened.get('error'):
+                        output = "I could not open the approved page. " + opened['error']
+                        skip_loop = True
+                    else:
+                        if opened.get('open') and opened.get('url') and opened['url'] not in visited_pages:
+                            visited_pages.append(opened['url'])
+                        model_messages.append({"role": "system", "content":
+                            "Browser result after origin approval: " + encoded})
             if roster_request:
                 # Workspace state is authoritative for explicit roster reads. Do this
                 # at the engine boundary so a model cannot answer from stale chat
@@ -287,7 +327,8 @@ class BotEngine:
                                         if isinstance(item, dict) and isinstance(item.get("name"), str)]
                 precomputed_output = "Currently saved bot names:\n" + "\n".join(
                     f"- {name}" for name in authoritative_roster)
-            for step in range(16):
+            if not skip_loop:
+              for step in range(16):
                 if precomputed_output is not None:
                     output = precomputed_output
                     break
@@ -419,7 +460,7 @@ class BotEngine:
                 if waiting_for_input:
                     output = "I need the access shown in the card below to continue. Approve it there and I’ll pick up your request."
                     break
-            else:
+              else:
                 raise ProviderError("Agent reached its 16-step limit")
         except (ValueError, OSError, TypeError, KeyError) as exc:
             error = str(exc)[:500]
