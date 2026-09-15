@@ -63,7 +63,7 @@ class BotBrowsers:
         with self.lock:
             return dict(self.snapshots.get(bot_id, {'open': False}))
 
-    def act(self, bot_id: str, action: str, args: dict, budget=None) -> dict:
+    def act(self, bot_id: str, action: str, args: dict, budget=None, run_id: str = '') -> dict:
         self.bots.get(bot_id)
         if action not in {'open', 'read', 'click', 'type', 'point', 'scroll'}:
             raise ValueError('Unknown browser action')
@@ -76,8 +76,11 @@ class BotBrowsers:
                 pending = next((card for card in self.bots.storage.chat_cards(bot_id)
                     if card['kind'] == 'browser_access' and card['status'] == 'pending' and card['origin'] == origin), None)
                 if pending:
+                    if run_id and pending.get('run_id') != run_id:
+                        pending['run_id'] = run_id
+                        self.bots.storage.save_chat_card(pending)
                     return {'status': 'waiting_for_user', 'card_id': pending['card_id']}
-                return self.bots.workspace.card(bot_id, 'browser_access', origin=origin, url=url)
+                return self.bots.workspace.card(bot_id, 'browser_access', origin=origin, url=url, run_id=run_id)
         return self.worker.submit(self._act, bot_id, action, args, budget).result(timeout=45)
 
     def _ensure(self, bot_id: str):

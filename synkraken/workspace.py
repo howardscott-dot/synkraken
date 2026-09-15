@@ -260,4 +260,13 @@ class ChatWorkspace:
             else:
                 raise ValueError('Unknown card type')
             self.storage.save_chat_card(card)
-            return {'card': card}
+            result = {'card': card}
+        if (payload.get('approve') is True and card['kind'] in {'capability', 'browser_access'}
+                and card.get('run_id')):
+            waiting = self.bots.storage.get_bot_run(card['run_id'])
+            if (waiting and waiting.get('status') == 'waiting_for_user'
+                    and waiting.get('bot_id') == card['bot_id']):
+                outcome = self.bots.resume(card['run_id'])
+                result['run'] = self.bots.storage.get_bot_run(card['run_id'])
+                result['status'] = outcome['status']
+        return result

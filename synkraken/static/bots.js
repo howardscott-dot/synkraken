@@ -201,21 +201,16 @@ function renderCards() {
     if(item.kind==='capability') {
       const card=cardShell('Enable '+item.capability+' for '+item.target_name,item.reason);
       card.append(el('p','','This enables the requested tools. Websites still require their own access approval.'));
-      const original=state.data.runs?.find(r=>r.run_id===item.run_id)?.body||state.data.runs?.[0]?.body;
       const apply=button('Enable and continue',()=>submitCard(card,async()=>{
         await api('/v1/chat-cards/'+item.card_id,{approve:true});
-        if(original)await api('/v1/bots/'+item.bot_id+'/runs',{body:'Continue this request using the newly enabled capability: '+original,request_key:'continue-'+item.card_id});
       }),card);apply.dataset.waitIdle='true';apply.disabled=current()?.status==='working';
       button('Not now',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card);continue;
     }
     if(item.kind==='browser_access') {
       const card=cardShell('Browser access',`Allow this bot to navigate and interact with ${item.origin}? Other sites remain blocked until allowed.`);
-      const original=state.data.runs?.[0]?.body;
       const allow=button('Allow site and continue',()=>submitCard(card,async()=>{
         await api('/v1/chat-cards/'+item.card_id,{approve:true});
-        await api('/v1/bots/'+item.bot_id+'/browser',{action:'open',url:item.url});
         showDrawer('browser');
-        if(original)await api('/v1/bots/'+item.bot_id+'/runs',{body:'Continue this request; the requested website is now available in your browser: '+original,request_key:'continue-'+item.card_id});
       }),card);allow.dataset.waitIdle='true';allow.disabled=current()?.status==='working';
       button('Dismiss',()=>submitCard(card,()=>api('/v1/chat-cards/'+item.card_id,{cancel:true})),card);continue;
     }
